@@ -42,12 +42,15 @@ struct DiskFolder: Identifiable, Equatable {
     let name: String
     let symbol: String
     var bytes: Int64?
+    /// Some files could not be read (permissions), so the real size is at least `bytes`.
+    var partial = false
     var id: String { path }
 }
 
 /// Measures a short list of folders where developer tools and AI agents pile up data. Runs in the background
 /// only while the storage panel is opened (at most once every 10 minutes) and never touches the protected
-/// folders (Documents, Desktop, Downloads, Trash), so macOS shows no permission prompts.
+/// folders (Documents, Desktop, Downloads, Trash), so macOS shows no permission prompts. It also measures
+/// /Users/Shared and the other user accounts' home folders (what their permissions let this user read).
 final class DiskService: ObservableObject {
     static let shared = DiskService()
     @Published private(set) var folders: [DiskFolder] = []
@@ -81,6 +84,13 @@ final class DiskService: ObservableObject {
             seen.insert(p); out.append(DiskFolder(path: p, name: name, symbol: symbol, bytes: nil))
         }
         for (p, n, s) in builtin { add(p, n, s) }
+        add("/Users/Shared", "Compartido (/Users/Shared)", "person.2.fill")
+        // Other macOS user accounts on this Mac (e.g. a work session): their folders count against the same disk.
+        let me = (h as NSString).lastPathComponent
+        let others = (try? FileManager.default.contentsOfDirectory(atPath: "/Users")) ?? []
+        for u in others.sorted() where u != "Shared" && u != me && !u.hasPrefix(".") && u != "Guest" {
+            add("/Users/" + u, "Sesión: " + u, "person.fill")
+        }
         for e in extra {
             let p = (e.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath
             if !p.isEmpty { add(p, (p as NSString).lastPathComponent, "folder.badge.gearshape") }
@@ -88,17 +98,18 @@ final class DiskService: ObservableObject {
         return out
     }
 
-    /// Allocated size on disk of everything under `path`.
-    static func size(of path: String) -> Int64 {
+    /// Allocated size on disk of everything under `path`, and whether some of it could not be read.
+    static func size(of path: String) -> (bytes: Int64, partial: Bool) {
         let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .isDirectoryKey]
+        var partial = false
         guard let e = FileManager.default.enumerator(at: URL(fileURLWithPath: path), includingPropertiesForKeys: Array(keys),
-                                                     options: [], errorHandler: { _, _ in true }) else { return 0 }
+                                                     options: [], errorHandler: { _, _ in partial = true; return true }) else { return (0, true) }
         var total: Int64 = 0
         for case let u as URL in e {
             guard let v = try? u.resourceValues(forKeys: keys), v.isDirectory != true else { continue }
             total += Int64(v.totalFileAllocatedSize ?? 0)
         }
-        return total
+        return (total, partial)
     }
 
     /// Call on the main thread. Publishes the folder list at once (so the panel has its final height) and
@@ -121,9 +132,11 @@ final class DiskService: ObservableObject {
             for p in paths {
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    let n = Self.size(of: p)
+                    let r = Self.size(of: p)
                     DispatchQueue.main.async {
-                        if gen == self.generation, let i = self.folders.firstIndex(where: { $0.path == p }) { self.folders[i].bytes = n }
+                        if gen == self.generation, let i = self.folders.firstIndex(where: { $0.path == p }) {
+                            self.folders[i].bytes = r.bytes; self.folders[i].partial = r.partial
+                        }
                     }
                     group.leave()
                 }
@@ -222,7 +235,7 @@ struct DiskPane: View {
                     HStack {
                         Text(f.name).font(.system(size: 12.5)).lineLimit(1)
                         Spacer(minLength: 6)
-                        Text(f.bytes.map(diskBytes) ?? "…").font(.system(size: 11.5)).monospacedDigit().flyoutSecondary()
+                        Text(f.bytes.map { (f.partial ? "≥ " : "") + diskBytes($0) } ?? "…").font(.system(size: 11.5)).monospacedDigit().flyoutSecondary()
                     }
                     GeometryReader { g in
                         Capsule().fill(Color.primary.opacity(0.1))
@@ -236,6 +249,6 @@ struct DiskPane: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(f.path)
+        .help(f.partial ? f.path + " — hay archivos sin permiso de lectura; el tamaño real es mayor" : f.path)
     }
 }
