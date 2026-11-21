@@ -311,7 +311,7 @@ struct GeneralPane: View {
             Card {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Iconos de macOS que ya muestra Cala").font(.system(size: 13, weight: .medium))
-                    Text("Oculta, en la parte derecha de la barra de macOS, los iconos que Cala ya tiene. Los menús de las apps (Archivo, Edición…) no se tocan. Los iconos de otras apps (Claude, Slack…) los controla cada app.")
+                    Text("Oculta, en la parte derecha de la barra de macOS, los iconos que Cala ya tiene. Los menús de las apps (Archivo, Edición…) no se tocan. macOS no permite ocultar el reloj, y los iconos de otras apps (Claude, Slack…) los controla cada app.")
                         .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(16).frame(maxWidth: .infinity, alignment: .leading)

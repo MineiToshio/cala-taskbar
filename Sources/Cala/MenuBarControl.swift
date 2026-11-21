@@ -72,35 +72,38 @@ enum MenuBarControl {
 
 
 /// Hides individual macOS icons on the right of the menu bar (the ones Cala already shows in its own tray).
-/// This is what System Settings → Menu Bar / Control Center → "Show in Menu Bar" does: it writes
-/// `NSStatusItem VisibleCC <name>` and ControlCenter is restarted so the change applies. Icons that belong to
-/// other apps (Claude, Slack…) are controlled by those apps and cannot be hidden from here.
+///
+/// This is what System Settings → Control Center → "Show in Menu Bar" does. The per-host key of each module in
+/// `com.apple.controlcenter` holds 18 (shown) or 24 (not shown); absent means the system default. ControlCenter is
+/// restarted so it re-reads them. (The `NSStatusItem VisibleCC …` keys are only ControlCenter's own echo of that
+/// state: writing them has no effect because ControlCenter rewrites them when it quits.)
+///
+/// Verified on macOS 26.6: Wi-Fi, Battery and Fast User Switching each lose one menu bar item. The clock is always
+/// shown (Apple's documentation), and the Control Center and Spotlight icons did not respond, so they are not offered.
+/// Icons that belong to other apps (Claude, Slack…) are controlled by those apps.
 enum MenuBarIcons {
     struct Icon: Identifiable {
         let id: String
         let title: String
         let note: String
-        let domain: String
         let key: String
     }
 
     static let all: [Icon] = [
-        Icon(id: "wifi", title: "Wi-Fi", note: "Cala ya muestra el Wi-Fi.", domain: "com.apple.controlcenter", key: "NSStatusItem VisibleCC WiFi"),
-        Icon(id: "battery", title: "Batería", note: "Cala ya muestra la batería.", domain: "com.apple.controlcenter", key: "NSStatusItem VisibleCC Battery"),
-        Icon(id: "clock", title: "Reloj", note: "Cala ya muestra la hora y el calendario.", domain: "com.apple.controlcenter", key: "NSStatusItem VisibleCC Clock"),
-        Icon(id: "controlcenter", title: "Centro de control", note: "Los controles principales están en la bandeja de Cala.", domain: "com.apple.controlcenter", key: "NSStatusItem VisibleCC BentoBox-0"),
-        Icon(id: "user", title: "Cambio rápido de usuario", note: "Cala ya permite cambiar de usuario.", domain: "com.apple.controlcenter", key: "NSStatusItem VisibleCC UserSwitcher"),
-        Icon(id: "spotlight", title: "Spotlight", note: "Sigue disponible con Cmd + Espacio.", domain: "com.apple.Spotlight", key: "NSStatusItem VisibleCC Item-0"),
+        Icon(id: "wifi", title: "Wi-Fi", note: "Cala ya muestra el Wi-Fi.", key: "WiFi"),
+        Icon(id: "battery", title: "Batería", note: "Cala ya muestra la batería.", key: "Battery"),
+        Icon(id: "user", title: "Cambio rápido de usuario", note: "Cala ya permite cambiar de usuario.", key: "UserSwitcher"),
     ]
+    private static let domain = "com.apple.controlcenter" as CFString
+    private static let hiddenValue = 24
 
-    private static func current(_ icon: Icon) -> Bool? {
-        CFPreferencesCopyAppValue(icon.key as CFString, icon.domain as CFString) as? Bool
-            ?? (CFPreferencesCopyAppValue(icon.key as CFString, icon.domain as CFString) as? Int).map { $0 != 0 }
+    private static func current(_ icon: Icon) -> Int? {
+        CFPreferencesCopyValue(icon.key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? Int
     }
 
-    private static func write(_ icon: Icon, _ value: Bool?) {
-        CFPreferencesSetValue(icon.key as CFString, value.map { $0 as CFBoolean }, icon.domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
-        CFPreferencesSynchronize(icon.domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+    private static func write(_ icon: Icon, _ value: Int?) {
+        CFPreferencesSetValue(icon.key as CFString, value.map { $0 as CFNumber }, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
     }
 
     private static func restartControlCenter() {
@@ -111,34 +114,34 @@ enum MenuBarIcons {
         p.waitUntilExit()
     }
 
-    /// Makes the menu bar match the user's choice, remembering each icon's original value so it can be restored.
-    /// "1" / "0" / "nil" (the key did not exist, i.e. the system default).
+    private static func saved(_ s: String) -> Int? { s == "nil" ? nil : Int(s) }
+
+    /// Makes the menu bar match the user's choice, remembering each icon's original value ("nil" = key absent).
     static func apply(_ store: ConfigStore) {
         var changed = false
-        var backup = store.config.menuBarIconBackup
-        let hidden = Set(store.config.menuBarHiddenIcons)
+        var backup = store.config.menuBarIconBackupV2
+        let known = Set(all.map(\.id))
+        let hidden = Set(store.config.menuBarHiddenIcons).intersection(known)
         for icon in all {
             if hidden.contains(icon.id) {
-                if backup[icon.id] == nil { backup[icon.id] = current(icon).map { $0 ? "1" : "0" } ?? "nil" }
-                if current(icon) != false { write(icon, false); changed = true }
-            } else if let saved = backup[icon.id] {
-                write(icon, saved == "nil" ? nil : saved == "1")
+                if backup[icon.id] == nil { backup[icon.id] = current(icon).map(String.init) ?? "nil" }
+                if current(icon) != hiddenValue { write(icon, hiddenValue); changed = true }
+            } else if let original = backup[icon.id] {
+                write(icon, saved(original))
                 backup[icon.id] = nil
                 changed = true
             }
         }
-        if backup != store.config.menuBarIconBackup { store.config.menuBarIconBackup = backup }
+        if backup != store.config.menuBarIconBackupV2 { store.config.menuBarIconBackupV2 = backup }
         if changed { restartControlCenter(); log("menubar: icons hidden=\(hidden.sorted())") }
     }
 
     /// On quit: show everything again, if the user asked for that.
     static func onQuit(_ store: ConfigStore) {
-        guard store.config.restoreMenuBarOnQuit, !store.config.menuBarIconBackup.isEmpty else { return }
+        guard store.config.restoreMenuBarOnQuit, !store.config.menuBarIconBackupV2.isEmpty else { return }
         var restored = false
         for icon in all {
-            if let saved = store.config.menuBarIconBackup[icon.id] {
-                write(icon, saved == "nil" ? nil : saved == "1"); restored = true
-            }
+            if let original = store.config.menuBarIconBackupV2[icon.id] { write(icon, saved(original)); restored = true }
         }
         if restored { restartControlCenter() }
     }

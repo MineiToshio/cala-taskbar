@@ -34,7 +34,7 @@ struct Config: Codable, Equatable {
     var restoreMenuBarOnQuit = true
     /// Ids of macOS menu bar icons (see MenuBarIcons) to hide, and the original value of each so it can be restored.
     var menuBarHiddenIcons: [String] = []
-    var menuBarIconBackup: [String: String] = [:]
+    var menuBarIconBackupV2: [String: String] = [:]
     var menuBarBackupSaved = false
     var menuBarBackupOption: Int?
     var menuBarBackupHide: Bool?
@@ -73,7 +73,7 @@ struct Config: Codable, Equatable {
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
-        case menuBarHiddenIcons, menuBarIconBackup, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
+        case menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
     }
@@ -107,7 +107,7 @@ extension Config {
         dockBackupSaved = field(Bool.self, .dockBackupSaved) ?? dockBackupSaved
         hideMenuBar = field(Bool.self, .hideMenuBar) ?? hideMenuBar
         menuBarHiddenIcons = field([String].self, .menuBarHiddenIcons) ?? menuBarHiddenIcons
-        menuBarIconBackup = field([String: String].self, .menuBarIconBackup) ?? menuBarIconBackup
+        menuBarIconBackupV2 = field([String: String].self, .menuBarIconBackupV2) ?? menuBarIconBackupV2
         restoreMenuBarOnQuit = field(Bool.self, .restoreMenuBarOnQuit) ?? restoreMenuBarOnQuit
         menuBarBackupSaved = field(Bool.self, .menuBarBackupSaved) ?? menuBarBackupSaved
         menuBarBackupOption = field(Int.self, .menuBarBackupOption)
