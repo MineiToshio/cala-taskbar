@@ -726,42 +726,45 @@ struct TrayPane: View {
             store.config.trayLayout = layout
         })
     }
-    private func move(_ id: String, _ delta: Int) {
-        var order = store.config.orderedTrayIDs
-        guard let i = order.firstIndex(of: id), order.indices.contains(i + delta) else { return }
-        order.swapAt(i, i + delta)
-        store.config.trayOrder = order
-    }
-
     var body: some View {
         let ids = store.config.orderedTrayIDs
         VStack(alignment: .leading, spacing: 20) {
             Card {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Elige dónde va cada cosa").font(.system(size: 13, weight: .semibold))
-                    Text("**En la barra**: siempre visible. **En ^**: aparece al pulsar la flecha ^ al inicio de la bandeja. **Oculto**: no se muestra. El orden de arriba hacia abajo es el de izquierda a derecha en la barra.")
+                    Text("**En la barra**: siempre visible. **En ^**: aparece al pulsar la flecha ^ al inicio de la bandeja. **Oculto**: no se muestra. De arriba hacia abajo es el orden de izquierda a derecha en la barra.")
                         .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             }
-            Card {
-                ForEach(Array(ids.enumerated()), id: \.element) { i, id in
-                    if i > 0 { RowDivider() }
-                    if let info = TrayItems.info(id) {
-                        HStack(spacing: 12) {
-                            Image(systemName: info.symbol).font(.system(size: 14)).frame(width: 24).foregroundStyle(.secondary)
-                            Text(info.title).font(.system(size: 13, weight: .medium))
-                            Spacer()
-                            Button { move(id, -1) } label: { Image(systemName: "chevron.up").frame(width: 20, height: 20) }
-                                .buttonStyle(.plain).disabled(i == 0)
-                            Button { move(id, 1) } label: { Image(systemName: "chevron.down").frame(width: 20, height: 20) }
-                                .buttonStyle(.plain).disabled(i == ids.count - 1)
-                            Picker("", selection: place(id)) {
-                                ForEach(TrayPlace.allCases) { Text($0.title).tag($0) }
-                            }.pickerStyle(.segmented).labelsHidden().frame(width: 250)
+            VStack(alignment: .leading, spacing: 8) {
+                List {
+                    ForEach(ids, id: \.self) { id in
+                        if let info = TrayItems.info(id) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "line.3.horizontal").font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary).frame(width: 14)
+                                Image(systemName: info.symbol).font(.system(size: 14)).frame(width: 22).foregroundStyle(.secondary)
+                                Text(info.title).font(.system(size: 13, weight: .medium))
+                                Spacer()
+                                Picker("", selection: place(id)) {
+                                    ForEach(TrayPlace.allCases) { Text($0.title).tag($0) }
+                                }.pickerStyle(.segmented).labelsHidden().frame(width: 250)
+                            }
+                            .frame(height: 46)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                         }
-                        .padding(.horizontal, 16).padding(.vertical, 10)
+                    }
+                    .onMove { from, to in
+                        var order = ids
+                        order.move(fromOffsets: from, toOffset: to)
+                        store.config.trayOrder = order
                     }
                 }
+                .listStyle(.plain).scrollContentBackground(.hidden).scrollDisabled(true)
+                .frame(height: CGFloat(ids.count) * 46 + 12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                Text("Arrastra una fila para cambiar el orden.").font(.system(size: 11)).foregroundStyle(.secondary).padding(.leading, 4)
             }
             Button("Restablecer valores") { store.config.trayLayout = [:]; store.config.trayOrder = [] }
         }
