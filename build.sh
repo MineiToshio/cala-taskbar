@@ -21,6 +21,7 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSScreenCaptureUsageDescription</key><string>Mostrar previews de ventanas</string>
+<key>NSAppleEventsUsageDescription</key><string>Contar y vaciar la Papelera a través de Finder.</string>
 <key>NSCalendarsFullAccessUsageDescription</key><string>Show upcoming events from the calendars you choose in the taskbar. Events stay on this Mac.</string>
 <key>NSCalendarsUsageDescription</key><string>Show upcoming events from your selected calendars in the taskbar.</string>
 <key>NSBluetoothAlwaysUsageDescription</key><string>Mostrar y conectar dispositivos Bluetooth</string>

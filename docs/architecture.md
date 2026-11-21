@@ -13,6 +13,8 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `CalendarText.swift` | Spanish/English string chooser shared by calendar and permission messages |
 | `UsagePace.swift` | Burn-rate projection per quota window and the low-quota / will-run-out notifications |
 | `SystemMonitor.swift` | CPU / memory / pressure sampling (`host_statistics`, `sysctl`), per-app load via `libproc`, the "why is it slow" verdict and the system panel |
+| `TrayLayout.swift` | Tray item catalog, defaults, and the bar / ^ / hidden placement and ordering stored in `Config` |
+| `Overflow.swift` | "^" panel, Downloads panel, Trash (through Finder AppleScript) and the `flyoutRefit` notification |
 | `Cleanup.swift` | "Limpiar espacio" window: git worktree discovery and safety checks (`/usr/bin/git`, `lsof`), cache emptying, confirmation and removal |
 | `Disk.swift` | Free-space reading (`DiskInfo`), background folder sizing (`DiskService`), tray storage panel |
 | `Usage.swift` | Claude/Codex usage detection, read-only fetches, local events, refresh policy and cache |

@@ -232,31 +232,52 @@ struct TrayView: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            if store.config.moreTrayIDs.contains(where: { model.trayAvailable($0) }) { cell("chevron.up", id: trayMore, text: nil) }
+            ForEach(store.config.barTrayIDs, id: \.self) { id in item(id) }
+        }
+    }
+
+    @ViewBuilder func item(_ id: String) -> some View {
+        switch id {
+        case trayKB:
             if !model.kbCode.isEmpty { cell(nil, id: trayKB, text: model.kbCode) }
+        case trayWifi:
             cell(wifiIcon, id: trayWifi, text: nil, custom: (model.wifiOn && model.wifiConnected) ? AnyView(Image(systemName: "wifi", variableValue: model.wifiSignal).font(.system(size: 14))) : nil)
+        case trayBT:
             cell(nil, id: trayBT, text: nil, custom: AnyView(BluetoothShape().stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)).frame(width: 10, height: 15).opacity(model.btOn ? 1 : 0.4)))
+        case trayBright:
             if model.hasBright { cell("sun.max.fill", id: trayBright, text: nil) }
+        case trayVol:
             cell(volIcon, id: trayVol, text: nil)
+        case trayUsage:
             UsageTrayView(model: model)
-            if store.config.monitorEnabled {
-                cell(nil, id: traySystem, text: nil, custom: AnyView(VStack(spacing: 3) {
-                    Image(systemName: "cpu").font(.system(size: 14))
-                    Text("\(Int(monitor.cpu.rounded()))%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
-                }.foregroundStyle(monitorTint(monitor))))
-            }
-            if store.config.diskEnabled, let d = model.disk {
+        case traySystem:
+            cell(nil, id: traySystem, text: nil, custom: AnyView(VStack(spacing: 3) {
+                Image(systemName: "cpu").font(.system(size: 14))
+                Text("\(Int(monitor.cpu.rounded()))%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
+            }.foregroundStyle(monitorTint(monitor))))
+        case trayDisk:
+            if let d = model.disk {
                 cell(nil, id: trayDisk, text: nil, custom: AnyView(VStack(spacing: 3) {
                     Image(systemName: "internaldrive").font(.system(size: 14))
                     Text("\(d.freePercent)%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
                 }.foregroundStyle(diskTint(d))))
             }
+        case trayBatt:
             if let b = model.batt {
                 cell(nil, id: trayBatt, text: nil, custom: AnyView(VStack(spacing: 3) {
                     Image(systemName: battIcon(b)).font(.system(size: 14))
                     Text("\(b.pct)%").font(.system(size: 9.5, weight: .medium))
                 }))
             }
+        case trayUser:
             cell(model.userPhoto == nil ? "person.crop.circle" : nil, id: trayUser, text: nil, custom: model.userPhoto.map { AnyView(Image(nsImage: $0).resizable().scaledToFill().frame(width: 20, height: 20).clipShape(Circle())) })
+        case trayDownloads:
+            cell("arrow.down.circle", id: trayDownloads, text: nil)
+        case trayTrash:
+            cell("trash", id: trayTrash, text: nil)
+        default:
+            EmptyView()
         }
     }
 

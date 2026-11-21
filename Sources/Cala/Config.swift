@@ -42,6 +42,10 @@ struct Config: Codable, Equatable {
     var usageAlertsEnabled = true
     /// Remaining percentage at or below which the low-quota notification fires (10, 15, 20 or 30).
     var usageAlertThreshold = 20
+    /// Tray item id -> "bar" | "more" | "hidden". Missing ids use their default (see TrayItems).
+    var trayLayout: [String: String] = [:]
+    /// Left-to-right order of the tray items.
+    var trayOrder: [String] = []
     var diskEnabled = true
     /// CPU / memory monitor in the tray with a "why is my Mac slow" panel.
     var monitorEnabled = true
@@ -57,7 +61,7 @@ struct Config: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case pinned, autoHide, iconSize, previewDelay, previewWidth, alignments, order, theme, barOpacity
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
-        case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled
+        case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
@@ -103,6 +107,8 @@ extension Config {
         if ![10, 15, 20, 30].contains(usageAlertThreshold) { usageAlertThreshold = 20; invalid = true }
         diskEnabled = field(Bool.self, .diskEnabled) ?? diskEnabled
         monitorEnabled = field(Bool.self, .monitorEnabled) ?? monitorEnabled
+        trayLayout = field([String: String].self, .trayLayout) ?? trayLayout
+        trayOrder = field([String].self, .trayOrder) ?? trayOrder
         diskFolders = field([String].self, .diskFolders) ?? diskFolders
         calendarEnabled = field(Bool.self, .calendarEnabled) ?? calendarEnabled
         calendarJoinEnabled = field(Bool.self, .calendarJoinEnabled) ?? calendarJoinEnabled

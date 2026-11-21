@@ -9,8 +9,9 @@ final class SettingsWindowController {
     static let shared = SettingsWindowController()
     private var window: NSWindow?
 
-    func show() {
+    func show(pane: SettingsPane? = nil) {
         UsageService.shared.settingsOpened()
+        if let pane, let window { window.contentView = NSHostingView(rootView: SettingsView(store: ConfigStore.shared, pane: pane)) }
         if window == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 600),
                              styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
@@ -20,7 +21,7 @@ final class SettingsWindowController {
             w.isMovableByWindowBackground = true
             w.isReleasedWhenClosed = false
             w.title = "Cala · Configuración"
-            w.contentView = NSHostingView(rootView: SettingsView(store: ConfigStore.shared))
+            w.contentView = NSHostingView(rootView: SettingsView(store: ConfigStore.shared, pane: pane ?? .general))
             w.contentMinSize = NSSize(width: 780, height: 540)
             w.center()
             window = w
@@ -65,11 +66,11 @@ enum LoginItem {
 // MARK: - Structure
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, appearance, screens, usage, calendar, permissions, about
+    case general, appearance, screens, tray, usage, calendar, permissions, about
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .general: "General"; case .appearance: "Apariencia"; case .screens: "Pantallas"
+        case .general: "General"; case .appearance: "Apariencia"; case .screens: "Pantallas"; case .tray: "Bandeja"
         case .calendar: "Calendar"
         case .usage: "Usage"
         case .permissions: "Permisos"; case .about: "Avanzado"
@@ -80,6 +81,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: "Comportamiento de la barra y del inicio."
         case .appearance: "Colores, transparencia y tamaños."
         case .screens: "Cómo se acomoda la barra en cada pantalla."
+        case .tray: "Qué se ve a la derecha de la barra, qué queda detrás de la flecha ^ y qué se oculta."
         case .calendar: "Upcoming events from your macOS calendar accounts."
         case .usage: "Claude and Codex plan usage in one tray control."
         case .permissions: "Lo que macOS debe permitir para que todo funcione."
@@ -88,7 +90,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     }
     var icon: String {
         switch self {
-        case .general: "gearshape.fill"; case .appearance: "paintpalette.fill"; case .screens: "display"
+        case .general: "gearshape.fill"; case .appearance: "paintpalette.fill"; case .screens: "display"; case .tray: "square.grid.2x2"
         case .calendar: "calendar"
         case .usage: "chart.bar.fill"
         case .permissions: "lock.shield.fill"; case .about: "wrench.and.screwdriver.fill"
@@ -97,7 +99,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     var color: Color {
         switch self {
         case .general: Color(red: 0.55, green: 0.57, blue: 0.62); case .appearance: Color(red: 0.95, green: 0.35, blue: 0.55)
-        case .screens: Color(red: 0.25, green: 0.52, blue: 0.98); case .permissions: Color(red: 0.2, green: 0.72, blue: 0.4)
+        case .screens: Color(red: 0.25, green: 0.52, blue: 0.98); case .tray: Color(red: 0.2, green: 0.65, blue: 0.7); case .permissions: Color(red: 0.2, green: 0.72, blue: 0.4)
         case .calendar: .red
         case .usage: .purple
         case .about: Color(red: 0.98, green: 0.6, blue: 0.2)
@@ -174,6 +176,7 @@ struct PaneBody: View {
         case .general: GeneralPane(store: store)
         case .appearance: AppearancePane(store: store)
         case .screens: ScreensPane(store: store)
+        case .tray: TrayPane(store: store)
         case .calendar: CalendarSettingsPane(store: store)
         case .usage: UsageSettingsPane(store: store)
         case .permissions: PermissionsPane()
@@ -280,30 +283,17 @@ struct GeneralPane: View {
                     Toggle("", isOn: Binding(get: { login }, set: { login = $0; LoginItem.set($0) })).toggleStyle(.switch).labelsHidden()
                 }
             }
-            SectionTitle(text: "Sistema")
-            Card {
-                SettingRow(title: "Monitor del sistema", caption: "Muestra el uso de CPU en la barra. Al hacer clic ves memoria, qué apps usan más y por qué el Mac puede estar lento.") {
-                    Toggle("", isOn: Binding(get: { store.config.monitorEnabled }, set: { store.config.monitorEnabled = $0 })).toggleStyle(.switch).labelsHidden()
-                }
-            }
             SectionTitle(text: "Disco")
             Card {
-                SettingRow(title: "Espacio libre en la barra", caption: "Muestra el porcentaje libre del disco junto a la batería. Al hacer clic ves el detalle y dónde se va el espacio.") {
-                    Toggle("", isOn: Binding(get: { store.config.diskEnabled }, set: { store.config.diskEnabled = $0 })).toggleStyle(.switch).labelsHidden()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Carpetas extra a medir").font(.system(size: 13, weight: .medium))
+                    Text("Separadas por coma, por ejemplo donde viven tus proyectos o worktrees. Se suman a la lista de caches y herramientas de desarrollo.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    TextField("~/Projects, ~/worktrees", text: $diskFolders).textFieldStyle(.roundedBorder).onSubmit { applyDiskFolders() }
+                        .onAppear { diskFolders = store.config.diskFolders.joined(separator: ", ") }
                 }
-                if store.config.diskEnabled {
-                    RowDivider()
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Carpetas extra a medir").font(.system(size: 13, weight: .medium))
-                        Text("Separadas por coma, por ejemplo donde viven tus proyectos o worktrees. Se suman a la lista de caches y herramientas de desarrollo.")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                        TextField("~/Projects, ~/worktrees", text: $diskFolders).textFieldStyle(.roundedBorder).onSubmit { applyDiskFolders() }
-                            .onAppear { diskFolders = store.config.diskFolders.joined(separator: ", ") }
-                    }
-                    .padding(.vertical, 6)
-                }
+                .padding(16).frame(maxWidth: .infinity, alignment: .leading)
             }
-            .animation(.easeOut(duration: 0.2), value: store.config.diskEnabled)
             SectionTitle(text: "Dock de macOS")
             Card {
                 SettingRow(title: "Ocultar el Dock de macOS", caption: "Esta barra lo reemplaza. Se esconde por completo y no vuelve a aparecer al acercar el mouse. Al apagarlo, queda exactamente como estaba.") {
@@ -721,5 +711,59 @@ struct UsageSettingsPane: View {
         }
         .onChange(of: focusedFolder) { old, _ in if let old { applyFolder(old) } }
         .onDisappear { applyFolder(.claude); applyFolder(.codex) }
+    }
+}
+
+// MARK: - Tray pane
+
+struct TrayPane: View {
+    @ObservedObject var store: ConfigStore
+
+    private func place(_ id: String) -> Binding<TrayPlace> {
+        Binding(get: { store.config.place(id) }, set: { p in
+            var layout = store.config.trayLayout
+            layout[id] = p.rawValue
+            store.config.trayLayout = layout
+        })
+    }
+    private func move(_ id: String, _ delta: Int) {
+        var order = store.config.orderedTrayIDs
+        guard let i = order.firstIndex(of: id), order.indices.contains(i + delta) else { return }
+        order.swapAt(i, i + delta)
+        store.config.trayOrder = order
+    }
+
+    var body: some View {
+        let ids = store.config.orderedTrayIDs
+        VStack(alignment: .leading, spacing: 20) {
+            Card {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Elige dónde va cada cosa").font(.system(size: 13, weight: .semibold))
+                    Text("**En la barra**: siempre visible. **En ^**: aparece al pulsar la flecha ^ al inicio de la bandeja. **Oculto**: no se muestra. El orden de arriba hacia abajo es el de izquierda a derecha en la barra.")
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Card {
+                ForEach(Array(ids.enumerated()), id: \.element) { i, id in
+                    if i > 0 { RowDivider() }
+                    if let info = TrayItems.info(id) {
+                        HStack(spacing: 12) {
+                            Image(systemName: info.symbol).font(.system(size: 14)).frame(width: 24).foregroundStyle(.secondary)
+                            Text(info.title).font(.system(size: 13, weight: .medium))
+                            Spacer()
+                            Button { move(id, -1) } label: { Image(systemName: "chevron.up").frame(width: 20, height: 20) }
+                                .buttonStyle(.plain).disabled(i == 0)
+                            Button { move(id, 1) } label: { Image(systemName: "chevron.down").frame(width: 20, height: 20) }
+                                .buttonStyle(.plain).disabled(i == ids.count - 1)
+                            Picker("", selection: place(id)) {
+                                ForEach(TrayPlace.allCases) { Text($0.title).tag($0) }
+                            }.pickerStyle(.segmented).labelsHidden().frame(width: 250)
+                        }
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                    }
+                }
+            }
+            Button("Restablecer valores") { store.config.trayLayout = [:]; store.config.trayOrder = [] }
+        }
     }
 }

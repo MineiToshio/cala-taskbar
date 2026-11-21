@@ -335,7 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if Date().timeIntervalSince(lastTray) > 3 { lastTray = Date(); model.refreshTray() }
-        if store.config.monitorEnabled, Date().timeIntervalSince(lastMonitor) > 3 { lastMonitor = Date(); SystemMonitor.shared.tick() }
+        if store.config.place(traySystem) != .hidden, Date().timeIntervalSince(lastMonitor) > 3 { lastMonitor = Date(); SystemMonitor.shared.tick() }
         if Date().timeIntervalSince(lastCalendar) > 60 { lastCalendar = Date(); CalendarService.shared.backgroundRefresh(config: store.config) }
         if Date().timeIntervalSince(lastBadge) > 2 {
             lastBadge = Date()

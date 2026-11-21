@@ -247,13 +247,26 @@ final class CleanupModel: ObservableObject {
     @Published var working = false
     @Published var selected = Set<String>()
     @Published var message = ""
+    /// nil until checked: counting the Trash goes through Finder, which makes macOS ask for permission once.
+    @Published var trashCount: Int?
+    @Published var trashDenied = false
+    @Published var trashChecking = false
     private var generation = 0
+    static let trashID = "__trash"
+
+    func checkTrash() {
+        trashChecking = true
+        TrashService.count { n, denied in
+            self.trashCount = n; self.trashDenied = denied; self.trashChecking = false
+        }
+    }
+    var trashSelected: Bool { selected.contains(Self.trashID) && (trashCount ?? 0) > 0 }
 
     func scan() {
         guard !working else { return }
         generation += 1
         let gen = generation
-        scanning = true; message = ""; selected = []
+        scanning = true; message = ""; selected = []; trashCount = nil; trashDenied = false
         caches = Cleanup.caches(); groups = []
         let extra = ConfigStore.shared.config.diskFolders
         let cacheList = caches
@@ -297,19 +310,22 @@ final class CleanupModel: ObservableObject {
 
     /// Asks for confirmation (nothing is deleted before), then removes the selection in the background.
     func removeSelected() {
-        let gs = selectedGroups, cs = selectedCaches
-        guard !gs.isEmpty || !cs.isEmpty, !working else { return }
+        let gs = selectedGroups, cs = selectedCaches, trash = trashSelected
+        guard !gs.isEmpty || !cs.isEmpty || trash, !working else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = calendarText("Free up \(diskBytes(selectedBytes))?", "¿Liberar \(diskBytes(selectedBytes))?")
+        alert.messageText = selectedBytes > 0 ? calendarText("Free up \(diskBytes(selectedBytes))\(trash ? " and empty the Trash" : "")?", "¿Liberar \(diskBytes(selectedBytes))\(trash ? " y vaciar la Papelera" : "")?")
+                                              : calendarText("Empty the Trash?", "¿Vaciar la Papelera?")
         var lines: [String] = []
         let items = gs.map { $0.repoName + " / " + $0.name + " (" + diskBytes($0.bytes ?? 0) + ")" }
             + cs.map { $0.name + " (" + diskBytes($0.bytes ?? 0) + ")" }
+            + (trash ? [calendarText("Trash (\(trashCount ?? 0) items)", "Papelera (\(trashCount ?? 0) elementos)")] : [])
         lines.append(calendarText("This will delete:", "Se va a eliminar:"))
         lines += items.prefix(12).map { "• " + $0 }
         if items.count > 12 { lines.append(calendarText("• …and \(items.count - 12) more", "• …y \(items.count - 12) más")) }
         lines.append("")
         if !gs.isEmpty { lines.append(calendarText("Worktrees are removed with git; your branches and commits stay.", "Los worktrees se quitan con git; tus ramas y commits se conservan.")) }
+        if trash { lines.append(calendarText("Everything in the Trash is deleted for good.", "Todo lo que hay en la Papelera se borra para siempre.")) }
         if !cs.isEmpty { lines.append(calendarText("Caches are rebuilt automatically when needed.", "Las cachés se reconstruyen solas cuando hacen falta.")) }
         lines.append(calendarText("Nothing else is touched. This cannot be undone.", "No se toca nada más. Esto no se puede deshacer."))
         alert.informativeText = lines.joined(separator: "\n")
@@ -323,6 +339,13 @@ final class CleanupModel: ObservableObject {
             var problems: [String] = []
             for g in gs { if let p = Cleanup.remove(g) { problems.append(p) } }
             for c in cs { let n = Cleanup.empty(c); if n > 0 { problems.append("\(c.name): \(n) " + calendarText("item(s) could not be removed", "elemento(s) no se pudieron quitar")) } }
+            if trash {
+                let sem = DispatchSemaphore(value: 0)
+                var ok = false
+                TrashService.empty { ok = $0; sem.signal() }
+                sem.wait()
+                if !ok { problems.append(calendarText("Trash could not be emptied", "No se pudo vaciar la Papelera")) }
+            }
             DispatchQueue.main.async {
                 self.working = false
                 let freed = max(0, (DiskInfo.read()?.available ?? 0) - before)
@@ -408,6 +431,8 @@ struct CleanupView: View {
                         Spacer()
                         Button(calendarText("Select safe ones", "Seleccionar los seguros")) { model.selectSafe() }.disabled(model.working)
                     }
+                    SectionTitle(text: calendarText("Trash", "Papelera"))
+                    Card { trashRow }
                     SectionTitle(text: calendarText("Caches that regenerate", "Cachés que se regeneran"))
                     Card {
                         ForEach(Array(model.caches.enumerated()), id: \.element.id) { i, c in
@@ -426,7 +451,7 @@ struct CleanupView: View {
                 Spacer()
                 Button(calendarText("Review and delete selected (\(diskBytes(model.selectedBytes)))…", "Revisar y eliminar lo seleccionado (\(diskBytes(model.selectedBytes)))…")) { model.removeSelected() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.working || (model.selectedGroups.isEmpty && model.selectedCaches.isEmpty))
+                    .disabled(model.working || (model.selectedGroups.isEmpty && model.selectedCaches.isEmpty && !model.trashSelected))
             }
             .padding(14)
         }
@@ -476,6 +501,37 @@ struct CleanupView: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .help(g.path)
+    }
+
+    private var trashRow: some View {
+        HStack(spacing: 12) {
+            check(CleanupModel.trashID, enabled: (model.trashCount ?? 0) > 0)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(calendarText("Empty the Trash", "Vaciar la Papelera")).font(.system(size: 13, weight: .medium))
+                Text(trashNote).font(.system(size: 11)).foregroundStyle(model.trashDenied ? .orange : .secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if model.trashChecking {
+                ProgressView().controlSize(.small).scaleEffect(0.7)
+            } else if model.trashCount == nil && !model.trashDenied {
+                Button(calendarText("Check", "Comprobar")) { model.checkTrash() }
+            } else if model.trashDenied {
+                Button(calendarText("Open Automation settings", "Abrir Automatización")) {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
+                }
+            } else if let n = model.trashCount {
+                Text(calendarText("\(n) items", "\(n) elementos")).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    private var trashNote: String {
+        if model.trashDenied { return calendarText("Cala needs permission to control Finder to count and empty the Trash.", "Cala necesita permiso para controlar Finder y poder contar y vaciar la Papelera.") }
+        if let n = model.trashCount {
+            return n == 0 ? calendarText("The Trash is empty.", "La Papelera está vacía.") : calendarText("Deletes everything in the Trash for good.", "Borra para siempre todo lo que hay en la Papelera.")
+        }
+        return calendarText("Press Check to count the items. The first time, macOS asks to let Cala control Finder.", "Pulsa Comprobar para contar los elementos. La primera vez, macOS pregunta si dejas que Cala controle Finder.")
     }
 
     private func cacheRow(_ c: CacheItem) -> some View {

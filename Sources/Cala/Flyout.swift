@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import CoreWLAN
 import IOKit.ps
 
@@ -9,6 +10,8 @@ final class FlyoutModel: ObservableObject {
     @Published var kind = ""
     @Published var token = 0
     @Published var availableHeight: CGFloat = 700
+    /// The pane was opened from the "^" overflow panel, so it shows a back button.
+    @Published var fromMore = false
 }
 
 struct Row: View {
@@ -85,7 +88,13 @@ struct FlyoutView: View {
     @ObservedObject var model: TaskbarModel
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 8) {
+            if fm.fromMore && fm.kind != trayMore {
+                Button { fm.fromMore = false; fm.kind = trayMore; fm.token += 1 } label: {
+                    Label("Más", systemImage: "chevron.left").font(.system(size: 11.5, weight: .medium))
+                }.buttonStyle(.plain).flyoutSecondary()
+            }
+            Group {
             switch fm.kind {
             case trayWifi: WifiPane(model: model)
             case trayVol: VolumePane(model: model)
@@ -94,11 +103,15 @@ struct FlyoutView: View {
             case trayBright: BrightPane()
             case trayDisk: DiskPane(model: model)
             case traySystem: SystemPane()
+            case trayMore: MorePane(fm: fm, model: model)
+            case trayDownloads: DownloadsPane()
+            case trayTrash: TrashPane()
             case trayUser: UserPane()
             case trayKB: KeyboardPane(model: model)
             case trayClock: CalendarPane(maxAgendaHeight: min(400, max(60, fm.availableHeight - 480)))
             case trayUsage, UsageProvider.claude.trayID, UsageProvider.codex.trayID: UsagePane(model: model)
             default: EmptyView()
+            }
             }
         }
         .id(fm.token)
@@ -274,6 +287,8 @@ final class FlyoutController {
     private var centerX: CGFloat = 0
     private var screenFrame = NSRect.zero
     private var monitor: Any?
+    private var observers: [NSObjectProtocol] = []
+    private var kindObserver: AnyCancellable?
 
     init(model: TaskbarModel) {
         panel = FlyoutPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -283,6 +298,15 @@ final class FlyoutController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         host = NSHostingView(rootView: FlyoutView(fm: fm, model: model))
         panel.contentView = host
+        for name in [Notification.Name.flyoutRefit] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                DispatchQueue.main.async { self?.refit() }
+            })
+        }
+        observers.append(NotificationCenter.default.addObserver(forName: .flyoutHide, object: nil, queue: .main) { [weak self] _ in self?.hide() })
+        kindObserver = fm.$kind.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] _ in
+            DispatchQueue.main.async { if self?.panel.isVisible == true { self?.refit() } }
+        }
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self, self.panel.isVisible, !self.panel.frame.contains(NSEvent.mouseLocation) else { return }
             self.hide()
@@ -297,6 +321,7 @@ final class FlyoutController {
         self.barTop = barTop; self.centerX = centerX; self.screenFrame = screen.frame
         fm.availableHeight = max(300, screen.visibleFrame.height - 90)
         if kind == trayDisk { DiskService.shared.refresh(extra: ConfigStore.shared.config.diskFolders) }
+        fm.fromMore = false
         fm.kind = kind; fm.token += 1
         refit()
         panel.makeKeyAndOrderFront(nil)

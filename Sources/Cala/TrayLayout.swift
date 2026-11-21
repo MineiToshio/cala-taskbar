@@ -1,0 +1,68 @@
+import Foundation
+
+let trayMore = "__t_more", trayDownloads = "__t_downloads", trayTrash = "__t_trash"
+
+/// Where a tray item lives: always visible in the bar, behind the "^" overflow panel, or not shown at all.
+enum TrayPlace: String, CaseIterable, Identifiable {
+    case bar, more, hidden
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .bar: return "En la barra"
+        case .more: return "En  ^"
+        case .hidden: return "Oculto"
+        }
+    }
+}
+
+struct TrayItemInfo {
+    let id: String
+    let title: String
+    let symbol: String
+    let defaultPlace: TrayPlace
+}
+
+enum TrayItems {
+    /// Default left-to-right order.
+    static let all: [TrayItemInfo] = [
+        TrayItemInfo(id: trayKB, title: "Teclado", symbol: "keyboard", defaultPlace: .more),
+        TrayItemInfo(id: trayWifi, title: "Wi-Fi", symbol: "wifi", defaultPlace: .bar),
+        TrayItemInfo(id: trayBT, title: "Bluetooth", symbol: "dot.radiowaves.right", defaultPlace: .more),
+        TrayItemInfo(id: trayBright, title: "Brillo", symbol: "sun.max.fill", defaultPlace: .more),
+        TrayItemInfo(id: trayVol, title: "Volumen", symbol: "speaker.wave.2.fill", defaultPlace: .bar),
+        TrayItemInfo(id: trayUsage, title: "Claude y Codex", symbol: "chart.bar.fill", defaultPlace: .bar),
+        TrayItemInfo(id: traySystem, title: "CPU y memoria", symbol: "cpu", defaultPlace: .bar),
+        TrayItemInfo(id: trayDisk, title: "Disco", symbol: "internaldrive", defaultPlace: .bar),
+        TrayItemInfo(id: trayBatt, title: "Batería", symbol: "battery.75", defaultPlace: .bar),
+        TrayItemInfo(id: trayUser, title: "Usuario", symbol: "person.crop.circle", defaultPlace: .more),
+        TrayItemInfo(id: trayDownloads, title: "Descargas", symbol: "arrow.down.circle", defaultPlace: .more),
+        TrayItemInfo(id: trayTrash, title: "Papelera", symbol: "trash", defaultPlace: .more),
+    ]
+    static func info(_ id: String) -> TrayItemInfo? { all.first { $0.id == id } }
+}
+
+extension Config {
+    func place(_ id: String) -> TrayPlace {
+        if let raw = trayLayout[id], let p = TrayPlace(rawValue: raw) { return p }
+        // Settings from before the layout existed: the old on/off switches still apply.
+        if id == trayDisk && !diskEnabled { return .hidden }
+        if id == traySystem && !monitorEnabled { return .hidden }
+        return TrayItems.info(id)?.defaultPlace ?? .hidden
+    }
+
+    /// Saved order first (known ids only), then anything new in its default position.
+    var orderedTrayIDs: [String] {
+        let known = Set(TrayItems.all.map(\.id))
+        var out = trayOrder.filter { known.contains($0) }
+        var seen = Set(out)
+        for item in TrayItems.all where !seen.contains(item.id) {
+            // Insert after the item that precedes it by default, so a new item does not jump to the end.
+            if let i = TrayItems.all.firstIndex(where: { $0.id == item.id }), i > 0,
+               let at = out.firstIndex(of: TrayItems.all[i - 1].id) { out.insert(item.id, at: at + 1) } else { out.append(item.id) }
+            seen.insert(item.id)
+        }
+        return out
+    }
+    var barTrayIDs: [String] { orderedTrayIDs.filter { place($0) == .bar } }
+    var moreTrayIDs: [String] { orderedTrayIDs.filter { place($0) == .more } }
+}
