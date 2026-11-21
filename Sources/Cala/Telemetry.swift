@@ -65,6 +65,7 @@ enum Telemetry {
             var feedback: [String: Any] = ["message": message, "source": "cala-app"]
             if let email, !email.isEmpty { feedback["contact_email"] = email }
             ctx["feedback"] = feedback
+            payload["type"] = "feedback"
             payload["level"] = "info"
             payload["contexts"] = ctx
             let item = json(payload)
