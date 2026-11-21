@@ -81,6 +81,12 @@ enum CalendarLogic {
         let grouped = Dictionary(grouping: events) { max(today, calendar.startOfDay(for: $0.start)) }
         return grouped.keys.sorted().map { ($0, grouped[$0]!) }
     }
+    /// The meeting to offer a "Join" button for: has a video link and is within `lead` seconds of starting, or is
+    /// still running. If several qualify, the one whose start is closest to now.
+    static func joinCandidate(_ events: [UpcomingEvent], now: Date, lead: TimeInterval = 300) -> UpcomingEvent? {
+        events.filter { !$0.allDay && $0.joinURL != nil && $0.start.addingTimeInterval(-lead) <= now && $0.end > now }
+            .min { abs($0.start.timeIntervalSince(now)) < abs($1.start.timeIntervalSince(now)) }
+    }
     static func nextID(_ events: [UpcomingEvent], now: Date) -> String? {
         events.first { !$0.allDay && $0.start > now }?.id
     }
@@ -120,6 +126,13 @@ final class CalendarService: ObservableObject {
 
     /// Called only from the calendar flyout or its Settings section, including enabling it there.
     func open(config: Config) { load(config: config, mayRequest: true) }
+    /// Keeps events fresh for the bar's Join button without opening the flyout. It only reads when full access
+    /// was already granted, so it never shows a permission prompt.
+    func backgroundRefresh(config: Config) {
+        guard config.calendarEnabled, config.calendarJoinEnabled,
+              EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return }
+        load(config: config, mayRequest: false)
+    }
     func refresh() {
         guard let config else { return }
         load(config: config, mayRequest: false)

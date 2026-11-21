@@ -53,6 +53,7 @@ struct BarView: View {
             HStack(spacing: 2) {
                 if !centered { icons }
                 Spacer(minLength: 8)
+                JoinPill(model: model)
                 if showTray { TrayView(model: model) }
                 else { UsageTrayView(model: model) }
                 ClockView(model: model)
@@ -151,6 +152,45 @@ struct StartButton: View {
             .frame(width: 40)
             .frame(maxHeight: .infinity)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(hovering ? 0.08 : 0)).padding(.vertical, 3))
+    }
+}
+
+let trayJoin = "__t_join"
+
+/// "Join" button for the next meeting with a video link: from 5 minutes before it starts until it ends.
+/// Clicks are routed by the app delegate (the bar is a non-activating panel), see `trayClick`.
+struct JoinPill: View {
+    @ObservedObject var model: TaskbarModel
+    @ObservedObject private var agenda = CalendarService.shared
+    @ObservedObject private var store = ConfigStore.shared
+    @Environment(\.themeAccent) private var accent
+
+    private func subtitle(_ e: UpcomingEvent, _ now: Date) -> String {
+        let title = e.title.count > 22 ? String(e.title.prefix(21)) + "…" : e.title
+        let minutes = Int((e.start.timeIntervalSince(now) / 60).rounded(.up))
+        let when = minutes > 0 ? calendarText("in \(minutes) min", "en \(minutes) min") : calendarText("now", "ahora")
+        return title + " · " + when
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 15)) { ctx in
+            if store.config.calendarEnabled, store.config.calendarJoinEnabled,
+               let e = CalendarLogic.joinCandidate(agenda.events, now: ctx.date) {
+                HStack(spacing: 7) {
+                    Image(systemName: "video.fill").font(.system(size: 13))
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(calendarText("Join", "Unirse")).font(.system(size: 11.5, weight: .semibold))
+                        Text(subtitle(e, ctx.date)).font(.system(size: 9.5)).lineLimit(1).opacity(0.9)
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 11).padding(.vertical, 5)
+                .background(Capsule().fill(accent).opacity(model.trayHover == trayJoin ? 0.8 : 1))
+                .padding(.horizontal, 6)
+                .frame(maxHeight: .infinity)
+                .reportFrame(trayJoin)
+            }
+        }
     }
 }
 

@@ -58,6 +58,7 @@ The statusLine option creates `~/Library/Application Support/Cala/claude-statusl
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
+| `calendarJoinEnabled` | bool | `true` | Show the Join button in the bar for meetings with a video link, from 5 minutes before the start |
 | `calendarEnabled` | bool | `true` | Show upcoming events in the clock flyout; permission is requested only when opening that flyout or Calendar settings while enabled |
 | `calendarDays` | integer | `7` | Upcoming rolling range in local calendar days: 1, 3, 7 or 14; other values recover to 7 |
 | `calendarExcludedIDs` | array of strings | `[]` | EventKit calendar identifiers to exclude; new calendars are included automatically |

@@ -99,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var lastBadge = Date.distantPast
     var lastReserve = Date.distantPast
     var lastTray = Date.distantPast
+    var lastCalendar = Date.distantPast
     var windowsInFlight = false
     var badgesInFlight = false
     var terminationSource: DispatchSourceSignal?
@@ -332,6 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if Date().timeIntervalSince(lastTray) > 3 { lastTray = Date(); model.refreshTray() }
+        if Date().timeIntervalSince(lastCalendar) > 60 { lastCalendar = Date(); CalendarService.shared.backgroundRefresh(config: store.config) }
         if Date().timeIntervalSince(lastBadge) > 2 {
             lastBadge = Date()
             if !windowsInFlight {
@@ -385,6 +387,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func trayClick(_ id: String, bar: Bar) {
+        if id == trayJoin {
+            flyout.hide()
+            if let url = CalendarLogic.joinCandidate(CalendarService.shared.events, now: Date())?.joinURL { NSWorkspace.shared.open(url) }
+            return
+        }
         if flyout.isVisible && flyout.kind == id { flyout.hide(); return }
         model.refreshTray()
         overlayBar = bar

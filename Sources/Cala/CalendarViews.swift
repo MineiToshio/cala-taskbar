@@ -158,6 +158,10 @@ struct CalendarSettingsPane: View {
                     Toggle("Show upcoming events", isOn: $store.config.calendarEnabled).labelsHidden().toggleStyle(FlyoutSwitchStyle())
                 }
                 RowDivider()
+                SettingRow(title: "Join button", caption: "Show a Join button in the bar for meetings with a Meet, Zoom, Teams or Webex link, from 5 minutes before they start.") {
+                    Toggle("Join button", isOn: $store.config.calendarJoinEnabled).labelsHidden().toggleStyle(FlyoutSwitchStyle()).disabled(!store.config.calendarEnabled)
+                }
+                RowDivider()
                 SettingRow(title: "Upcoming range", caption: "Ongoing events are included.") {
                     Picker("Upcoming range", selection: $store.config.calendarDays) {
                         ForEach([1, 3, 7, 14], id: \.self) { Text("\($0) \($0 == 1 ? "day" : "days")").tag($0) }

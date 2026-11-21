@@ -42,6 +42,8 @@ struct Config: Codable, Equatable {
     /// Extra folders measured in the storage panel (e.g. where your projects or git worktrees live).
     var diskFolders: [String] = []
     var calendarEnabled = true
+    /// Show a "Join" button in the bar for meetings with a video link that are about to start.
+    var calendarJoinEnabled = true
     var calendarDays = 7
     var calendarExcludedIDs: [String] = []
     var recoveredFromInvalidFields = false
@@ -49,7 +51,7 @@ struct Config: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case pinned, autoHide, iconSize, previewDelay, previewWidth, alignments, order, theme, barOpacity
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
-        case calendarEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders
+        case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
     }
@@ -92,6 +94,7 @@ extension Config {
         diskEnabled = field(Bool.self, .diskEnabled) ?? diskEnabled
         diskFolders = field([String].self, .diskFolders) ?? diskFolders
         calendarEnabled = field(Bool.self, .calendarEnabled) ?? calendarEnabled
+        calendarJoinEnabled = field(Bool.self, .calendarJoinEnabled) ?? calendarJoinEnabled
         calendarDays = field(Int.self, .calendarDays) ?? calendarDays
         if ![1, 3, 7, 14].contains(calendarDays) { calendarDays = 7; invalid = true }
         calendarExcludedIDs = field([String].self, .calendarExcludedIDs) ?? calendarExcludedIDs
