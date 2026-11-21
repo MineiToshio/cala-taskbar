@@ -95,7 +95,7 @@ final class CalendarService: ObservableObject {
     @Published private(set) var loading = false
     @Published private(set) var error: String?
 
-    private let queue = DispatchQueue(label: "local.mactaskbar.calendar", qos: .utility)
+    private let queue = DispatchQueue(label: "local.cala.calendar", qos: .utility)
     private var eventStore: EKEventStore? // queue only
     private var requestError: String? // queue only
     private let makeStore: () -> EKEventStore

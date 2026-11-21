@@ -2,10 +2,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "MacTaskbar",
+    name: "Cala",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "MacTaskbar", path: "Sources/MacTaskbar",
+        .executableTarget(name: "Cala", path: "Sources/Cala",
                           linkerSettings: [.linkedFramework("OpenDirectory")])
     ]
 )

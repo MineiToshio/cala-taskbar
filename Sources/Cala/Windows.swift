@@ -24,14 +24,13 @@ struct WinRef: Identifiable {
     let pid: pid_t
 }
 
-private let logQueue = DispatchQueue(label: "MacTaskbar.log")
+private let logQueue = DispatchQueue(label: "Cala.log")
 
 func log(_ s: String) {
     let line = "\(Date()) \(s)\n"
     logQueue.async {
         let fm = FileManager.default
-        let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MacTaskbar")
+        let dir = AppPaths.supportDirectory
         let f = dir.appendingPathComponent("debug.log")
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)

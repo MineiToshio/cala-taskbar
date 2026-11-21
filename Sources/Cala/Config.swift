@@ -107,8 +107,7 @@ final class ConfigStore: ObservableObject {
     }
 
     private let url: URL = {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MacTaskbar", isDirectory: true)
+        let dir = AppPaths.supportDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("config.json")
     }()

@@ -33,12 +33,24 @@ final class SettingsWindowController {
 /// Launch-at-login, implemented as a user LaunchAgent owned by this app.
 enum LoginItem {
     static var url: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/local.cala.plist")
+    }
+    /// Launch agent written by the app under its former name (MacTaskbar).
+    static var legacyURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/local.mactaskbar.plist")
+    }
+    /// One-time move of the old launch-at-login agent to the new label, keeping the on/off state.
+    /// Only re-enabled from ~/Applications, never from a build folder.
+    static func migrateLegacy() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: legacyURL.path) else { return }
+        try? fm.removeItem(at: legacyURL)
+        if Bundle.main.bundlePath.hasPrefix(fm.homeDirectoryForCurrentUser.path + "/Applications/") { set(true) }
     }
     static var enabled: Bool { FileManager.default.fileExists(atPath: url.path) }
     static func set(_ on: Bool) {
         if on {
-            let dict: [String: Any] = ["Label": "local.mactaskbar",
+            let dict: [String: Any] = ["Label": "local.cala",
                                        "ProgramArguments": ["/usr/bin/open", "-a", Bundle.main.bundlePath],
                                        "RunAtLoad": true]
             guard let data = try? PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0) else { return }
@@ -599,7 +611,7 @@ struct AdvancedPane: View {
                 }
             }
             Card {
-                SettingRow(title: "Salir de la barra de tareas", caption: "Para volver a abrirla, busca \u{201C}MacTaskbar\u{201D} en Launchpad o Spotlight.") {
+                SettingRow(title: "Salir de la barra de tareas", caption: "Para volver a abrirla, busca \u{201C}Cala\u{201D} en Launchpad o Spotlight.") {
                     Button("Salir…", role: .destructive) { confirmQuit = true }
                 }
             }

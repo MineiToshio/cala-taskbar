@@ -2,16 +2,17 @@
 set -e
 cd "$(dirname "$0")"
 swift build -c release
-APP=build/MacTaskbar.app
+APP=build/Cala.app
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS"
-cp .build/release/MacTaskbar "$APP/Contents/MacOS/MacTaskbar"
+cp .build/release/Cala "$APP/Contents/MacOS/Cala"
 cat > "$APP/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>local.mactaskbar</string>
-<key>CFBundleName</key><string>MacTaskbar</string>
-<key>CFBundleExecutable</key><string>MacTaskbar</string>
+<key>CFBundleIdentifier</key><string>local.cala</string>
+<key>CFBundleName</key><string>Cala</string>
+<key>CFBundleDisplayName</key><string>Cala</string>
+<key>CFBundleExecutable</key><string>Cala</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
@@ -24,6 +25,6 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>NSLocationUsageDescription</key><string>Leer el nombre de las redes Wi-Fi</string>
 </dict></plist>
 PL
-codesign --force --deep --sign - -r='designated => identifier "local.mactaskbar"' "$APP"
+codesign --force --deep --sign - -r='designated => identifier "local.cala"' "$APP"
 chmod -R go-w "$APP"
 echo "Listo: $APP"

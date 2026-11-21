@@ -1,6 +1,6 @@
 # Configuration
 
-File: `~/Library/Application Support/MacTaskbar/config.json`. Created on first run and saved automatically whenever something changes in the Settings window or the quick menu. Saves use atomic replacement. Missing or mistyped keys fall back individually to defaults, so valid settings survive a bad field. The bar's numeric settings are clamped to the ranges below; the Dock backup values are never clamped. A file that cannot be decoded is preserved as `config.json.bad` when possible and defaults are used; if preservation fails, saving is disabled for that run to protect the original. Normally you never edit it by hand (Settings → Advanced → "Abrir"); if you do, restart the bar afterwards.
+File: `~/Library/Application Support/Cala/config.json`. Created on first run and saved automatically whenever something changes in the Settings window or the quick menu. Saves use atomic replacement. Missing or mistyped keys fall back individually to defaults, so valid settings survive a bad field. The bar's numeric settings are clamped to the ranges below; the Dock backup values are never clamped. A file that cannot be decoded is preserved as `config.json.bad` when possible and defaults are used; if preservation fails, saving is disabled for that run to protect the original. Normally you never edit it by hand (Settings → Advanced → "Abrir"); if you do, restart the bar afterwards.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -35,7 +35,7 @@ Example:
 
 Find an app's bundle ID: `osascript -e 'id of app "Notes"'`.
 
-Not in `config.json`: the login item is the LaunchAgent file `~/Library/LaunchAgents/local.mactaskbar.plist`, created and removed by the "Abrir al iniciar sesión" switch.
+Not in `config.json`: the login item is the LaunchAgent file `~/Library/LaunchAgents/local.cala.plist`, created and removed by the "Abrir al iniciar sesión" switch.
 
 ## Usage settings
 
@@ -50,7 +50,7 @@ Not in `config.json`: the login item is the LaunchAgent file `~/Library/LaunchAg
 
 Missing/mistyped fields independently use their defaults. Folder drafts apply on submit, focus loss or leaving the pane, rather than on each keystroke. Empty folder fields use the login shell's `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, then standard home folders. Credentials remain owned by the CLI/app; sign in there. Settings reports detection and expired-session status without displaying secrets.
 
-The statusLine option creates `~/Library/Application Support/MacTaskbar/claude-statusline.sh` and `claude-usage.json`. The Claude config folder must already exist. Before the first edit of an existing `settings.json`, MacTaskbar creates `settings.json.mactaskbar.bak` only if absent; an existing backup is never overwritten, including one created by an older app version. Unrelated keys are preserved; key order can change on an actual edit, while slashes remain unescaped. An already-owned statusLine causes no settings or backup write on launch. An existing statusLine is never overwritten. Settings instead shows a command to integrate into the existing script, with its original stdin JSON stored in `input`. Disable removes only the MacTaskbar-owned entry. `usage-cache.json` contains readings and rate-limit cooldowns, never tokens.
+The statusLine option creates `~/Library/Application Support/Cala/claude-statusline.sh` and `claude-usage.json`. The Claude config folder must already exist. Before the first edit of an existing `settings.json`, Cala creates `settings.json.mactaskbar.bak` only if absent; an existing backup is never overwritten, including one created by an older app version. Unrelated keys are preserved; key order can change on an actual edit, while slashes remain unescaped. An already-owned statusLine causes no settings or backup write on launch. An existing statusLine is never overwritten. Settings instead shows a command to integrate into the existing script, with its original stdin JSON stored in `input`. Disable removes only the Cala-owned entry. `usage-cache.json` contains readings and rate-limit cooldowns, never tokens.
 
 ## Calendar settings
 

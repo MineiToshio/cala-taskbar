@@ -93,7 +93,7 @@ enum UsageProcess {
                 try? input.fileHandleForWriting.write(contentsOf: data + Data([10]))
             }
         }
-        if rpc { send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "mactaskbar", "title": "MacTaskbar", "version": "1.0"]]]) }
+        if rpc { send(["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "cala", "title": "Cala", "version": "1.0"]]]) }
         var data = Data(), pending = Data(), reply = Data(), initialized = false
         let deadline = Date().addingTimeInterval(timeout)
         var complete = false
@@ -198,7 +198,7 @@ enum UsageJSON {
 }
 
 enum UsageCredentials {
-    static let environmentMarker = "__MACTASKBAR_ENV__"
+    static let environmentMarker = "__CALA_ENV__"
     static func shellFields(_ data: Data) -> [String]? {
         let text = String(decoding: data, as: UTF8.self)
         guard let marker = text.range(of: environmentMarker, options: .backwards) else { return nil }
@@ -310,7 +310,7 @@ final class UsageService: ObservableObject {
     static let shared = UsageService()
     @Published private(set) var providers = UsageProvider.allCases.map { UsageState(provider: $0) }
     @Published private(set) var statusLineMessage = ""
-    private let queue = DispatchQueue(label: "local.mactaskbar.usage", qos: .utility)
+    private let queue = DispatchQueue(label: "local.cala.usage", qos: .utility)
     private var states = UsageProvider.allCases.map { UsageState(provider: $0) }
     private var config = Config()
     private var subscription: AnyCancellable?
@@ -339,7 +339,7 @@ final class UsageService: ObservableObject {
     private var statusLineConfigured = false
     private var configuredDirectory = ""
     private var refreshAfterDetection = false
-    private let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MacTaskbar")
+    private let support = AppPaths.supportDirectory
 
     private func index(_ p: UsageProvider) -> Int { p == .claude ? 0 : 1 }
     private func publish() {
@@ -392,7 +392,7 @@ final class UsageService: ObservableObject {
         config = new
         if !shellLoaded {
             // One bounded login-shell invocation, even for GUI launches with an incomplete environment.
-            let command = "printf '__MACTASKBAR_ENV__%s\\0%s\\0%s\\0%s\\0%s\\0' \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" \"$PATH\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" \"${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}\""
+            let command = "printf '__CALA_ENV__%s\\0%s\\0%s\\0%s\\0%s\\0' \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" \"$PATH\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" \"${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}\""
             let r = UsageProcess.run("/bin/zsh", ["-lc", command], timeout: 3)
             if !r.timedOut, let fields = UsageCredentials.shellFields(r.data) {
                 for (key, value) in zip(["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PATH", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "SECURE_STORAGE_SET"], fields) { environment[key] = value }
@@ -800,7 +800,9 @@ final class UsageService: ObservableObject {
                 object = parsed
             }
             let entry = object["statusLine"] as? [String: Any]
-            let ours = entry?["type"] as? String == "command" && (entry?["command"] as? String == command || entry?["command"] as? String == script.path)
+            let legacyScript = AppPaths.legacySupportDirectory.appendingPathComponent("claude-statusline.sh").path
+            let current = entry?["command"] as? String
+            let ours = entry?["type"] as? String == "command" && (current == command || current == script.path || current == quote(legacyScript) || current == legacyScript)
             if enable && ours { message("Live updates already configured."); return }
             if enable {
                 try fm.createDirectory(at: support, withIntermediateDirectories: true)
@@ -814,7 +816,7 @@ final class UsageService: ObservableObject {
                 try {
                   var d = JSON.parse(text);
                   var out = JSON.stringify({timestamp: Date.now()/1000, rate_limits: d.rate_limits || {}});
-                  var base = $.NSHomeDirectory().stringByAppendingPathComponent("Library/Application Support/MacTaskbar/claude-usage.json");
+                  var base = $.NSHomeDirectory().stringByAppendingPathComponent("Library/Application Support/Cala/claude-usage.json");
                   var data = $(out).dataUsingEncoding($.NSUTF8StringEncoding);
                   data.writeToFileAtomically(base, true);
                   var name = (d.model || {}).display_name || "Claude";

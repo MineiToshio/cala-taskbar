@@ -118,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         source.setEventHandler { NSApp.terminate(nil) }
         terminationSource = source
         source.resume()
+        LoginItem.migrateLegacy()
         DockControl.applyOnLaunch(store)
         WindowSwitcher.shared.ensureTap()
         MinimizeWatcher.shared.start()
