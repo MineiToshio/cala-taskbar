@@ -665,6 +665,23 @@ struct UsageSettingsPane: View {
                 }
             }
             Card {
+                SettingRow(title: calendarText("Quota alerts", "Alertas de cuota"), caption: calendarText("Notify when a quota is low or, at the current pace, will run out before it resets.", "Avisa cuando una cuota está baja o, al ritmo actual, se agotará antes del reinicio.")) {
+                    Toggle("Quota alerts", isOn: Binding(get: { store.config.usageAlertsEnabled }, set: { on in
+                        store.config.usageAlertsEnabled = on
+                        if on { UsagePace.shared.requestAuthorization() }
+                    })).labelsHidden().toggleStyle(.switch)
+                }
+                if store.config.usageAlertsEnabled {
+                    RowDivider()
+                    SettingRow(title: calendarText("Alert when left is", "Avisar cuando quede"), caption: calendarText("Remaining share of a quota at or below which you are notified.", "Porcentaje restante de una cuota a partir del cual se te avisa.")) {
+                        Picker("", selection: $store.config.usageAlertThreshold) {
+                            ForEach([10, 15, 20, 30], id: \.self) { Text("\($0)%").tag($0) }
+                        }.labelsHidden().frame(width: 90)
+                    }
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: store.config.usageAlertsEnabled)
+            Card {
                 SettingRow(title: "Claude", caption: usage.providers.first { $0.provider == .claude }?.detection) {
                     Toggle("Claude", isOn: $store.config.usageClaudeEnabled).labelsHidden().toggleStyle(.switch)
                 }

@@ -110,3 +110,8 @@ A drive icon with the **free percentage** sits next to the battery (orange under
 
 ## Join button
 When a calendar event has a Meet, Zoom, Teams or Webex link (in its URL, location or notes), a **Join** pill appears in the bar from 5 minutes before it starts until it ends, showing the title and "in N min" / "now". Click it to open the link. If two meetings overlap, the one starting closest to now wins. Turn it off in Settings → Calendar → Join button. It needs calendar access to have been granted already (open the clock once).
+
+## Quota pace and alerts
+Under each Claude / Codex quota in the usage panel, a line projects the burn rate: *"At this pace it runs out in 2 d 11 h, before the reset"* (orange) or *"At this pace you reach the reset with ~35% left"*. The rate comes from the last 30 minutes of readings (kept in memory) and falls back to the average since the window started; if you have not used it lately, no projection is shown.
+
+Notifications (Settings → Usage → Quota alerts, on by default): one when a window's remaining share drops to your threshold (10, 15, 20 or 30%, default 20%), and one when, at the current pace, a window will run out within the next hour and before it resets. Each fires once per window cycle. macOS asks for notification permission the first time you turn alerts on.

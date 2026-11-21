@@ -38,6 +38,10 @@ struct Config: Codable, Equatable {
     var usageClaudeConfigDir = ""
     var usageCodexHome = ""
     var usageClaudeStatusLine = false
+    /// Notify when a quota window is low or projected to run out before it resets.
+    var usageAlertsEnabled = true
+    /// Remaining percentage at or below which the low-quota notification fires (10, 15, 20 or 30).
+    var usageAlertThreshold = 20
     var diskEnabled = true
     /// Extra folders measured in the storage panel (e.g. where your projects or git worktrees live).
     var diskFolders: [String] = []
@@ -54,6 +58,7 @@ struct Config: Codable, Equatable {
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
+        case usageAlertsEnabled, usageAlertThreshold
     }
 }
 
@@ -91,6 +96,9 @@ extension Config {
         usageClaudeConfigDir = field(String.self, .usageClaudeConfigDir) ?? usageClaudeConfigDir
         usageCodexHome = field(String.self, .usageCodexHome) ?? usageCodexHome
         usageClaudeStatusLine = field(Bool.self, .usageClaudeStatusLine) ?? usageClaudeStatusLine
+        usageAlertsEnabled = field(Bool.self, .usageAlertsEnabled) ?? usageAlertsEnabled
+        usageAlertThreshold = field(Int.self, .usageAlertThreshold) ?? usageAlertThreshold
+        if ![10, 15, 20, 30].contains(usageAlertThreshold) { usageAlertThreshold = 20; invalid = true }
         diskEnabled = field(Bool.self, .diskEnabled) ?? diskEnabled
         diskFolders = field([String].self, .diskFolders) ?? diskFolders
         calendarEnabled = field(Bool.self, .calendarEnabled) ?? calendarEnabled

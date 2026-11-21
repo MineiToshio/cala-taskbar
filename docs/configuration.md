@@ -48,6 +48,8 @@ Not in `config.json`: the login item is the LaunchAgent file `~/Library/LaunchAg
 | `usageCodexEnabled` | bool | `true` | Show Codex when detected and signed in |
 | `usageClaudeConfigDir` | string | `""` | Optional Claude config folder; `~` expands to the current user's home |
 | `usageCodexHome` | string | `""` | Optional Codex home folder |
+| `usageAlertsEnabled` | bool | `true` | Notify when a quota is low or projected to run out before it resets |
+| `usageAlertThreshold` | number | `20` | Remaining percentage that triggers the low-quota notification (10, 15, 20 or 30) |
 | `usageClaudeStatusLine` | bool | `false` | Opt in to Claude Code local statusLine updates |
 
 Missing/mistyped fields independently use their defaults. Folder drafts apply on submit, focus loss or leaving the pane, rather than on each keystroke. Empty folder fields use the login shell's `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, then standard home folders. Credentials remain owned by the CLI/app; sign in there. Settings reports detection and expired-session status without displaying secrets.

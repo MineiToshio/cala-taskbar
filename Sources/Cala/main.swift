@@ -134,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildBars()
         let usageVisible = !store.config.autoHide || bars.contains(where: { !$0.hidden })
         UsageService.shared.start(store: store, visible: usageVisible)
+        UsagePace.shared.start(store: store)
         if usageVisible { UsageService.shared.refresh() }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, !self.store.config.autoHide || self.bars.contains(where: { !$0.hidden }) else { return }

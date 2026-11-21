@@ -460,7 +460,7 @@ struct UsagePane: View {
     private var paneHeight: CGFloat {
         var height = 68
         for state in model.usage where state.available {
-            height += 100 + max(1, state.reading?.windows.count ?? 0) * 70
+            height += 100 + max(1, state.reading?.windows.count ?? 0) * 86
             if state.error != nil { height += 32 }
         }
         return CGFloat(min(600, height))
@@ -518,6 +518,11 @@ struct UsagePane: View {
                     }.frame(height: 6)
                     Text(resetLabel(window, now: now)).font(.system(size: 10.5)).flyoutSecondary()
                         .fixedSize(horizontal: false, vertical: true)
+                    if let pace = UsagePace.shared.pace(state.provider, window, now: now) {
+                        Text(pace.text).font(.system(size: 10.5, weight: pace.warn ? .semibold : .regular))
+                            .foregroundStyle(pace.warn ? Color.orange : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityValue("\(remaining)% left, \(Int(used.rounded()))% used")

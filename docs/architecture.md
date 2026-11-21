@@ -11,6 +11,7 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `CalendarEvents.swift` | Lazy EventKit service, permission lifecycle, calendar/event value snapshots and safe navigation |
 | `CalendarViews.swift` | Upcoming event list and Calendar settings section, sharing flyout styles |
 | `CalendarText.swift` | Spanish/English string chooser shared by calendar and permission messages |
+| `UsagePace.swift` | Burn-rate projection per quota window and the low-quota / will-run-out notifications |
 | `Disk.swift` | Free-space reading (`DiskInfo`), background folder sizing (`DiskService`), tray storage panel |
 | `Usage.swift` | Claude/Codex usage detection, read-only fetches, local events, refresh policy and cache |
 | `Model.swift` | `TaskbarModel`: items, hover state, badges, tray state, pin toggling |

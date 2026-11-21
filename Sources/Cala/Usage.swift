@@ -20,7 +20,7 @@ struct UsageWindow: Codable, Identifiable {
     var resetsAt: Date?
     var durationMinutes: Double? = nil
     // Provider categories take precedence; old caches can recover duration from their title.
-    fileprivate var presentationOrder: (Int, Double) {
+    var presentationOrder: (Int, Double) {
         let label = title.lowercased()
         let hours = label.hasSuffix(" h") ? Double(label.dropLast(2)) : nil
         let duration = [durationMinutes, hours.map { $0 * 60 }].compactMap { $0 }
