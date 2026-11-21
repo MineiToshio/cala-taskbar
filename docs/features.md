@@ -104,3 +104,6 @@ Bars are rebuilt automatically when screens are connected or disconnected. Hover
 - Cala only reads calendars, keeps event snapshots in memory, and neither logs nor caches event content. Internet Accounts handles account credentials and synchronization; macOS’s full-access permission is required to read events, though this feature never writes them.
 
 The calendar flyout chooses Spanish when the first preferred language is Spanish, otherwise English; dates and times use the current locale. Shared permission messages follow this choice too.
+
+## Disk space
+A drive icon with the **free percentage** sits next to the battery (orange under 20%, red under 10%). Click it for the storage panel: available space (including purgeable, like System Settings), a used / purgeable / free bar and a list of where the space goes: Applications, Xcode and simulators, caches, app data, Claude Code (`~/.claude`), Codex (`~/.codex`), npm / cargo / gradle / bun caches and Homebrew, plus any extra folders you add in Settings → General → Disco (for example where your projects or git worktrees live). Click a row to open that folder in Finder. Sizes are measured in the background when the panel opens (at most once every 10 minutes, or "Volver a medir"). Documents, Desktop, Downloads and the Trash are never scanned, so macOS shows no permission prompts.

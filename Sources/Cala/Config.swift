@@ -38,6 +38,9 @@ struct Config: Codable, Equatable {
     var usageClaudeConfigDir = ""
     var usageCodexHome = ""
     var usageClaudeStatusLine = false
+    var diskEnabled = true
+    /// Extra folders measured in the storage panel (e.g. where your projects or git worktrees live).
+    var diskFolders: [String] = []
     var calendarEnabled = true
     var calendarDays = 7
     var calendarExcludedIDs: [String] = []
@@ -46,7 +49,7 @@ struct Config: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case pinned, autoHide, iconSize, previewDelay, previewWidth, alignments, order, theme, barOpacity
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
-        case calendarEnabled, calendarDays, calendarExcludedIDs
+        case calendarEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
     }
@@ -86,6 +89,8 @@ extension Config {
         usageClaudeConfigDir = field(String.self, .usageClaudeConfigDir) ?? usageClaudeConfigDir
         usageCodexHome = field(String.self, .usageCodexHome) ?? usageCodexHome
         usageClaudeStatusLine = field(Bool.self, .usageClaudeStatusLine) ?? usageClaudeStatusLine
+        diskEnabled = field(Bool.self, .diskEnabled) ?? diskEnabled
+        diskFolders = field([String].self, .diskFolders) ?? diskFolders
         calendarEnabled = field(Bool.self, .calendarEnabled) ?? calendarEnabled
         calendarDays = field(Int.self, .calendarDays) ?? calendarDays
         if ![1, 3, 7, 14].contains(calendarDays) { calendarDays = 7; invalid = true }

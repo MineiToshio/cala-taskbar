@@ -174,6 +174,7 @@ struct ClockView: View {
 
 struct TrayView: View {
     @ObservedObject var model: TaskbarModel
+    @ObservedObject private var store = ConfigStore.shared
 
     private func battIcon(_ b: (pct: Int, charging: Bool, isCharging: Bool)) -> String {
         if b.charging { return "battery.100.bolt" }   // on AC power (charging or full)
@@ -196,6 +197,12 @@ struct TrayView: View {
             if model.hasBright { cell("sun.max.fill", id: trayBright, text: nil) }
             cell(volIcon, id: trayVol, text: nil)
             UsageTrayView(model: model)
+            if store.config.diskEnabled, let d = model.disk {
+                cell(nil, id: trayDisk, text: nil, custom: AnyView(VStack(spacing: 3) {
+                    Image(systemName: "internaldrive").font(.system(size: 14))
+                    Text("\(d.freePercent)%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
+                }.foregroundStyle(diskTint(d))))
+            }
             if let b = model.batt {
                 cell(nil, id: trayBatt, text: nil, custom: AnyView(VStack(spacing: 3) {
                     Image(systemName: battIcon(b)).font(.system(size: 14))

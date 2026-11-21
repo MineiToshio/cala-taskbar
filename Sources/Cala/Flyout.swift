@@ -92,6 +92,7 @@ struct FlyoutView: View {
             case trayBT: BluetoothPane(model: model)
             case trayBatt: BatteryPane(model: model)
             case trayBright: BrightPane()
+            case trayDisk: DiskPane(model: model)
             case trayUser: UserPane()
             case trayKB: KeyboardPane(model: model)
             case trayClock: CalendarPane(maxAgendaHeight: min(400, max(60, fm.availableHeight - 480)))
@@ -101,7 +102,7 @@ struct FlyoutView: View {
         }
         .id(fm.token)
         .padding(18)
-        .frame(width: fm.kind.hasPrefix("__t_usage_") || fm.kind == trayClock ? 380 : 316)
+        .frame(width: fm.kind.hasPrefix("__t_usage_") || fm.kind == trayClock || fm.kind == trayDisk ? 380 : 316)
         .flyoutControls()
         .themedPanel()
         .fixedSize()
@@ -294,6 +295,7 @@ final class FlyoutController {
     func show(kind: String, barTop: CGFloat, centerX: CGFloat, screen: NSScreen) {
         self.barTop = barTop; self.centerX = centerX; self.screenFrame = screen.frame
         fm.availableHeight = max(300, screen.visibleFrame.height - 90)
+        if kind == trayDisk { DiskService.shared.refresh(extra: ConfigStore.shared.config.diskFolders) }
         fm.kind = kind; fm.token += 1
         refit()
         panel.makeKeyAndOrderFront(nil)

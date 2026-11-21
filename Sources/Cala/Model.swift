@@ -29,6 +29,7 @@ final class TaskbarModel: ObservableObject {
     @Published var dragScreen = ""
     @Published var dragX: CGFloat = 0
     @Published var batt: (pct: Int, charging: Bool, isCharging: Bool)?
+    @Published var disk: DiskInfo?
     @Published var wifiOn = true
     @Published var wifiConnected = true
     @Published var volume: Float = 0.5
@@ -56,6 +57,7 @@ final class TaskbarModel: ObservableObject {
         UsageService.shared.$providers.receive(on: DispatchQueue.main).sink { [weak self] in self?.usage = $0 }.store(in: &bag)
         rebuild()
         watchPower()
+        disk = DiskInfo.read()
     }
 
     /// Event-driven: macOS calls back the moment the power source (plug / unplug) or charge state changes,
@@ -117,6 +119,8 @@ final class TaskbarModel: ObservableObject {
     func refreshTray() {
         let battery = SystemTray.battery()
         if batt?.pct != battery?.pct || batt?.charging != battery?.charging || batt?.isCharging != battery?.isCharging { batt = battery }
+        let diskNow = DiskInfo.read()
+        if disk != diskNow { disk = diskNow }
         let wifi = SystemTray.wifiOn() ?? true
         if wifiOn != wifi { wifiOn = wifi }
         let connected = SystemTray.wifiConnected()

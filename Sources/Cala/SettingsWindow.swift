@@ -142,15 +142,18 @@ struct SettingsView: View {
 
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
+            // Aligned with the rows below: the visible logo starts at the icons' left edge (18 pt) and the
+            // title at the rows' text column (52 pt). The app icon has a transparent margin (824/1024 body).
+            HStack(spacing: 2.6) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high)
-                    .frame(width: 38, height: 38)
+                    .frame(width: 34.8, height: 34.8)
+                    .padding(.leading, -3.4)
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Cala").font(.system(size: 13, weight: .semibold))
                     Text("Configuración").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
-            .padding(.horizontal, 10).padding(.top, 40).padding(.bottom, 14)
+            .padding(.horizontal, 8).padding(.top, 40).padding(.bottom, 14)
             ForEach(SettingsPane.allCases) { p in
                 SidebarItem(pane: p, selected: pane == p) { pane = p }
             }
@@ -261,6 +264,10 @@ struct SliderControl: View {
 struct GeneralPane: View {
     @ObservedObject var store: ConfigStore
     @State private var login = LoginItem.enabled
+    @State private var diskFolders = ""
+    private func applyDiskFolders() {
+        store.config.diskFolders = diskFolders.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
@@ -273,6 +280,24 @@ struct GeneralPane: View {
                     Toggle("", isOn: Binding(get: { login }, set: { login = $0; LoginItem.set($0) })).toggleStyle(.switch).labelsHidden()
                 }
             }
+            SectionTitle(text: "Disco")
+            Card {
+                SettingRow(title: "Espacio libre en la barra", caption: "Muestra el porcentaje libre del disco junto a la batería. Al hacer clic ves el detalle y dónde se va el espacio.") {
+                    Toggle("", isOn: Binding(get: { store.config.diskEnabled }, set: { store.config.diskEnabled = $0 })).toggleStyle(.switch).labelsHidden()
+                }
+                if store.config.diskEnabled {
+                    RowDivider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Carpetas extra a medir").font(.system(size: 13, weight: .medium))
+                        Text("Separadas por coma, por ejemplo donde viven tus proyectos o worktrees. Se suman a la lista de caches y herramientas de desarrollo.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                        TextField("~/Proyectos, ~/worktrees", text: $diskFolders).textFieldStyle(.roundedBorder).onSubmit { applyDiskFolders() }
+                            .onAppear { diskFolders = store.config.diskFolders.joined(separator: ", ") }
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: store.config.diskEnabled)
             SectionTitle(text: "Dock de macOS")
             Card {
                 SettingRow(title: "Ocultar el Dock de macOS", caption: "Esta barra lo reemplaza. Se esconde por completo y no vuelve a aparecer al acercar el mouse. Al apagarlo, queda exactamente como estaba.") {
