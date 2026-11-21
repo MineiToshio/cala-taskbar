@@ -41,6 +41,7 @@ final class TaskbarModel: ObservableObject {
     @Published var hasBright = false
     @Published var kbCode = ""
     var frames: [String: CGRect] = [:]
+    private var lastOwnCount = 0
     var hoverSince = Date()
     let store: ConfigStore
     private var bag = Set<AnyCancellable>()
@@ -54,6 +55,12 @@ final class TaskbarModel: ObservableObject {
             nc.publisher(for: name).receive(on: DispatchQueue.main).sink { [weak self] _ in self?.rebuild() }.store(in: &bag)
         }
         store.$config.receive(on: DispatchQueue.main).sink { [weak self] _ in self?.rebuild() }.store(in: &bag)
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.willCloseNotification, NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification] {
+            NotificationCenter.default.publisher(for: name).receive(on: DispatchQueue.main).sink { [weak self] _ in
+                // After the close/minimize has actually happened.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self?.rebuild() }
+            }.store(in: &bag)
+        }
         UsageService.shared.$providers.receive(on: DispatchQueue.main).sink { [weak self] in self?.usage = $0 }.store(in: &bag)
         rebuild()
         watchPower()
@@ -75,6 +82,12 @@ final class TaskbarModel: ObservableObject {
 
     private func key(_ a: NSRunningApplication) -> String {
         a.bundleIdentifier ?? a.bundleURL?.path ?? "pid\(a.processIdentifier)"
+    }
+
+    /// Cala's own windows (Settings, Report a problem, Free up space). The bar's panels and flyouts are NSPanels and
+    /// are not counted: only real, titled windows.
+    static func ownWindows() -> [NSWindow] {
+        NSApp.windows.filter { !($0 is NSPanel) && $0.styleMask.contains(.titled) && ($0.isVisible || $0.isMiniaturized) }
     }
 
     func rebuild() {
@@ -99,6 +112,13 @@ final class TaskbarModel: ObservableObject {
         let rest = running.filter { !used.contains(key($0)) }
             .sorted { ($0.launchDate ?? .distantPast) < ($1.launchDate ?? .distantPast) }
         for a in rest { out.append(item(a, pinned: false)) }
+        // While one of Cala's own windows is open, show Cala on the bar so it is never forgotten behind other windows.
+        let ownCount = Self.ownWindows().count
+        if ownCount != lastOwnCount { lastOwnCount = ownCount; log("bar: Cala windows open = \(ownCount)") }
+        if ownCount > 0 {
+            out.append(AppItem(id: Bundle.main.bundleIdentifier ?? "local.cala", name: "Cala", icon: NSApp.applicationIconImage,
+                               url: Bundle.main.bundleURL, pid: me, pinned: false))
+        }
         let order = store.config.order
         if !order.isEmpty {
             let idx = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })

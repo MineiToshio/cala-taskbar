@@ -125,9 +125,12 @@ enum WindowService {
     static func windows(for pid: pid_t) -> [WinRef] {
         let app = AXUIElementCreateApplication(pid)
         guard let arr = attr(app, kAXWindowsAttribute) as? [AXUIElement] else { return cgWindows(for: pid) }
+        // For Cala itself only its real windows count (not the bar's own panels).
+        let own = pid == ProcessInfo.processInfo.processIdentifier ? Set(TaskbarModel.ownWindows().map { CGWindowID($0.windowNumber) }) : nil
         let ax: [WinRef] = arr.compactMap { w in
             var id: CGWindowID = 0
             guard _AXUIElementGetWindow(w, &id) == .success, id != 0 else { return nil }
+            if let own, !own.contains(id) { return nil }
             let sub = attr(w, kAXSubroleAttribute) as? String
             if sub == "AXUnknown" || sub == "AXSystemDialog" { return nil }
             let title = attr(w, kAXTitleAttribute) as? String ?? ""

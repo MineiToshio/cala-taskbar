@@ -501,9 +501,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             })
         }
-        menu.addItem(BlockItem(item.pinned ? "Desanclar de la barra" : "Anclar a la barra") { [model] in
-            model.togglePin(item)
-        })
+        if item.pid != ProcessInfo.processInfo.processIdentifier {
+            menu.addItem(BlockItem(item.pinned ? "Desanclar de la barra" : "Anclar a la barra") { [model] in
+                model.togglePin(item)
+            })
+        }
         if let url = item.url {
             menu.addItem(BlockItem("Mostrar en Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) })
         }
