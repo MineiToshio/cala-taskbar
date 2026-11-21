@@ -44,13 +44,16 @@ struct DiskFolder: Identifiable, Equatable {
     var bytes: Int64?
     /// Some files could not be read (permissions), so the real size is at least `bytes`.
     var partial = false
+    /// Sub-paths skipped while measuring (they are listed as their own rows).
+    var excluding: [String] = []
     var id: String { path }
 }
 
 /// Measures a short list of folders where developer tools and AI agents pile up data. Runs in the background
-/// only while the storage panel is opened (at most once every 10 minutes) and never touches the protected
-/// folders (Documents, Desktop, Downloads, Trash), so macOS shows no permission prompts. It also measures
-/// /Users/Shared and the other user accounts' home folders (what their permissions let this user read).
+/// only while the storage panel is opened (at most once every 10 minutes). It also measures /Users/Shared, the
+/// other user accounts' home folders (what their permissions let this user read) and the rest of the user's own
+/// folder (Documents, Downloads, Desktop...; macOS asks permission once per protected folder). The panel adds a
+/// last "Sistema y otros" row (used space minus everything measured) so the rows add up to the used space.
 final class DiskService: ObservableObject {
     static let shared = DiskService()
     @Published private(set) var folders: [DiskFolder] = []
@@ -95,17 +98,23 @@ final class DiskService: ObservableObject {
             let p = (e.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath
             if !p.isEmpty { add(p, (p as NSString).lastPathComponent, "folder.badge.gearshape") }
         }
+        // Everything else in the user's own folder (Documents, Downloads, Desktop, Movies...), so the list adds up.
+        // Reading those folders makes macOS ask for permission once each.
+        let inHome = out.map(\.path).filter { $0.hasPrefix(h + "/") }
+        out.append(DiskFolder(path: h, name: "Tu carpeta personal (resto)", symbol: "house.fill", bytes: nil, excluding: inHome))
         return out
     }
 
     /// Allocated size on disk of everything under `path`, and whether some of it could not be read.
-    static func size(of path: String) -> (bytes: Int64, partial: Bool) {
+    static func size(of path: String, excluding: [String] = []) -> (bytes: Int64, partial: Bool) {
+        let skip = Set(excluding)
         let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .isDirectoryKey]
         var partial = false
         guard let e = FileManager.default.enumerator(at: URL(fileURLWithPath: path), includingPropertiesForKeys: Array(keys),
                                                      options: [], errorHandler: { _, _ in partial = true; return true }) else { return (0, true) }
         var total: Int64 = 0
         for case let u as URL in e {
+            if !skip.isEmpty, skip.contains(u.path) { e.skipDescendants(); continue }
             guard let v = try? u.resourceValues(forKeys: keys), v.isDirectory != true else { continue }
             total += Int64(v.totalFileAllocatedSize ?? 0)
         }
@@ -126,13 +135,14 @@ final class DiskService: ObservableObject {
         folders = list
         scanning = true
         let paths = list.map(\.path)
+        let skips = Dictionary(list.map { ($0.path, $0.excluding) }, uniquingKeysWith: { a, _ in a })
         let started = Date()
         DispatchQueue.global(qos: .utility).async {
             let group = DispatchGroup()
             for p in paths {
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    let r = Self.size(of: p)
+                    let r = Self.size(of: p, excluding: skips[p] ?? [])
                     DispatchQueue.main.async {
                         if gen == self.generation, let i = self.folders.firstIndex(where: { $0.path == p }) {
                             self.folders[i].bytes = r.bytes; self.folders[i].partial = r.partial
@@ -182,6 +192,14 @@ struct DiskPane: View {
         service.folders.sorted { ($0.bytes ?? -1) > ($1.bytes ?? -1) }
     }
 
+    /// What the measured folders do not explain: macOS itself, system data, the Trash and anything not listed.
+    /// Shown last so that the rows add up to the used space.
+    private var remainder: DiskFolder? {
+        guard let d = model.disk, !service.folders.isEmpty, service.folders.allSatisfy({ $0.bytes != nil }) else { return nil }
+        let measured = service.folders.reduce(Int64(0)) { $0 + ($1.bytes ?? 0) }
+        return DiskFolder(path: "", name: "Sistema y otros (no medido)", symbol: "gearshape.2.fill", bytes: max(0, d.usedBytes - measured))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Header(title: "Almacenamiento")
@@ -211,9 +229,11 @@ struct DiskPane: View {
                 VStack(spacing: 0) {
                     let top = Double(sorted.first?.bytes ?? 1)
                     ForEach(sorted) { f in folderRow(f, top: max(1, top)) }
+                    if let r = remainder { folderRow(r, top: max(1, top)) }
+                    else if !service.folders.isEmpty { folderRow(DiskFolder(path: "", name: "Sistema y otros (no medido)", symbol: "gearshape.2.fill", bytes: nil), top: 1) }
                 }
             }
-            .frame(height: min(CGFloat(service.folders.count) * rowHeight, 272))
+            .frame(height: min(CGFloat(service.folders.count + 1) * rowHeight, 272))
             Divider()
             Row(icon: "arrow.clockwise", title: "Volver a medir") { service.refresh(extra: store.config.diskFolders, force: true) }
             LinkRow(title: "Ajustes de almacenamiento…", pane: "com.apple.settings.Storage")
@@ -228,7 +248,7 @@ struct DiskPane: View {
     }
 
     private func folderRow(_ f: DiskFolder, top: Double) -> some View {
-        Button { NSWorkspace.shared.open(URL(fileURLWithPath: f.path)) } label: {
+        Button { if !f.path.isEmpty { NSWorkspace.shared.open(URL(fileURLWithPath: f.path)) } } label: {
             HStack(spacing: 10) {
                 Image(systemName: f.symbol).frame(width: 18).flyoutSecondary()
                 VStack(alignment: .leading, spacing: 3) {
@@ -249,6 +269,6 @@ struct DiskPane: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(f.partial ? f.path + " — hay archivos sin permiso de lectura; el tamaño real es mayor" : f.path)
+        .help(f.path.isEmpty ? "macOS, datos del sistema, la Papelera y lo que no está en la lista" : f.partial ? f.path + " — hay archivos sin permiso de lectura; el tamaño real es mayor" : f.path)
     }
 }
