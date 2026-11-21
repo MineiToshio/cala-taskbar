@@ -505,8 +505,7 @@ struct UsagePane: View {
         if window.isResetting(now) { return "resetting…" }
         let formatter = DateFormatter(); formatter.locale = Locale.current; formatter.timeZone = .current
         formatter.dateFormat = "EEE d, h:mm a"
-        let delta = max(0, Int(reset.timeIntervalSince(now)))
-        let relative = delta >= 86400 ? "\(delta / 86400) d" : (delta >= 3600 ? "\(delta / 3600) h" : (delta >= 60 ? "\(delta / 60) min" : "\(delta) s"))
+        let relative = UsagePace.formatted(reset.timeIntervalSince(now))
         return "resets " + formatter.string(from: reset) + " · in " + relative
     }
     private func provider(_ state: UsageState, now: Date) -> some View {

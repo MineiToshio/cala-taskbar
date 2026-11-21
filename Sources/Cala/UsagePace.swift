@@ -39,11 +39,15 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         return minutes.isFinite && minutes > 0 ? minutes * 60 : nil
     }
 
+    /// Exact remaining time, never rounded up: "2 d 3 h 12 min", "4 h 47 min", "16 min", "42 s".
     static func formatted(_ seconds: TimeInterval) -> String {
-        let m = max(1, Int((seconds / 60).rounded()))
-        if m >= 1440 { let d = m / 1440, h = (m % 1440) / 60; return h > 0 ? "\(d) d \(h) h" : "\(d) d" }
-        if m >= 60 { let h = m / 60, r = m % 60; return r > 0 ? "\(h) h \(r) min" : "\(h) h" }
-        return "\(m) min"
+        let total = max(0, Int(seconds))      // truncated: a countdown never claims more time than there is
+        let d = total / 86400, h = (total % 86400) / 3600, m = (total % 3600) / 60
+        var parts: [String] = []
+        if d > 0 { parts.append("\(d) d") }
+        if h > 0 { parts.append("\(h) h") }
+        if m > 0 { parts.append("\(m) min") }
+        return parts.isEmpty ? "\(total) s" : parts.joined(separator: " ")
     }
 
     /// Always answers for a window that is counting (so the line never comes and goes): a projection, "no recent use",
