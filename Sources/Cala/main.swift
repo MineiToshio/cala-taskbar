@@ -111,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.shared.show(); return true
     }
 
-    func applicationWillTerminate(_ n: Notification) { DockControl.onQuit(store) }
+    func applicationWillTerminate(_ n: Notification) { DockControl.onQuit(store); MenuBarControl.onQuit(store) }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
@@ -122,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         source.resume()
         LoginItem.migrateLegacy()
         DockControl.applyOnLaunch(store)
+        MenuBarControl.applyOnLaunch(store)
         WindowSwitcher.shared.ensureTap()
         MinimizeWatcher.shared.start()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in WindowSwitcher.shared.ensureTap(); MinimizeWatcher.shared.sync() }

@@ -29,6 +29,13 @@ struct Config: Codable, Equatable {
     var switcherReplaceCmdTab = false
     /// Give the Dock back when the bar quits (so nobody is left without one).
     var restoreDockOnQuit = true
+    /// Hide the macOS menu bar (auto-hide everywhere) while the app runs.
+    var hideMenuBar = false
+    var restoreMenuBarOnQuit = true
+    var menuBarBackupSaved = false
+    var menuBarBackupOption: Int?
+    var menuBarBackupHide: Bool?
+    var menuBarBackupFullscreen: Bool?
     var dockBackupSaved = false
     var dockBackupAutohide: Bool?
     var dockBackupDelay: Double?
@@ -63,6 +70,7 @@ struct Config: Codable, Equatable {
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
+        case hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
     }
@@ -94,6 +102,12 @@ extension Config {
         switcherReplaceCmdTab = field(Bool.self, .switcherReplaceCmdTab) ?? switcherReplaceCmdTab
         restoreDockOnQuit = field(Bool.self, .restoreDockOnQuit) ?? restoreDockOnQuit
         dockBackupSaved = field(Bool.self, .dockBackupSaved) ?? dockBackupSaved
+        hideMenuBar = field(Bool.self, .hideMenuBar) ?? hideMenuBar
+        restoreMenuBarOnQuit = field(Bool.self, .restoreMenuBarOnQuit) ?? restoreMenuBarOnQuit
+        menuBarBackupSaved = field(Bool.self, .menuBarBackupSaved) ?? menuBarBackupSaved
+        menuBarBackupOption = field(Int.self, .menuBarBackupOption)
+        menuBarBackupHide = field(Bool.self, .menuBarBackupHide)
+        menuBarBackupFullscreen = field(Bool.self, .menuBarBackupFullscreen)
         dockBackupAutohide = field(Bool.self, .dockBackupAutohide)
         dockBackupDelay = field(Double.self, .dockBackupDelay)
         usageEnabled = field(Bool.self, .usageEnabled) ?? usageEnabled

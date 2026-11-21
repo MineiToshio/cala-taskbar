@@ -12,6 +12,9 @@ File: `~/Library/Application Support/Cala/config.json`. Created on first run and
 | `previewWidth` | number | `420` | Thumbnail width, 300–560 |
 | `alignments` | object | `{}` | Display UUID → `"left"` or `"center"`. Screens not listed use left |
 | `theme` | string | `"system"` | `system`, `graphite`, `midnight`, `ocean`, `sunset`, `forest`, `lavender`, `candy`, `snow` |
+| `hideMenuBar` | bool | `false` | Auto-hide the macOS menu bar everywhere while Cala runs |
+| `restoreMenuBarOnQuit` | bool | `true` | Give the menu bar back when Cala quits |
+| `menuBarBackup*` | various | — | Original menu bar auto-hide values, restored verbatim (like the Dock backup) |
 | `trayLayout` | object | `{}` | Tray item id → `"bar"`, `"more"` (behind ^) or `"hidden"`; missing ids use their default |
 | `trayOrder` | array of ids | `[]` | Left-to-right order of the tray items (ids not listed keep their default place) |
 | `monitorEnabled` | bool | `true` | Show the CPU gauge and system panel in the tray |

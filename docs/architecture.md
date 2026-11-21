@@ -28,6 +28,7 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `Theme.swift` | `BarTheme` (nine themes), `themeAccent`, shared `FlyoutStyle`, `flyoutSection()` and `themedPanel()` modifiers |
 | `SettingsWindow.swift` | Settings window (SwiftUI in an `NSWindow`), its seven panes, `LoginItem` |
 | `Switcher.swift` | Window switcher: `CGEventTap`, window ordering, panel and cards |
+| `MenuBarControl.swift` | Hide / restore the macOS menu bar (auto-hide preferences + live-apply notifications) |
 | `DockControl.swift` | Hide / restore / adopt the native Dock through `CFPreferences` |
 
 ## Panels

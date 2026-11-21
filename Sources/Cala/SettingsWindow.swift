@@ -307,6 +307,19 @@ struct GeneralPane: View {
                 }
             }
             .animation(.easeOut(duration: 0.2), value: store.config.hideNativeDock)
+            SectionTitle(text: "Barra de menús de macOS")
+            Card {
+                SettingRow(title: "Ocultar la barra de menús", caption: "La franja de arriba (reloj, Wi-Fi, menús de las apps). macOS no permite quitarla del todo: se esconde y reaparece al llevar el mouse al borde superior de la pantalla. Al apagarlo, queda exactamente como estaba.") {
+                    Toggle("", isOn: Binding(get: { store.config.hideMenuBar }, set: { MenuBarControl.setHidden($0, store) })).toggleStyle(.switch).labelsHidden()
+                }
+                if store.config.hideMenuBar {
+                    RowDivider()
+                    SettingRow(title: "Devolverla al cerrar Cala", caption: "Si sales de Cala, la barra de menús vuelve a mostrarse sola. Al abrirla otra vez se oculta de nuevo.") {
+                        Toggle("", isOn: Binding(get: { store.config.restoreMenuBarOnQuit }, set: { store.config.restoreMenuBarOnQuit = $0 })).toggleStyle(.switch).labelsHidden()
+                    }
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: store.config.hideMenuBar)
             SectionTitle(text: "Cambiar de ventana")
             Card {
                 SettingRow(title: "Selector de ventanas (Opción + Tab)", caption: "Mantén Opción y pulsa Tab: ves todas tus ventanas, no solo las apps. Tab avanza, Mayús+Tab retrocede, Esc cancela; al soltar Opción se abre la elegida.") {
