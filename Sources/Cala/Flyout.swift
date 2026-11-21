@@ -93,6 +93,7 @@ struct FlyoutView: View {
             case trayBatt: BatteryPane(model: model)
             case trayBright: BrightPane()
             case trayDisk: DiskPane(model: model)
+            case traySystem: SystemPane()
             case trayUser: UserPane()
             case trayKB: KeyboardPane(model: model)
             case trayClock: CalendarPane(maxAgendaHeight: min(400, max(60, fm.availableHeight - 480)))
@@ -102,7 +103,7 @@ struct FlyoutView: View {
         }
         .id(fm.token)
         .padding(18)
-        .frame(width: fm.kind.hasPrefix("__t_usage_") || fm.kind == trayClock || fm.kind == trayDisk ? 380 : 316)
+        .frame(width: fm.kind.hasPrefix("__t_usage_") || fm.kind == trayClock || fm.kind == trayDisk || fm.kind == traySystem ? 380 : 316)
         .flyoutControls()
         .themedPanel()
         .fixedSize()

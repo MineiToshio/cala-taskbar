@@ -12,6 +12,7 @@ File: `~/Library/Application Support/Cala/config.json`. Created on first run and
 | `previewWidth` | number | `420` | Thumbnail width, 300–560 |
 | `alignments` | object | `{}` | Display UUID → `"left"` or `"center"`. Screens not listed use left |
 | `theme` | string | `"system"` | `system`, `graphite`, `midnight`, `ocean`, `sunset`, `forest`, `lavender`, `candy`, `snow` |
+| `monitorEnabled` | bool | `true` | Show the CPU gauge and system panel in the tray |
 | `diskEnabled` | bool | `true` | Show free disk space in the tray |
 | `diskFolders` | array of paths | `[]` | Extra folders measured in the storage panel (`~` allowed) |
 | `barOpacity` | number | `1` | Bar background opacity (1 = solid, 0.2 = very transparent) |

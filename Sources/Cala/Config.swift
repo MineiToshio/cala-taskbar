@@ -43,6 +43,8 @@ struct Config: Codable, Equatable {
     /// Remaining percentage at or below which the low-quota notification fires (10, 15, 20 or 30).
     var usageAlertThreshold = 20
     var diskEnabled = true
+    /// CPU / memory monitor in the tray with a "why is my Mac slow" panel.
+    var monitorEnabled = true
     /// Extra folders measured in the storage panel (e.g. where your projects or git worktrees live).
     var diskFolders: [String] = []
     var calendarEnabled = true
@@ -55,7 +57,7 @@ struct Config: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case pinned, autoHide, iconSize, previewDelay, previewWidth, alignments, order, theme, barOpacity
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
-        case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders
+        case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
@@ -100,6 +102,7 @@ extension Config {
         usageAlertThreshold = field(Int.self, .usageAlertThreshold) ?? usageAlertThreshold
         if ![10, 15, 20, 30].contains(usageAlertThreshold) { usageAlertThreshold = 20; invalid = true }
         diskEnabled = field(Bool.self, .diskEnabled) ?? diskEnabled
+        monitorEnabled = field(Bool.self, .monitorEnabled) ?? monitorEnabled
         diskFolders = field([String].self, .diskFolders) ?? diskFolders
         calendarEnabled = field(Bool.self, .calendarEnabled) ?? calendarEnabled
         calendarJoinEnabled = field(Bool.self, .calendarJoinEnabled) ?? calendarJoinEnabled

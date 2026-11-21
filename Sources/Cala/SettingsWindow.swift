@@ -280,6 +280,12 @@ struct GeneralPane: View {
                     Toggle("", isOn: Binding(get: { login }, set: { login = $0; LoginItem.set($0) })).toggleStyle(.switch).labelsHidden()
                 }
             }
+            SectionTitle(text: "Sistema")
+            Card {
+                SettingRow(title: "Monitor del sistema", caption: "Muestra el uso de CPU en la barra. Al hacer clic ves memoria, qué apps usan más y por qué el Mac puede estar lento.") {
+                    Toggle("", isOn: Binding(get: { store.config.monitorEnabled }, set: { store.config.monitorEnabled = $0 })).toggleStyle(.switch).labelsHidden()
+                }
+            }
             SectionTitle(text: "Disco")
             Card {
                 SettingRow(title: "Espacio libre en la barra", caption: "Muestra el porcentaje libre del disco junto a la batería. Al hacer clic ves el detalle y dónde se va el espacio.") {
