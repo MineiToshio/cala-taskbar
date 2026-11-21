@@ -291,7 +291,7 @@ struct GeneralPane: View {
                         Text("Carpetas extra a medir").font(.system(size: 13, weight: .medium))
                         Text("Separadas por coma, por ejemplo donde viven tus proyectos o worktrees. Se suman a la lista de caches y herramientas de desarrollo.")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
-                        TextField("~/Proyectos, ~/worktrees", text: $diskFolders).textFieldStyle(.roundedBorder).onSubmit { applyDiskFolders() }
+                        TextField("~/Projects, ~/worktrees", text: $diskFolders).textFieldStyle(.roundedBorder).onSubmit { applyDiskFolders() }
                             .onAppear { diskFolders = store.config.diskFolders.joined(separator: ", ") }
                     }
                     .padding(.vertical, 6)

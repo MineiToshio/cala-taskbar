@@ -6,6 +6,17 @@ import AppKit
 enum Git {
     struct Result { var out: String; var err: String; var status: Int32 }
 
+    /// `/usr/bin/git` is a shim that pops up the "install developer tools" dialog when they are missing, so it is
+    /// only used when a real developer directory is installed.
+    static let available: Bool = {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select"); p.arguments = ["-p"]
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
+    }()
+
     /// Runs /usr/bin/git without ever prompting or taking optional locks. Off-main only.
     static func run(_ args: [String], timeout: TimeInterval = 180) -> Result {
         let p = Process(), o = Pipe(), e = Pipe()
@@ -15,7 +26,7 @@ enum Git {
         env["GIT_TERMINAL_PROMPT"] = "0"; env["GIT_OPTIONAL_LOCKS"] = "0"; env["LC_ALL"] = "C"
         p.environment = env
         p.standardOutput = o; p.standardError = e; p.standardInput = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return Result(out: "", err: "git not available", status: -1) }
+        guard available, (try? p.run()) != nil else { return Result(out: "", err: "git not available", status: -1) }
         var outData = Data(), errData = Data()
         let group = DispatchGroup()
         group.enter(); DispatchQueue.global().async { outData = o.fileHandleForReading.readDataToEndOfFile(); group.leave() }
