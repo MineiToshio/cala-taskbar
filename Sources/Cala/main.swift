@@ -125,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarControl.applyOnLaunch(store)
         MenuBarIcons.apply(store)
         MenuBarDiagnostics.install()
+        CrashReporter.checkAtLaunch(store: store)
         WindowSwitcher.shared.ensureTap()
         MinimizeWatcher.shared.start()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in WindowSwitcher.shared.ensureTap(); MinimizeWatcher.shared.sync() }
@@ -539,6 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(transItem)
         menu.addItem(.separator())
         menu.addItem(BlockItem("Configuración…") { SettingsWindowController.shared.show() })
+        menu.addItem(BlockItem("Reportar un problema…") { FeedbackWindowController.shared.show() })
         return menu
     }
 

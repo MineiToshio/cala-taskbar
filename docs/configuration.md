@@ -14,6 +14,7 @@ File: `~/Library/Application Support/Cala/config.json`. Created on first run and
 | `theme` | string | `"system"` | `system`, `graphite`, `midnight`, `ocean`, `sunset`, `forest`, `lavender`, `candy`, `snow` |
 | `menuBarHiddenIcons` | array of ids | `[]` | macOS menu bar icons to hide: `wifi`, `battery`, `user`, `input` |
 | `menuBarIconBackupV2` | object | `{}` | Original per-host value of each hidden icon (a number, or `"nil"` when the key did not exist), restored verbatim |
+| `crashReports` | string | `"ask"` | What to do when Cala crashed last time: `ask`, `auto` (send without asking) or `never` |
 | `hideMenuBar` | bool | `false` | Auto-hide the macOS menu bar everywhere while Cala runs |
 | `restoreMenuBarOnQuit` | bool | `true` | Give the menu bar back when Cala quits |
 | `menuBarBackup*` | various | — | Original menu bar auto-hide values, restored verbatim (like the Dock backup) |

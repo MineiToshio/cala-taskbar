@@ -17,9 +17,11 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleExecutable</key><string>Cala</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
+${CALA_SENTRY_DSN:+<key>CalaSentryDSN</key><string>$CALA_SENTRY_DSN</string>}
 <key>NSScreenCaptureUsageDescription</key><string>Mostrar previews de ventanas</string>
 <key>NSAppleEventsUsageDescription</key><string>Contar y vaciar la Papelera a través de Finder.</string>
 <key>NSCalendarsFullAccessUsageDescription</key><string>Show upcoming events from the calendars you choose in the taskbar. Events stay on this Mac.</string>

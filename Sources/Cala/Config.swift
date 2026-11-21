@@ -30,6 +30,8 @@ struct Config: Codable, Equatable {
     /// Give the Dock back when the bar quits (so nobody is left without one).
     var restoreDockOnQuit = true
     /// Hide the macOS menu bar (auto-hide everywhere) while the app runs.
+    /// What to do when Cala crashed last time: "ask" (default), "auto" (send without asking) or "never".
+    var crashReports = "ask"
     var hideMenuBar = false
     var restoreMenuBarOnQuit = true
     /// Ids of macOS menu bar icons (see MenuBarIcons) to hide, and the original value of each so it can be restored.
@@ -73,7 +75,7 @@ struct Config: Codable, Equatable {
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
-        case menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
+        case crashReports, menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
     }
@@ -106,6 +108,8 @@ extension Config {
         restoreDockOnQuit = field(Bool.self, .restoreDockOnQuit) ?? restoreDockOnQuit
         dockBackupSaved = field(Bool.self, .dockBackupSaved) ?? dockBackupSaved
         hideMenuBar = field(Bool.self, .hideMenuBar) ?? hideMenuBar
+        crashReports = field(String.self, .crashReports) ?? crashReports
+        if !["ask", "auto", "never"].contains(crashReports) { crashReports = "ask"; invalid = true }
         menuBarHiddenIcons = field([String].self, .menuBarHiddenIcons) ?? menuBarHiddenIcons
         menuBarIconBackupV2 = field([String: String].self, .menuBarIconBackupV2) ?? menuBarIconBackupV2
         restoreMenuBarOnQuit = field(Bool.self, .restoreMenuBarOnQuit) ?? restoreMenuBarOnQuit

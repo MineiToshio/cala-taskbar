@@ -649,6 +649,19 @@ struct AdvancedPane: View {
                 }
             }
             Card {
+                SettingRow(title: "Reportar un problema", caption: "Cuéntanos qué falla o qué te gustaría. Verás exactamente qué se envía antes de enviarlo.") {
+                    Button("Reportar…") { FeedbackWindowController.shared.show() }
+                }
+                RowDivider()
+                SettingRow(title: "Si Cala se cierra sola", caption: "Al abrirla de nuevo puede ofrecerte enviar un informe del fallo. No incluye tus archivos, ventanas ni contraseñas.") {
+                    Picker("", selection: Binding(get: { store.config.crashReports }, set: { store.config.crashReports = $0 })) {
+                        Text("Preguntarme").tag("ask")
+                        Text("Enviar sin preguntar").tag("auto")
+                        Text("No enviar nunca").tag("never")
+                    }.labelsHidden().frame(width: 190)
+                }
+            }
+            Card {
                 SettingRow(title: "Restablecer apariencia", caption: "Vuelve el tema, la transparencia y los tamaños a sus valores originales. No toca tus apps ancladas.") {
                     Button("Restablecer…", role: .destructive) { confirmReset = true }
                 }
