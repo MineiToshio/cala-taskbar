@@ -234,12 +234,13 @@ struct SystemPane: View {
     @ObservedObject private var m = SystemMonitor.shared
     @Environment(\.themeAccent) private var accent
     private let rows = 5
+    @State private var tab = 0   // 0 = processor, 1 = memory
 
     private func pressureColor(_ p: MemoryPressure) -> Color { p == .normal ? .green : (p == .warning ? .orange : .red) }
 
     var body: some View {
         let d = m.diagnosis
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             Header(title: calendarText("System", "Sistema"))
             Label(d.text, systemImage: d.level == .ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .font(.system(size: 12, weight: .medium))
@@ -274,31 +275,55 @@ struct SystemPane: View {
                     .font(.system(size: 10.5)).flyoutSecondary().fixedSize(horizontal: false, vertical: true)
             }
             Divider()
-            list(calendarText("Using the processor", "Usan el procesador"), m.topCPU, value: { "\(Int($0.cpu.rounded()))%" })
-            list(calendarText("Using the memory", "Usan la memoria"), m.topMemory, value: { diskBytes(Int64($0.memory)) })
+            VStack(alignment: .leading, spacing: 10) {
+                Text(calendarText("What is using the most", "Qué está usando más")).font(.system(size: 13, weight: .semibold))
+                Picker("", selection: $tab) {
+                    Text(calendarText("Processor", "Procesador")).tag(0)
+                    Text(calendarText("Memory", "Memoria")).tag(1)
+                }.pickerStyle(.segmented).labelsHidden()
+                if tab == 0 {
+                    list(m.topCPU, value: { "\(Int($0.cpu.rounded()))%" }, fraction: { min(1, $0.cpu / max(100, m.topCPU.first?.cpu ?? 100)) })
+                } else {
+                    list(m.topMemory, value: { diskBytes(Int64($0.memory)) }, fraction: { Double($0.memory) / Double(max(1, m.memoryTotal)) * 4 })
+                }
+                Text(tab == 0 ? calendarText("100% = one full processor core.", "100% = un núcleo del procesador completo.")
+                              : calendarText("Bar: share of your total memory (zoomed ×4).", "Barra: parte de tu memoria total (ampliada ×4)."))
+                    .font(.system(size: 10)).flyoutSecondary()
+            }
             Divider()
             Row(icon: "gauge.with.dots.needle.67percent", title: calendarText("Open Activity Monitor", "Abrir Monitor de Actividad")) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
             }
         }
-        .onAppear { m.resetProcessSample(); m.tick(); m.sampleProcesses() }
+        .onAppear { tab = (m.pressure != .normal || m.memoryUsed * 10 > m.memoryTotal * 8) && m.smoothedCPU < 75 ? 1 : 0; m.resetProcessSample(); m.tick(); m.sampleProcesses() }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in m.tick(); m.sampleProcesses() }
     }
 
-    private func list(_ title: String, _ items: [ProcessGroup], value: @escaping (ProcessGroup) -> String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 12, weight: .semibold)).flyoutSecondary()
+    private func list(_ items: [ProcessGroup], value: @escaping (ProcessGroup) -> String, fraction: @escaping (ProcessGroup) -> Double) -> some View {
+        VStack(spacing: 7) {
             ForEach(0..<rows, id: \.self) { i in
-                HStack {
-                    if i < items.count {
-                        Text(items[i].name + (items[i].count > 1 ? " ×\(items[i].count)" : "")).font(.system(size: 12.5)).lineLimit(1)
-                        Spacer(minLength: 6)
-                        Text(value(items[i])).font(.system(size: 12)).monospacedDigit().flyoutSecondary()
-                    } else {
-                        Text(i == 0 && !m.sampledProcesses ? calendarText("Measuring…", "Midiendo…") : " ").font(.system(size: 12.5)).flyoutSecondary()
-                        Spacer()
+                if i < items.count {
+                    VStack(spacing: 4) {
+                        HStack {
+                            Text(items[i].name + (items[i].count > 1 ? " ×\(items[i].count)" : "")).font(.system(size: 12.5)).lineLimit(1)
+                            Spacer(minLength: 6)
+                            Text(value(items[i])).font(.system(size: 12, weight: .medium)).monospacedDigit()
+                        }
+                        GeometryReader { g in
+                            Capsule().fill(Color.primary.opacity(0.08))
+                                .overlay(alignment: .leading) {
+                                    Capsule().fill(accent.opacity(0.8)).frame(width: max(3, g.size.width * CGFloat(min(1, max(0, fraction(items[i]))))))
+                                }
+                        }.frame(height: 4)
                     }
-                }.frame(height: 18)
+                    .frame(height: 30)
+                } else {
+                    HStack {
+                        Text(i == 0 ? (m.sampledProcesses ? calendarText("Nothing noticeable.", "Nada destacable.") : calendarText("Measuring…", "Midiendo…")) : " ")
+                            .font(.system(size: 12.5)).flyoutSecondary()
+                        Spacer()
+                    }.frame(height: 30)
+                }
             }
         }
     }
