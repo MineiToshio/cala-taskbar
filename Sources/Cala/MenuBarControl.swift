@@ -178,6 +178,10 @@ enum MenuBarDiagnostics {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
             DispatchQueue.global(qos: .utility).async { MenuBarDiagnostics.dump() }
         }, "local.cala.listMenuBarExtras" as CFString, nil, .deliverImmediately)
+        // Same idea for the report window: `notifyutil -p local.cala.openFeedback` (handy to test it without the menu).
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
+            DispatchQueue.main.async { FeedbackWindowController.shared.show() }
+        }, "local.cala.openFeedback" as CFString, nil, .deliverImmediately)
     }
 
     private static func string(_ e: AXUIElement, _ attr: String) -> String {

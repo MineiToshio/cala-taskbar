@@ -174,17 +174,24 @@ final class FeedbackWindowController {
     private var window: NSWindow?
 
     func show(crash: CrashReporter.Crash? = nil) {
+        log("feedback: opening window (crash=\(crash != nil))")
         window?.close()
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
         w.title = "Cala · Reportar un problema"
-        w.contentView = NSHostingView(rootView: FeedbackView(crash: crash) { [weak self] in self?.window?.close() })
+        // The SwiftUI content must not decide the window's size (a text editor and a scroll view have no natural height).
+        let host = NSHostingView(rootView: FeedbackView(crash: crash) { [weak self] in self?.window?.close() }
+            .frame(maxWidth: .infinity, maxHeight: .infinity))
+        host.sizingOptions = []
+        w.contentView = host
         w.contentMinSize = NSSize(width: 520, height: 560)
+        w.setContentSize(NSSize(width: 560, height: 640))
         w.center()
         window = w
         NSApp.activate(ignoringOtherApps: true)
         w.makeKeyAndOrderFront(nil)
+        log("feedback: window shown frame=\(NSStringFromRect(w.frame)) visible=\(w.isVisible)")
     }
 }
 
