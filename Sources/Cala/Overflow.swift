@@ -20,6 +20,67 @@ extension TaskbarModel {
     }
 }
 
+extension TaskbarModel {
+    var wifiSymbol: String { !wifiOn ? "wifi.slash" : (wifiConnected ? "wifi" : "wifi.exclamationmark") }
+    var volumeSymbol: String {
+        if muted || volume == 0 { return "speaker.slash.fill" }
+        return volume < 0.34 ? "speaker.wave.1.fill" : (volume < 0.67 ? "speaker.wave.2.fill" : "speaker.wave.3.fill")
+    }
+    static func batterySymbol(_ b: (pct: Int, charging: Bool, isCharging: Bool)) -> String {
+        if b.charging { return "battery.100.bolt" }   // on AC power (charging or full)
+        switch b.pct { case ..<13: return "battery.0"; case ..<38: return "battery.25"
+        case ..<63: return "battery.50"; case ..<88: return "battery.75"; default: return "battery.100" }
+    }
+}
+
+/// The icon of a tray item, drawn exactly as on the bar. The bar, the "^" panel and Settings → Bandeja all use it, so
+/// they can never disagree. With a model it follows the live state (Wi-Fi signal, mute, charge...).
+struct TrayGlyph: View {
+    let id: String
+    var model: TaskbarModel?
+
+    var body: some View {
+        switch id {
+        case trayKB:
+            if let code = model?.kbCode, !code.isEmpty { Text(code).font(.system(size: 11)) }
+            else { Image(systemName: "keyboard").font(.system(size: 14)) }
+        case trayWifi:
+            if let m = model, m.wifiOn, m.wifiConnected { Image(systemName: "wifi", variableValue: m.wifiSignal).font(.system(size: 14)) }
+            else { Image(systemName: model?.wifiSymbol ?? "wifi").font(.system(size: 14)) }
+        case trayBT:
+            BluetoothShape().stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                .frame(width: 10, height: 15).opacity((model?.btOn ?? true) ? 1 : 0.4)
+        case trayBright:
+            Image(systemName: "sun.max.fill").font(.system(size: 14))
+        case trayVol:
+            Image(systemName: model?.volumeSymbol ?? "speaker.wave.2.fill").font(.system(size: 14))
+        case trayUsage:
+            // Two services, one glyph: both marks side by side.
+            HStack(spacing: 3) {
+                ProviderMark(provider: .claude).frame(width: 13, height: 13)
+                ProviderMark(provider: .codex).frame(width: 13, height: 13)
+            }
+        case traySystem:
+            Image(systemName: "cpu").font(.system(size: 14))
+        case trayDisk:
+            Image(systemName: "internaldrive").font(.system(size: 14))
+        case trayBatt:
+            Image(systemName: model?.batt.map(TaskbarModel.batterySymbol) ?? "battery.100").font(.system(size: 14))
+        case trayUser:
+            if let photo = model?.userPhoto { Image(nsImage: photo).resizable().scaledToFill().frame(width: 20, height: 20).clipShape(Circle()) }
+            else { Image(systemName: "person.crop.circle").font(.system(size: 14)) }
+        case trayDownloads:
+            Image(systemName: "arrow.down.circle").font(.system(size: 14))
+        case trayTrash:
+            Image(systemName: "trash").font(.system(size: 14))
+        case trayMore:
+            Image(systemName: "chevron.up").font(.system(size: 14))
+        default:
+            EmptyView()
+        }
+    }
+}
+
 // MARK: - "^" overflow panel
 
 struct MorePane: View {
@@ -27,18 +88,6 @@ struct MorePane: View {
     @ObservedObject var model: TaskbarModel
     @ObservedObject private var store = ConfigStore.shared
     @State private var hover: String?
-
-    private func icon(_ id: String, _ info: TrayItemInfo) -> some View {
-        Group {
-            if id == trayUser, let photo = model.userPhoto {
-                Image(nsImage: photo).resizable().scaledToFill().frame(width: 24, height: 24).clipShape(Circle())
-            } else if id == trayKB, !model.kbCode.isEmpty {
-                Text(model.kbCode).font(.system(size: 15, weight: .semibold))
-            } else {
-                Image(systemName: info.symbol).font(.system(size: 19))
-            }
-        }.frame(height: 26)
-    }
 
     var body: some View {
         let ids = store.config.moreTrayIDs.filter { model.trayAvailable($0) }
@@ -54,7 +103,7 @@ struct MorePane: View {
                                 fm.fromMore = true; fm.kind = id; fm.token += 1
                             } label: {
                                 VStack(spacing: 6) {
-                                    icon(id, info)
+                                    TrayGlyph(id: id, model: model).scaleEffect(1.3).frame(height: 26)
                                     Text(info.title).font(.system(size: 11)).lineLimit(1)
                                 }
                                 .frame(maxWidth: .infinity).frame(height: 66)

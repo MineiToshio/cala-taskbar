@@ -217,22 +217,9 @@ struct TrayView: View {
     @ObservedObject private var store = ConfigStore.shared
     @ObservedObject private var monitor = SystemMonitor.shared
 
-    private func battIcon(_ b: (pct: Int, charging: Bool, isCharging: Bool)) -> String {
-        if b.charging { return "battery.100.bolt" }   // on AC power (charging or full)
-        switch b.pct { case ..<13: return "battery.0"; case ..<38: return "battery.25"
-        case ..<63: return "battery.50"; case ..<88: return "battery.75"; default: return "battery.100" }
-    }
-    private var volIcon: String {
-        if model.muted || model.volume == 0 { return "speaker.slash.fill" }
-        return model.volume < 0.34 ? "speaker.wave.1.fill" : (model.volume < 0.67 ? "speaker.wave.2.fill" : "speaker.wave.3.fill")
-    }
-    private var wifiIcon: String {
-        !model.wifiOn ? "wifi.slash" : (model.wifiConnected ? "wifi" : "wifi.exclamationmark")
-    }
-
     var body: some View {
         HStack(spacing: 0) {
-            if store.config.moreTrayIDs.contains(where: { model.trayAvailable($0) }) { cell("chevron.up", id: trayMore, text: nil) }
+            if store.config.moreTrayIDs.contains(where: { model.trayAvailable($0) }) { cell(nil, id: trayMore, text: nil, custom: AnyView(TrayGlyph(id: trayMore, model: model))) }
             ForEach(store.config.barTrayIDs, id: \.self) { id in item(id) }
         }
     }
@@ -241,41 +228,31 @@ struct TrayView: View {
         switch id {
         case trayKB:
             if !model.kbCode.isEmpty { cell(nil, id: trayKB, text: model.kbCode) }
-        case trayWifi:
-            cell(wifiIcon, id: trayWifi, text: nil, custom: (model.wifiOn && model.wifiConnected) ? AnyView(Image(systemName: "wifi", variableValue: model.wifiSignal).font(.system(size: 14))) : nil)
-        case trayBT:
-            cell(nil, id: trayBT, text: nil, custom: AnyView(BluetoothShape().stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)).frame(width: 10, height: 15).opacity(model.btOn ? 1 : 0.4)))
         case trayBright:
-            if model.hasBright { cell("sun.max.fill", id: trayBright, text: nil) }
-        case trayVol:
-            cell(volIcon, id: trayVol, text: nil)
+            if model.hasBright { cell(nil, id: trayBright, text: nil, custom: AnyView(TrayGlyph(id: id, model: model))) }
         case trayUsage:
             UsageTrayView(model: model)
         case traySystem:
             cell(nil, id: traySystem, text: nil, custom: AnyView(VStack(spacing: 3) {
-                Image(systemName: "cpu").font(.system(size: 14))
+                TrayGlyph(id: id, model: model)
                 Text("\(Int(monitor.cpu.rounded()))%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
             }.foregroundStyle(monitorTint(monitor))))
         case trayDisk:
             if let d = model.disk {
                 cell(nil, id: trayDisk, text: nil, custom: AnyView(VStack(spacing: 3) {
-                    Image(systemName: "internaldrive").font(.system(size: 14))
+                    TrayGlyph(id: id, model: model)
                     Text("\(d.freePercent)%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
                 }.foregroundStyle(diskTint(d))))
             }
         case trayBatt:
             if let b = model.batt {
                 cell(nil, id: trayBatt, text: nil, custom: AnyView(VStack(spacing: 3) {
-                    Image(systemName: battIcon(b)).font(.system(size: 14))
+                    TrayGlyph(id: id, model: model)
                     Text("\(b.pct)%").font(.system(size: 9.5, weight: .medium))
                 }))
             }
-        case trayUser:
-            cell(model.userPhoto == nil ? "person.crop.circle" : nil, id: trayUser, text: nil, custom: model.userPhoto.map { AnyView(Image(nsImage: $0).resizable().scaledToFill().frame(width: 20, height: 20).clipShape(Circle())) })
-        case trayDownloads:
-            cell("arrow.down.circle", id: trayDownloads, text: nil)
-        case trayTrash:
-            cell("trash", id: trayTrash, text: nil)
+        case trayWifi, trayBT, trayVol, trayUser, trayDownloads, trayTrash:
+            cell(nil, id: id, text: nil, custom: AnyView(TrayGlyph(id: id, model: model)))
         default:
             EmptyView()
         }

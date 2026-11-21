@@ -742,7 +742,7 @@ struct TrayPane: View {
                         if let info = TrayItems.info(id) {
                             HStack(spacing: 12) {
                                 Image(systemName: "line.3.horizontal").font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary).frame(width: 14)
-                                Image(systemName: info.symbol).font(.system(size: 14)).frame(width: 22).foregroundStyle(.secondary)
+                                TrayGlyph(id: id, model: (NSApp.delegate as? AppDelegate)?.model).frame(width: 26, height: 22).foregroundStyle(.secondary)
                                 Text(info.title).font(.system(size: 13, weight: .medium))
                                 Spacer()
                                 Picker("", selection: place(id)) {
