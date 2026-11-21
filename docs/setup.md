@@ -62,4 +62,4 @@ There is no KeepAlive on purpose: Quit must stay quit, and `pkill` during develo
 Each macOS user needs their own permissions, Dock command and LaunchAgent. The `config.json` is per user too.
 
 ## Crash and feedback reporting (optional)
-To let a build send reports to your Sentry project, pass its DSN when building: `CALA_SENTRY_DSN='https://<key>@<host>/<project>' ./install.sh`. The DSN goes into the bundle's Info.plist (`CalaSentryDSN`) and is not stored in the repository. Without it the report window still opens and offers Copiar / Guardar…
+To let a build send reports to your Sentry project, pass its DSN when building: `CALA_SENTRY_DSN='https://<key>@<host>/<project>' ./install.sh`. The DSN goes into the bundle's Info.plist (`CalaSentryDSN`) and is not stored in the repository. Without it the report window still opens but Enviar stays disabled

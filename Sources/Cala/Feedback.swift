@@ -229,7 +229,7 @@ struct FeedbackView: View {
                 Text(crash != nil ? "Cala se cerró inesperadamente" : "Reportar un problema").font(.system(size: 20, weight: .semibold))
                 Text(Telemetry.isConfigured
                      ? "Lo que escribas llega a quien desarrolla Cala. Antes de enviar puedes ver exactamente qué se incluye."
-                     : "El envío automático no está activado en esta versión. Puedes copiar el informe o guardarlo y mandarlo a mano.")
+                     : "El envío de informes no está activado en esta versión de Cala.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if crash == nil {
@@ -239,15 +239,17 @@ struct FeedbackView: View {
                     Text("Otro").tag(Telemetry.Kind.other)
                 }.pickerStyle(.segmented).labelsHidden()
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(crash != nil ? "¿Qué estabas haciendo? (opcional)" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12, weight: .medium))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(crash != nil ? "¿Qué estabas haciendo? (opcional)" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12.5, weight: .medium))
                 TextEditor(text: $message)
-                    .font(.system(size: 13)).frame(minHeight: 110)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15)))
+                    .font(.system(size: 13)).scrollContentBackground(.hidden)
+                    .padding(6).frame(minHeight: 110).fieldBox()
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Tu correo (opcional, solo para poder responderte)").font(.system(size: 12, weight: .medium))
-                TextField("nombre@correo.com", text: $email).textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Tu correo (opcional, solo para poder responderte)").font(.system(size: 12.5, weight: .medium))
+                TextField("nombre@correo.com", text: $email)
+                    .textFieldStyle(.plain).font(.system(size: 13))
+                    .padding(.horizontal, 10).padding(.vertical, 8).fieldBox()
             }
             if crash == nil {
                 Toggle("Incluir información técnica (recomendado)", isOn: $includeDiagnostics).font(.system(size: 12.5))
@@ -266,8 +268,6 @@ struct FeedbackView: View {
             Spacer(minLength: 0)
             if !status.isEmpty { Text(status).font(.system(size: 12)).foregroundStyle(sent ? Color.green : Color.orange).fixedSize(horizontal: false, vertical: true) }
             HStack {
-                Button("Copiar") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(fullText, forType: .string); status = "Informe copiado." }
-                Button("Guardar…") { save() }
                 Spacer()
                 Button(sent ? "Cerrar" : "Cancelar") { close() }.keyboardShortcut(.cancelAction)
                 if !sent {
@@ -281,16 +281,6 @@ struct FeedbackView: View {
         .onAppear { preview = DiagnosticReport.text(config: config) }
     }
 
-    private func save() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "cala-informe.txt"
-        panel.allowedContentTypes = [.plainText]
-        if panel.runModal() == .OK, let url = panel.url {
-            do { try fullText.write(to: url, atomically: true, encoding: .utf8); status = "Guardado en \(url.lastPathComponent)." }
-            catch { status = "No se pudo guardar el archivo." }
-        }
-    }
-
     private func send() {
         sending = true; status = ""
         let note = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -299,8 +289,17 @@ struct FeedbackView: View {
                        contexts: DiagnosticReport.context(config), attachments: attachments) { out in
             sending = false
             sent = out.ok
-            status = out.ok ? "Enviado. ¡Gracias! Esto ayuda a mejorar Cala." : "No se pudo enviar (\(out.detail)). Puedes copiar o guardar el informe y mandarlo a mano."
+            status = out.ok ? "Enviado. ¡Gracias! Esto ayuda a mejorar Cala." : "No se pudo enviar (\(out.detail)). Revisa tu conexión e inténtalo de nuevo."
             log("feedback: sent kind=\(effectiveKind.rawValue) ok=\(out.ok)")
         }
+    }
+}
+
+
+private extension View {
+    /// The same field look for every input in the report window: text background, border and corner radius.
+    func fieldBox() -> some View {
+        self.background(RoundedRectangle(cornerRadius: 7).fill(Color(nsColor: .textBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.2), lineWidth: 1))
     }
 }
