@@ -292,13 +292,20 @@ final class CleanupModel: ObservableObject {
         alert.alertStyle = .warning
         alert.messageText = calendarText("Free up \(diskBytes(selectedBytes))?", "¿Liberar \(diskBytes(selectedBytes))?")
         var lines: [String] = []
-        if !gs.isEmpty { lines.append(calendarText("• \(gs.count) worktree(s) will be removed with git. Branches and commits are kept.", "• Se quitarán \(gs.count) worktree(s) con git. Las ramas y los commits se conservan.")) }
-        if !cs.isEmpty { lines.append(calendarText("• \(cs.count) cache folder(s) will be emptied.", "• Se vaciarán \(cs.count) carpeta(s) de caché.")) }
-        lines.append(calendarText("This cannot be undone.", "Esto no se puede deshacer."))
+        let items = gs.map { $0.repoName + " / " + $0.name + " (" + diskBytes($0.bytes ?? 0) + ")" }
+            + cs.map { $0.name + " (" + diskBytes($0.bytes ?? 0) + ")" }
+        lines.append(calendarText("This will delete:", "Se va a eliminar:"))
+        lines += items.prefix(12).map { "• " + $0 }
+        if items.count > 12 { lines.append(calendarText("• …and \(items.count - 12) more", "• …y \(items.count - 12) más")) }
+        lines.append("")
+        if !gs.isEmpty { lines.append(calendarText("Worktrees are removed with git; your branches and commits stay.", "Los worktrees se quitan con git; tus ramas y commits se conservan.")) }
+        if !cs.isEmpty { lines.append(calendarText("Caches are rebuilt automatically when needed.", "Las cachés se reconstruyen solas cuando hacen falta.")) }
+        lines.append(calendarText("Nothing else is touched. This cannot be undone.", "No se toca nada más. Esto no se puede deshacer."))
         alert.informativeText = lines.joined(separator: "\n")
-        alert.addButton(withTitle: calendarText("Delete", "Eliminar"))
         alert.addButton(withTitle: calendarText("Cancel", "Cancelar"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let destructive = alert.addButton(withTitle: calendarText("Delete", "Eliminar"))
+        destructive.hasDestructiveAction = true
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
         working = true; message = ""
         let before = DiskInfo.read()?.available ?? 0
         DispatchQueue.global(qos: .utility).async {
@@ -357,11 +364,21 @@ struct CleanupView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 10) {
                         Text(calendarText("Free up space", "Limpiar espacio")).font(.system(size: 20, weight: .semibold))
-                        Text(calendarText("Only things that can be recovered are offered. Nothing is deleted until you confirm.",
-                                          "Solo se ofrece lo que se puede recuperar. No se borra nada hasta que lo confirmes."))
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                        Card {
+                            VStack(alignment: .leading, spacing: 8) {
+                                explain("eye", calendarText("Opening this window deletes nothing.", "Abrir esta ventana no borra nada."),
+                                        calendarText("It only lists what takes space and whether it is safe to remove.", "Solo lista lo que ocupa espacio y si es seguro quitarlo."))
+                                explain("checkmark.square", calendarText("You choose what goes.", "Tú eliges qué se va."),
+                                        calendarText("Nothing is selected by default. Before anything is deleted you see the full list and the total, and you can cancel.", "No hay nada marcado por defecto. Antes de borrar ves la lista completa y el total, y puedes cancelar."))
+                                explain("lock.shield", calendarText("Your work is protected.", "Tu trabajo está protegido."),
+                                        calendarText("Worktrees with unsaved changes, or in use, cannot be selected. Git refuses to remove them anyway, and branches and commits are never deleted.", "Los worktrees con cambios sin guardar, o en uso, no se pueden marcar. Git los rechaza igualmente, y las ramas y los commits nunca se borran."))
+                                explain("arrow.triangle.2.circlepath", calendarText("Caches come back by themselves.", "Las cachés vuelven solas."),
+                                        calendarText("They are just downloads and build leftovers; the apps recreate them when needed.", "Son solo descargas y restos de compilación; las apps las recrean cuando hacen falta."))
+                            }
+                            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     SectionTitle(text: calendarText("Agent worktrees", "Worktrees de agentes"))
                     Card {
@@ -396,13 +413,23 @@ struct CleanupView: View {
                 Text(model.message.isEmpty ? (model.working ? calendarText("Working…", "Trabajando…") : "") : model.message)
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(3)
                 Spacer()
-                Button(calendarText("Delete selected (\(diskBytes(model.selectedBytes)))", "Eliminar seleccionados (\(diskBytes(model.selectedBytes)))")) { model.removeSelected() }
+                Button(calendarText("Review and delete selected (\(diskBytes(model.selectedBytes)))…", "Revisar y eliminar lo seleccionado (\(diskBytes(model.selectedBytes)))…")) { model.removeSelected() }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.working || (model.selectedGroups.isEmpty && model.selectedCaches.isEmpty))
             }
             .padding(14)
         }
         .frame(minWidth: 600, minHeight: 480)
+    }
+
+    private func explain(_ symbol: String, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol).frame(width: 18).foregroundStyle(.secondary).padding(.top, 1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 12.5, weight: .semibold))
+                Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private func check(_ id: String, enabled: Bool) -> some View {

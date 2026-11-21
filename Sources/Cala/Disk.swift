@@ -235,7 +235,7 @@ struct DiskPane: View {
             }
             .frame(height: min(CGFloat(service.folders.count + 1) * rowHeight, 272))
             Divider()
-            Row(icon: "sparkles", title: "Limpiar espacio…") {
+            Row(icon: "sparkles", title: "Revisar y limpiar espacio…", subtitle: "Solo abre una lista; no borra nada") {
                 (NSApp.delegate as? AppDelegate)?.flyout.hide()
                 CleanupWindowController.shared.show()
             }
