@@ -327,6 +327,8 @@ struct GeneralPane: View {
                     }
                 }
                 RowDivider()
+                OtherMenuBarIcons()
+                RowDivider()
                 SettingRow(title: "Devolverlos al cerrar Cala", caption: "Si sales de Cala, los iconos vuelven a mostrarse solos. Al abrirla otra vez se ocultan de nuevo.") {
                     Toggle("", isOn: Binding(get: { store.config.restoreMenuBarOnQuit }, set: { store.config.restoreMenuBarOnQuit = $0 })).toggleStyle(.switch).labelsHidden()
                 }
@@ -796,6 +798,51 @@ struct TrayPane: View {
                 Text("Arrastra una fila para cambiar el orden.").font(.system(size: 11)).foregroundStyle(.secondary).padding(.leading, 4)
             }
             Button("Restablecer valores") { store.config.trayLayout = [:]; store.config.trayOrder = [] }
+        }
+    }
+}
+
+
+/// Icons from other apps currently on the right of the menu bar. Cala cannot hide them (each app owns its icon), but it
+/// tells you which app each one is and opens the system pane where macOS lets you switch them off.
+struct OtherMenuBarIcons: View {
+    @State private var items: [MenuBarDiagnostics.Extra] = []
+    @State private var loaded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Otros iconos que siguen ahí").font(.system(size: 13, weight: .medium))
+            if !loaded {
+                Text("Buscando…").font(.system(size: 11.5)).foregroundStyle(.secondary)
+            } else if items.isEmpty {
+                Text("No hay iconos de otras apps.").font(.system(size: 11.5)).foregroundStyle(.secondary)
+            } else {
+                ForEach(items) { item in
+                    HStack(spacing: 8) {
+                        Image(systemName: "circle.fill").font(.system(size: 4)).foregroundStyle(.tertiary)
+                        Text(item.app).font(.system(size: 12))
+                        if !item.detail.isEmpty && item.detail != item.app { Text("· " + item.detail).font(.system(size: 11.5)).foregroundStyle(.secondary) }
+                    }
+                }
+            }
+            Text("Cada app decide su icono: apágalo en los ajustes de esa app, o desde Ajustes del Sistema → Barra de menús, donde macOS deja elegir cuáles se permiten.")
+                .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Abrir Ajustes → Barra de menús") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.ControlCenter-Settings.extension")!)
+                }
+                Button("Volver a buscar") { reload() }
+            }
+        }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { reload() }
+    }
+
+    private func reload() {
+        loaded = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            let found = MenuBarDiagnostics.extras()
+            DispatchQueue.main.async { items = found; loaded = true }
         }
     }
 }

@@ -1,4 +1,7 @@
 import Foundation
+import AppKit
+import ApplicationServices
+import CoreGraphics
 
 /// Hides / restores the macOS menu bar (the strip at the top of the screen).
 ///
@@ -86,63 +89,150 @@ enum MenuBarIcons {
         let id: String
         let title: String
         let note: String
+        let domain: String
         let key: String
+        /// ControlCenter modules are stored per host (18 shown / 24 not shown); the input menu is a plain Bool.
+        let perHost: Bool
+        let hiddenValue: Any
+        let process: String
     }
 
     static let all: [Icon] = [
-        Icon(id: "wifi", title: "Wi-Fi", note: "Cala ya muestra el Wi-Fi.", key: "WiFi"),
-        Icon(id: "battery", title: "Batería", note: "Cala ya muestra la batería.", key: "Battery"),
-        Icon(id: "user", title: "Cambio rápido de usuario", note: "Cala ya permite cambiar de usuario.", key: "UserSwitcher"),
+        Icon(id: "wifi", title: "Wi-Fi", note: "Cala ya muestra el Wi-Fi.", domain: "com.apple.controlcenter", key: "WiFi", perHost: true, hiddenValue: 24, process: "ControlCenter"),
+        Icon(id: "battery", title: "Batería", note: "Cala ya muestra la batería.", domain: "com.apple.controlcenter", key: "Battery", perHost: true, hiddenValue: 24, process: "ControlCenter"),
+        Icon(id: "user", title: "Cambio rápido de usuario", note: "Cala ya permite cambiar de usuario.", domain: "com.apple.controlcenter", key: "UserSwitcher", perHost: true, hiddenValue: 24, process: "ControlCenter"),
+        Icon(id: "input", title: "Idioma del teclado", note: "El icono de texto (por ejemplo ES). Cala también lo muestra si tienes varios teclados.", domain: "com.apple.TextInputMenu", key: "visible", perHost: false, hiddenValue: false, process: "SystemUIServer"),
     ]
-    private static let domain = "com.apple.controlcenter" as CFString
-    private static let hiddenValue = 24
 
-    private static func current(_ icon: Icon) -> Int? {
-        CFPreferencesCopyValue(icon.key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? Int
+    private static func host(_ icon: Icon) -> CFString { icon.perHost ? kCFPreferencesCurrentHost : kCFPreferencesAnyHost }
+
+    private static func current(_ icon: Icon) -> String? {
+        guard let v = CFPreferencesCopyValue(icon.key as CFString, icon.domain as CFString, kCFPreferencesCurrentUser, host(icon)) else { return nil }
+        if let n = v as? NSNumber { return n.stringValue }
+        return nil
+    }
+    private static func isHiddenValue(_ icon: Icon, _ v: String?) -> Bool {
+        guard let v else { return false }
+        return icon.perHost ? v == String(icon.hiddenValue as! Int) : (v == "0")
     }
 
-    private static func write(_ icon: Icon, _ value: Int?) {
-        CFPreferencesSetValue(icon.key as CFString, value.map { $0 as CFNumber }, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
-        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+    private static func write(_ icon: Icon, _ value: String?) {
+        let object: CFPropertyList? = value.flatMap { v in
+            icon.perHost ? Int(v).map { $0 as CFNumber } : (v == "1" || v == "0" ? ((v == "1") as CFBoolean) : nil)
+        }
+        CFPreferencesSetValue(icon.key as CFString, object, icon.domain as CFString, kCFPreferencesCurrentUser, host(icon))
+        CFPreferencesSynchronize(icon.domain as CFString, kCFPreferencesCurrentUser, host(icon))
     }
 
-    private static func restartControlCenter() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        p.arguments = ["ControlCenter"]
-        try? p.run()
-        p.waitUntilExit()
+    private static func restart(_ processes: Set<String>) {
+        for name in processes.sorted() {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            p.arguments = [name]
+            try? p.run()
+            p.waitUntilExit()
+        }
     }
 
-    private static func saved(_ s: String) -> Int? { s == "nil" ? nil : Int(s) }
+    private static func hide(_ icon: Icon) {
+        let value: String = icon.perHost ? String(icon.hiddenValue as! Int) : "0"
+        write(icon, value)
+    }
 
     /// Makes the menu bar match the user's choice, remembering each icon's original value ("nil" = key absent).
     static func apply(_ store: ConfigStore) {
-        var changed = false
+        var restart_ = Set<String>()
         var backup = store.config.menuBarIconBackupV2
         let known = Set(all.map(\.id))
         let hidden = Set(store.config.menuBarHiddenIcons).intersection(known)
         for icon in all {
             if hidden.contains(icon.id) {
-                if backup[icon.id] == nil { backup[icon.id] = current(icon).map(String.init) ?? "nil" }
-                if current(icon) != hiddenValue { write(icon, hiddenValue); changed = true }
+                if backup[icon.id] == nil { backup[icon.id] = current(icon) ?? "nil" }
+                if !isHiddenValue(icon, current(icon)) { hide(icon); restart_.insert(icon.process) }
             } else if let original = backup[icon.id] {
-                write(icon, saved(original))
+                write(icon, original == "nil" ? nil : original)
                 backup[icon.id] = nil
-                changed = true
+                restart_.insert(icon.process)
             }
         }
         if backup != store.config.menuBarIconBackupV2 { store.config.menuBarIconBackupV2 = backup }
-        if changed { restartControlCenter(); log("menubar: icons hidden=\(hidden.sorted())") }
+        if !restart_.isEmpty { restart(restart_); log("menubar: icons hidden=\(hidden.sorted())") }
     }
 
     /// On quit: show everything again, if the user asked for that.
     static func onQuit(_ store: ConfigStore) {
         guard store.config.restoreMenuBarOnQuit, !store.config.menuBarIconBackupV2.isEmpty else { return }
-        var restored = false
+        var restart_ = Set<String>()
         for icon in all {
-            if let original = store.config.menuBarIconBackupV2[icon.id] { write(icon, saved(original)); restored = true }
+            if let original = store.config.menuBarIconBackupV2[icon.id] { write(icon, original == "nil" ? nil : original); restart_.insert(icon.process) }
         }
-        if restored { restartControlCenter() }
+        if !restart_.isEmpty { restart(restart_) }
+    }
+}
+
+/// Lists the icons currently on the right of the menu bar and which app owns each one, through Accessibility
+/// (`AXExtrasMenuBar`). Trigger it from a terminal with `notifyutil -p local.cala.listMenuBarExtras`; the result goes to
+/// the debug log (`menubar-extra:` lines). Useful to find out which app an unknown icon belongs to.
+enum MenuBarDiagnostics {
+    static func install() {
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil, { _, _, _, _, _ in
+            DispatchQueue.global(qos: .utility).async { MenuBarDiagnostics.dump() }
+        }, "local.cala.listMenuBarExtras" as CFString, nil, .deliverImmediately)
+    }
+
+    private static func string(_ e: AXUIElement, _ attr: String) -> String {
+        var v: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, attr as CFString, &v) == .success, let s = v as? String else { return "" }
+        return s
+    }
+    private static func point(_ e: AXUIElement, _ attr: String) -> CGPoint {
+        var v: CFTypeRef?
+        var p = CGPoint.zero
+        if AXUIElementCopyAttributeValue(e, attr as CFString, &v) == .success, let v, CFGetTypeID(v) == AXValueGetTypeID() { AXValueGetValue(v as! AXValue, .cgPoint, &p) }
+        return p
+    }
+
+    struct Extra: Identifiable {
+        let id: String
+        let app: String
+        let bundle: String
+        let detail: String
+    }
+
+    /// Icons from apps other than Control Center (which Cala handles above), in menu bar order.
+    static func extras() -> [Extra] {
+        var out: [(x: CGFloat, e: Extra)] = []
+        for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier != "com.apple.controlcenter" {
+            let el = AXUIElementCreateApplication(app.processIdentifier)
+            var bar: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, "AXExtrasMenuBar" as CFString, &bar) == .success, let bar else { continue }
+            var kids: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(bar as! AXUIElement, kAXChildrenAttribute as CFString, &kids) == .success, let list = kids as? [AXUIElement] else { continue }
+            for (i, item) in list.enumerated() {
+                let p = point(item, kAXPositionAttribute)
+                guard p.x > 0 else { continue }       // x <= 0: the app keeps it hidden
+                let bundle = app.bundleIdentifier ?? "?"
+                let name = bundle == "com.apple.TextInputMenuAgent" ? "Idioma del teclado" : (app.localizedName ?? bundle)
+                out.append((p.x, Extra(id: "\(bundle)#\(i)", app: name, bundle: bundle, detail: string(item, kAXDescriptionAttribute))))
+            }
+        }
+        return out.sorted { $0.x < $1.x }.map(\.e)
+    }
+
+    static func dump() {
+        var found = 0
+        for app in NSWorkspace.shared.runningApplications {
+            let el = AXUIElementCreateApplication(app.processIdentifier)
+            var bar: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, "AXExtrasMenuBar" as CFString, &bar) == .success, let bar else { continue }
+            var kids: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(bar as! AXUIElement, kAXChildrenAttribute as CFString, &kids) == .success, let list = kids as? [AXUIElement] else { continue }
+            for item in list {
+                let p = point(item, kAXPositionAttribute)
+                log("menubar-extra: x=\(Int(p.x)) app=\(app.localizedName ?? "?") (\(app.bundleIdentifier ?? "?")) title=\(string(item, kAXTitleAttribute)) desc=\(string(item, kAXDescriptionAttribute)) id=\(string(item, "AXIdentifier"))")
+                found += 1
+            }
+        }
+        log("menubar-extra: \(found) items listed")
     }
 }

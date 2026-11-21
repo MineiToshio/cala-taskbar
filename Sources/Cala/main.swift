@@ -124,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DockControl.applyOnLaunch(store)
         MenuBarControl.applyOnLaunch(store)
         MenuBarIcons.apply(store)
+        MenuBarDiagnostics.install()
         WindowSwitcher.shared.ensureTap()
         MinimizeWatcher.shared.start()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in WindowSwitcher.shared.ensureTap(); MinimizeWatcher.shared.sync() }
