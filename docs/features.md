@@ -115,3 +115,11 @@ When a calendar event has a Meet, Zoom, Teams or Webex link (in its URL, locatio
 Under each Claude / Codex quota in the usage panel, a line projects the burn rate: *"At this pace it runs out in 2 d 11 h, before the reset"* (orange) or *"At this pace you reach the reset with ~35% left"*. The rate comes from the last 30 minutes of readings (kept in memory) and falls back to the average since the window started; if you have not used it lately, no projection is shown.
 
 Notifications (Settings → Usage → Quota alerts, on by default): one when a window's remaining share drops to your threshold (10, 15, 20 or 30%, default 20%), and one when, at the current pace, a window will run out within the next hour and before it resets. Each fires once per window cycle. macOS asks for notification permission the first time you turn alerts on.
+
+## Free up space
+The storage panel has **Limpiar espacio…**, which opens a window with two lists. Nothing is selected by default and nothing is deleted before you confirm in a dialog that shows the total.
+
+- **Agent worktrees.** Finds the linked git worktrees of every project Claude Code or Codex has opened (exact paths are read from `~/.claude.json` and `~/.codex/config.toml`; nothing else is read from them) plus the extra folders from Settings → General → Disco. Each row shows size, repository, branch, age of the last commit, and a verdict: **Safe / Merged** (clean tree including untracked files, commits kept on a branch), or why it is blocked: *Unsaved changes*, *Inner worktree has changes*, *Commits not on any branch*, *Locked*, *In use* (a running process has its working directory inside). Only safe ones can be selected ("Select safe ones" picks them all). Removal uses `git worktree remove` without `--force`, so git itself refuses anything with changes; inner worktrees are removed first and branches are never deleted.
+- **Caches that regenerate.** App caches, Xcode DerivedData and device support, npm, `~/.cache`, Gradle, Bun and Cargo caches. Deleting empties the folder's contents, never the folder.
+
+After a run the window shows how much space was actually freed.

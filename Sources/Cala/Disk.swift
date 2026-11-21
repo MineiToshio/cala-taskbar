@@ -235,6 +235,10 @@ struct DiskPane: View {
             }
             .frame(height: min(CGFloat(service.folders.count + 1) * rowHeight, 272))
             Divider()
+            Row(icon: "sparkles", title: "Limpiar espacio…") {
+                (NSApp.delegate as? AppDelegate)?.flyout.hide()
+                CleanupWindowController.shared.show()
+            }
             Row(icon: "arrow.clockwise", title: "Volver a medir") { service.refresh(extra: store.config.diskFolders, force: true) }
             LinkRow(title: "Ajustes de almacenamiento…", pane: "com.apple.settings.Storage")
         }
