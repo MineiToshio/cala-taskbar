@@ -1,0 +1,418 @@
+import AppKit
+import ApplicationServices
+import ScreenCaptureKit
+
+private enum AXWindowLookup {
+    typealias GetWindow = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+    static let handle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY)
+    static let getWindow: GetWindow? = {
+        guard let handle, let symbol = dlsym(handle, "_AXUIElementGetWindow") else { return nil }
+        return unsafeBitCast(symbol, to: GetWindow.self)
+    }()
+}
+
+func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) -> AXError {
+    guard let getWindow = AXWindowLookup.getWindow else { return .notImplemented }
+    return getWindow(element, id)
+}
+
+struct WinRef: Identifiable {
+    let id: CGWindowID
+    let title: String
+    let minimized: Bool
+    let ax: AXUIElement?
+    let pid: pid_t
+}
+
+private let logQueue = DispatchQueue(label: "MacTaskbar.log")
+
+func log(_ s: String) {
+    let line = "\(Date()) \(s)\n"
+    logQueue.async {
+        let fm = FileManager.default
+        let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MacTaskbar")
+        let f = dir.appendingPathComponent("debug.log")
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            let data = Data(line.utf8)
+            let size = (try? fm.attributesOfItem(atPath: f.path)[.size] as? NSNumber)?.intValue ?? 0
+            if size > 1_000_000 {
+                let backup = dir.appendingPathComponent("debug.log.1")
+                if fm.fileExists(atPath: backup.path) { try fm.removeItem(at: backup) }
+                try fm.moveItem(at: f, to: backup)
+            }
+            if fm.fileExists(atPath: f.path) {
+                let h = try FileHandle(forWritingTo: f)
+                defer { try? h.close() }
+                try h.seekToEnd()
+                try h.write(contentsOf: data)
+            } else {
+                try data.write(to: f, options: .atomic)
+            }
+        } catch { /* Logging must not interrupt window actions. */ }
+    }
+}
+
+func bringFront(_ app: NSRunningApplication) {
+    let el = AXUIElementCreateApplication(app.processIdentifier)
+    AXUIElementSetAttributeValue(el, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    app.activate(options: [.activateAllWindows])
+}
+
+func newWindow(pid: pid_t) {
+    guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+    bringFront(app)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        for down in [true, false] {
+            let e = CGEvent(keyboardEventSource: nil, virtualKey: 45, keyDown: down)
+            e?.flags = .maskCommand
+            e?.postToPid(pid)
+        }
+    }
+}
+
+func axAttr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+    var v: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success else { return nil }
+    return v
+}
+
+enum WindowService {
+    static func cgWindows(for pid: pid_t) -> [WinRef] {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return list.compactMap { d in
+            guard (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+                  (d[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let num = (d[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let b = d[kCGWindowBounds as String] as? [String: CGFloat],
+                  (b["Width"] ?? 0) >= 100, (b["Height"] ?? 0) >= 60 else { return nil }
+            let title = d[kCGWindowName as String] as? String ?? ""
+            if title.isEmpty { return nil } // untitled off-screen entries are ghosts of closed windows
+            let onscreen = (d[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
+            return WinRef(id: num, title: title, minimized: !onscreen, ax: nil, pid: pid)
+        }
+    }
+
+    static func focusedWindow(pid: pid_t) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.3)
+        guard let w = attr(app, kAXFocusedWindowAttribute) else { return nil }
+        return (w as! AXUIElement)
+    }
+
+    static func frame(_ w: AXUIElement) -> CGRect? {
+        guard let p = attr(w, kAXPositionAttribute), let s = attr(w, kAXSizeAttribute) else { return nil }
+        var pt = CGPoint.zero, sz = CGSize.zero
+        guard AXValueGetValue(p as! AXValue, .cgPoint, &pt), AXValueGetValue(s as! AXValue, .cgSize, &sz) else { return nil }
+        return CGRect(origin: pt, size: sz)
+    }
+
+    static func isFullScreen(_ w: AXUIElement) -> Bool {
+        (attr(w, "AXFullScreen") as? Bool) ?? false
+    }
+
+    static func setHeight(_ w: AXUIElement, _ h: CGFloat, width: CGFloat) {
+        var sz = CGSize(width: width, height: h)
+        if let v = AXValueCreate(.cgSize, &sz) { AXUIElementSetAttributeValue(w, kAXSizeAttribute as CFString, v) }
+    }
+
+    static func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+        var v: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success else { return nil }
+        return v
+    }
+
+    static func windows(for pid: pid_t) -> [WinRef] {
+        let app = AXUIElementCreateApplication(pid)
+        guard let arr = attr(app, kAXWindowsAttribute) as? [AXUIElement] else { return cgWindows(for: pid) }
+        let ax: [WinRef] = arr.compactMap { w in
+            var id: CGWindowID = 0
+            guard _AXUIElementGetWindow(w, &id) == .success, id != 0 else { return nil }
+            let sub = attr(w, kAXSubroleAttribute) as? String
+            if sub == "AXUnknown" || sub == "AXSystemDialog" { return nil }
+            let title = attr(w, kAXTitleAttribute) as? String ?? ""
+            let min = (attr(w, kAXMinimizedAttribute) as? Bool) ?? false
+            return WinRef(id: id, title: title, minimized: min, ax: w, pid: pid)
+        }
+        if !ax.isEmpty { return ax }
+        // AX sees nothing: windows of a hidden app are still real, otherwise they are ghosts of closed windows.
+        return NSRunningApplication(processIdentifier: pid)?.isHidden == true ? cgWindows(for: pid) : []
+    }
+
+    /// "New ..." entries read from the app's File menu (menu bar item #3).
+    static func newItems(pid: pid_t) -> [(title: String, el: AXUIElement)] {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.6)
+        guard let bar = attr(app, kAXMenuBarAttribute) else { return [] }
+        guard let tops = attr(bar as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement], tops.count > 2 else { return [] }
+        guard let menus = attr(tops[2], kAXChildrenAttribute) as? [AXUIElement], let menu = menus.first,
+              let items = attr(menu, kAXChildrenAttribute) as? [AXUIElement] else { return [] }
+        var out: [(String, AXUIElement)] = []
+        for it in items {
+            guard let title = attr(it, kAXTitleAttribute) as? String, !title.isEmpty else { continue }
+            let low = title.lowercased()
+            guard low.hasPrefix("new") || low.hasPrefix("nuev") else { continue }
+            if (attr(it, kAXEnabledAttribute) as? Bool) == false { continue }
+            if let kids = attr(it, kAXChildrenAttribute) as? [AXUIElement], !kids.isEmpty { continue }
+            out.append((title, it))
+            if out.count >= 4 { break }
+        }
+        return out
+    }
+
+    static func press(_ el: AXUIElement, pid: pid_t) {
+        if let app = NSRunningApplication(processIdentifier: pid) { bringFront(app) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            AXUIElementPerformAction(el, kAXPressAction as CFString)
+        }
+    }
+
+    /// Window rect in AppKit (bottom-left origin) screen coordinates.
+    static func appKitFrame(_ ax: AXUIElement) -> NSRect? {
+        var pos = CGPoint.zero, size = CGSize.zero
+        guard let pv = attr(ax, kAXPositionAttribute), let sv = attr(ax, kAXSizeAttribute),
+              AXValueGetValue(pv as! AXValue, .cgPoint, &pos), AXValueGetValue(sv as! AXValue, .cgSize, &size),
+              size.width > 0, let h = NSScreen.screens.first?.frame.height else { return nil }
+        return NSRect(x: pos.x, y: h - pos.y - size.height, width: size.width, height: size.height)
+    }
+
+    static func raise(_ w: WinRef) {
+        guard let ax = w.ax else {
+            if let app = NSRunningApplication(processIdentifier: w.pid) {
+                bringFront(app)
+                if let url = app.bundleURL { NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) }
+            }
+            return
+        }
+        AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        if let app = NSRunningApplication(processIdentifier: w.pid) { bringFront(app) }
+        AXUIElementPerformAction(ax, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(ax, kAXMainAttribute as CFString, kCFBooleanTrue)
+    }
+
+    private static func closeTarget(_ w: WinRef) -> WinRef? {
+        guard let current = windows(for: w.pid).first(where: { $0.id == w.id }),
+              let ax = current.ax, !current.minimized,
+              (attr(ax, kAXMinimizedAttribute) as? Bool) == false,
+              let children = attr(ax, kAXChildrenAttribute) as? [AXUIElement],
+              !children.contains(where: { (attr($0, kAXRoleAttribute) as? String) == kAXSheetRole }),
+              (attr(ax, "AXSheets") as? [AXUIElement] ?? []).isEmpty else { return nil }
+        return current
+    }
+
+    static func close(_ w: WinRef) {
+        var err: AXError = .cannotComplete
+        if let ax = w.ax, let btn = attr(ax, kAXCloseButtonAttribute) {
+            err = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString)
+        }
+        log("close id=\(w.id) pid=\(w.pid) ax=\(w.ax != nil) press=\(err.rawValue)")
+        // Some apps ignore the close button press: only send Cmd+W to the same, focused window.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard let target = closeTarget(w) else { return }
+            raise(target)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard closeTarget(w) != nil,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == w.pid,
+                      let focused = focusedWindow(pid: w.pid) else { return }
+                var id: CGWindowID = 0
+                guard _AXUIElementGetWindow(focused, &id) == .success, id == w.id else { return }
+                log("close fallback Cmd+W id=\(w.id)")
+                let src = CGEventSource(stateID: .hidSystemState)
+                for down in [true, false] {
+                    let e = CGEvent(keyboardEventSource: src, virtualKey: 13, keyDown: down)
+                    e?.flags = .maskCommand
+                    e?.postToPid(w.pid)
+                }
+            }
+        }
+    }
+
+    /// Takes a thumbnail first (macOS stops drawing video layers once minimizing starts), then minimizes.
+    static func minimize(_ w: WinRef) {
+        guard let ax = w.ax else { return }
+        Task {
+            await snapshot([w.id])
+            await MainActor.run { _ = AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }
+        }
+    }
+
+    static func snapshot(_ ids: [CGWindowID]) async {
+        let ws = await ThumbCache.shared.scWindows(ids: ids)
+        await ThumbCache.shared.capture(ws)
+    }
+
+    /// Click on a running app's icon: toggle like the Windows taskbar.
+    static func toggle(pid: pid_t) {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        let wins = windows(for: pid)
+        log("click \(app.localizedName ?? "?") windows=\(wins.count) trusted=\(AXIsProcessTrusted())")
+        if wins.isEmpty || wins.allSatisfy({ $0.ax == nil }) {
+            bringFront(app)
+            if let url = app.bundleURL {
+                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+            }
+            return
+        }
+        if app.isActive, let visible = wins.first(where: { !$0.minimized }) {
+            if wins.filter({ !$0.minimized }).count == 1 { minimize(visible) } else { bringFront(app) }
+        } else if let first = wins.first(where: { !$0.minimized }) ?? wins.first {
+            raise(first)
+        }
+    }
+}
+
+final class ThumbCache {
+    static let shared = ThumbCache()
+
+    @MainActor private final class State {
+        var images: [CGWindowID: NSImage] = [:]
+        var stamps: [CGWindowID: Date] = [:]
+        var access: [CGWindowID: UInt64] = [:]
+        var clock: UInt64 = 0
+
+        func touch(_ id: CGWindowID) {
+            clock &+= 1
+            access[id] = clock
+        }
+
+        func prune() {
+            if let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] {
+                let live = Set(list.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
+                for id in Array(images.keys) where !live.contains(id) { remove(id) }
+            }
+            while images.count > 100, let oldest = access.min(by: { $0.value < $1.value })?.key { remove(oldest) }
+        }
+
+        private func remove(_ id: CGWindowID) {
+            images[id] = nil; stamps[id] = nil; access[id] = nil
+        }
+    }
+
+    @MainActor private static let state = State()
+
+    // Keep synchronous snapshot reads source-compatible for AppKit callers, including AX callbacks.
+    private func onMain<T>(_ body: @MainActor (State) -> T) -> T {
+        if Thread.isMainThread { return MainActor.assumeIsolated { body(Self.state) } }
+        return DispatchQueue.main.sync { MainActor.assumeIsolated { body(Self.state) } }
+    }
+
+    var images: [CGWindowID: NSImage] { onMain { $0.prune(); return $0.images } }
+    var stamps: [CGWindowID: Date] { onMain { $0.prune(); return $0.stamps } }
+
+    func capture(ids: [CGWindowID]) async -> [CGWindowID: NSImage] {
+        let windows = await scWindows(ids: ids)
+        await capture(windows)
+        return images
+    }
+
+    func cached(_ id: CGWindowID) -> NSImage? {
+        onMain { state in
+            state.prune()
+            guard let image = state.images[id] else { return nil }
+            state.touch(id)
+            return image
+        }
+    }
+
+    /// SCWindow handles for the given ids (enumerating them is the expensive part, so callers reuse them).
+    func scWindows(ids: [CGWindowID]) async -> [SCWindow] {
+        guard !Task.isCancelled, CGPreflightScreenCaptureAccess(), !ids.isEmpty,
+              let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
+              !Task.isCancelled else { return [] }
+        return content.windows.filter { ids.contains($0.windowID) && $0.frame.width > 1 }
+    }
+
+    /// Captures already-resolved windows; the main-thread predicate is rechecked before publishing each image.
+    func capture(_ windows: [SCWindow], width: CGFloat = 720,
+                 shouldCapture: @escaping @MainActor (CGWindowID) -> Bool = { _ in true }) async {
+        for w in windows {
+            guard !Task.isCancelled else { break }
+            guard w.frame.width > 1, await MainActor.run(body: { shouldCapture(w.windowID) }) else { continue }
+            let cfg = SCStreamConfiguration()
+            let scale = width / w.frame.width
+            cfg.width = max(1, Int(w.frame.width * scale))
+            cfg.height = max(1, Int(w.frame.height * scale))
+            cfg.showsCursor = false
+            if let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg) {
+                guard !Task.isCancelled else { break }
+                await MainActor.run {
+                    guard !Task.isCancelled, shouldCapture(w.windowID) else { return }
+                    let state = Self.state
+                    state.images[w.windowID] = NSImage(cgImage: img, size: .zero)
+                    state.stamps[w.windowID] = Date()
+                    state.touch(w.windowID)
+                    state.prune()
+                }
+            }
+        }
+        onMain { $0.prune() }
+    }
+}
+
+
+/// Takes a thumbnail the moment a window is minimized (by any means: yellow button, Cmd+M, the bar, show desktop),
+/// so minimized windows keep a recent preview. Nothing runs periodically: it is purely event-driven.
+final class MinimizeWatcher {
+    static let shared = MinimizeWatcher()
+    private var observers: [pid_t: AXObserver] = [:]
+
+    func start() {
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            if let a = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication { self?.watch(a) }
+        }
+        nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            if let a = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+               let obs = self?.observers.removeValue(forKey: a.processIdentifier) {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .commonModes)
+            }
+        }
+        // Pressing the yellow button: capture right then, before the click completes and minimizing starts.
+        NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { _ in
+            guard AXIsProcessTrusted() else { return }
+            let p = NSEvent.mouseLocation
+            guard let h = NSScreen.screens.first?.frame.height else { return }
+            var el: AXUIElement?
+            let system = AXUIElementCreateSystemWide()
+            AXUIElementSetMessagingTimeout(system, 0.25)
+            guard AXUIElementCopyElementAtPosition(system, Float(p.x), Float(h - p.y), &el) == .success, let el else { return }
+            AXUIElementSetMessagingTimeout(el, 0.25)
+            guard (WindowService.attr(el, kAXSubroleAttribute) as? String) == "AXMinimizeButton",
+                  let win = WindowService.attr(el, kAXWindowAttribute) else { return }
+            let window = win as! AXUIElement
+            AXUIElementSetMessagingTimeout(window, 0.25)
+            var id: CGWindowID = 0
+            guard _AXUIElementGetWindow(window, &id) == .success, id != 0 else { return }
+            Task { await WindowService.snapshot([id]) }
+        }
+        sync()
+    }
+
+    /// Watches every regular app (also retried later, in case Accessibility was granted after launch).
+    func sync() {
+        guard AXIsProcessTrusted() else { return }
+        for a in NSWorkspace.shared.runningApplications where a.activationPolicy == .regular { watch(a) }
+    }
+
+    private func watch(_ app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        guard observers[pid] == nil, pid != ProcessInfo.processInfo.processIdentifier, AXIsProcessTrusted() else { return }
+        var obs: AXObserver?
+        let cb: AXObserverCallback = { _, element, _, _ in
+            var id: CGWindowID = 0
+            guard _AXUIElementGetWindow(element, &id) == .success, id != 0 else { return }
+            // Already captured just before minimizing (mouse-down, Cmd+M, the bar)? Keep that one: it is better.
+            if let t = ThumbCache.shared.stamps[id], Date().timeIntervalSince(t) < 5 { return }
+            Task {
+                let ws = await ThumbCache.shared.scWindows(ids: [id])
+                await ThumbCache.shared.capture(ws)
+                log("minimized window \(id): thumbnail \(ThumbCache.shared.cached(id) != nil ? "saved" : "NOT captured")")
+            }
+        }
+        guard AXObserverCreate(pid, cb, &obs) == .success, let obs else { return }
+        AXObserverAddNotification(obs, AXUIElementCreateApplication(pid), kAXWindowMiniaturizedNotification as CFString, nil)
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .commonModes)
+        observers[pid] = obs
+    }
+}
