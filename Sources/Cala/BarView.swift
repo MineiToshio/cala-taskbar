@@ -240,10 +240,10 @@ struct UsageTrayView: View {
                 HStack(spacing: 10) {
                     ForEach(states) { state in
                         let remaining = state.remaining(context.date)
-                        HStack(spacing: 4) {
+                        VStack(spacing: 3) {
                             ProviderMark(provider: state.provider).frame(width: 14, height: 14)
                             Text(remaining.map { "\($0)%" } ?? "n/a")
-                                .font(.system(size: 11, weight: .medium)).monospacedDigit().lineLimit(1)
+                                .font(.system(size: 9.5, weight: .medium)).monospacedDigit().lineLimit(1)
                         }
                         .foregroundStyle(usageColor(remaining, dark: scheme == .dark))
                     }
