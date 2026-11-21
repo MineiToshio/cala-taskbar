@@ -19,7 +19,7 @@ final class SettingsWindowController {
             w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true
             w.isReleasedWhenClosed = false
-            w.title = "Configuración"
+            w.title = "Cala · Configuración"
             w.contentView = NSHostingView(rootView: SettingsView(store: ConfigStore.shared))
             w.contentMinSize = NSSize(width: 780, height: 540)
             w.center()
@@ -143,11 +143,10 @@ struct SettingsView: View {
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                Image(systemName: "square.grid.2x2.fill").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                    .frame(width: 30, height: 30)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(LinearGradient(colors: [BarTheme.hex(0x5B9DFF), BarTheme.hex(0x3B6FE0)], startPoint: .top, endPoint: .bottom)))
+                Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high)
+                    .frame(width: 38, height: 38)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("Barra de tareas").font(.system(size: 13, weight: .semibold))
+                    Text("Cala").font(.system(size: 13, weight: .semibold))
                     Text("Configuración").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
@@ -281,7 +280,7 @@ struct GeneralPane: View {
                 }
                 if store.config.hideNativeDock {
                     RowDivider()
-                    SettingRow(title: "Devolver el Dock al cerrar la barra", caption: "Si sales de la barra de tareas, el Dock de macOS vuelve solo. Al abrirla otra vez se oculta de nuevo.") {
+                    SettingRow(title: "Devolver el Dock al cerrar la barra", caption: "Si sales de Cala, el Dock de macOS vuelve solo. Al abrirla otra vez se oculta de nuevo.") {
                         Toggle("", isOn: Binding(get: { store.config.restoreDockOnQuit }, set: { store.config.restoreDockOnQuit = $0 })).toggleStyle(.switch).labelsHidden()
                     }
                 }
@@ -611,11 +610,11 @@ struct AdvancedPane: View {
                 }
             }
             Card {
-                SettingRow(title: "Salir de la barra de tareas", caption: "Para volver a abrirla, busca \u{201C}Cala\u{201D} en Launchpad o Spotlight.") {
+                SettingRow(title: "Salir de Cala", caption: "Para volver a abrirla, busca \u{201C}Cala\u{201D} en Launchpad o Spotlight.") {
                     Button("Salir…", role: .destructive) { confirmQuit = true }
                 }
             }
-            .confirmationDialog("¿Salir de la barra de tareas?", isPresented: $confirmQuit) {
+            .confirmationDialog("¿Salir de Cala?", isPresented: $confirmQuit) {
                 Button("Salir", role: .destructive) { NSApp.terminate(nil) }
             } message: { Text("La barra desaparecerá hasta que vuelvas a abrir la app.") }
         }

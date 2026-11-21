@@ -5,6 +5,8 @@ swift build -c release
 APP=build/Cala.app
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS"
 cp .build/release/Cala "$APP/Contents/MacOS/Cala"
+mkdir -p "$APP/Contents/Resources"
+cp branding/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -13,6 +15,7 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleName</key><string>Cala</string>
 <key>CFBundleDisplayName</key><string>Cala</string>
 <key>CFBundleExecutable</key><string>Cala</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
