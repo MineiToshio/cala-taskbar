@@ -39,6 +39,12 @@ struct BarView: View {
                            active: item.pid != nil && item.pid == model.frontPID,
                            badge: model.badge(for: item),
                            windowless: item.pid.map { model.windowless.contains($0) } ?? false)
+                    // VoiceOver: the bar's clicks are handled by an event monitor, so give each icon its own action.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(item.name)
+                    .accessibilityValue(item.pid == nil ? tx("Not running", "Cerrada") : (model.badge(for: item).map { tx("Open, \($0) notifications", "Abierta, \($0) avisos") } ?? tx("Open", "Abierta")))
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { model.click(item) }
                     .reportFrame(item.id)
                     .opacity(isDragged(item) ? 0 : 1)
             }
@@ -54,7 +60,7 @@ struct BarView: View {
                 if !centered { icons }
                 Spacer(minLength: 8)
                 JoinPill(model: model)
-                if showTray { TrayView(model: model) }
+                if showTray { TrayView(model: model, screenKey: screenKey) }
                 else { UsageTrayView(model: model) }
                 ClockView(model: model)
                 DeskStrip(hovering: model.deskHover).reportFrame(deskID)
@@ -153,6 +159,8 @@ struct StartButton: View {
             .frame(maxHeight: .infinity)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(hovering ? 0.08 : 0)).padding(.vertical, 3))
             .accessibilityLabel(tx("All apps", "Todas las apps"))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { openAppLauncher() }
     }
 }
 
@@ -215,6 +223,7 @@ struct ClockView: View {
 
 struct TrayView: View {
     @ObservedObject var model: TaskbarModel
+    var screenKey = ""
     @ObservedObject private var store = ConfigStore.shared
     @ObservedObject private var monitor = SystemMonitor.shared
     @ObservedObject private var advisor = RestartAdvisor.shared
@@ -272,7 +281,14 @@ struct TrayView: View {
         .padding(.horizontal, 8)
         .frame(maxHeight: .infinity)
         .background(TrayHighlight(hovering: model.trayHover == id))
+        .accessibilityElement(children: .combine)
         .accessibilityLabel(id == trayMore ? tx("More", "Más") : (TrayItems.info(id)?.title ?? ""))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            if let app = NSApp.delegate as? AppDelegate, let bar = app.bars.first(where: { $0.screen.key == screenKey }) ?? app.bars.first {
+                app.trayClick(id, bar: bar)
+            }
+        }
         .reportFrame(id)
     }
 }

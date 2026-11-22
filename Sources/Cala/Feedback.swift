@@ -247,6 +247,7 @@ struct FeedbackView: View {
     @State private var status = ""
     @State private var sending = false
     @State private var sent = false
+    @State private var copied = false
 
     private var config: Config { ConfigStore.shared.config }
     private var effectiveKind: Telemetry.Kind { crash != nil ? .crash : kind }
@@ -287,7 +288,7 @@ struct FeedbackView: View {
                 Text(Telemetry.isConfigured
                      ? (crash != nil ? tx("You don't have to write anything: the report already includes the crash and what Cala was doing right before it. Before sending you can see exactly what is included.", "No tienes que escribir nada: el informe ya incluye el fallo y lo que Cala estaba haciendo justo antes. Antes de enviar puedes ver exactamente qué se incluye.")
                                      : tx("What you write goes to whoever develops Cala. Before sending you can see exactly what is included.", "Lo que escribas llega a quien desarrolla Cala. Antes de enviar puedes ver exactamente qué se incluye."))
-                     : tx("Sending reports is not enabled in this version of Cala.", "El envío de informes no está activado en esta versión de Cala."))
+                     : tx("This version of Cala cannot send reports by itself. Use Copy report and paste it in an e-mail to the developer.", "Esta versión de Cala no puede enviar informes por sí sola. Usa Copiar informe y pégalo en un correo a quien la desarrolla."))
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if crash == nil {
@@ -321,6 +322,18 @@ struct FeedbackView: View {
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if !status.isEmpty { Text(status).font(.system(size: 12)).foregroundStyle(sent ? Color.green : Color.orange).fixedSize(horizontal: false, vertical: true) }
             HStack {
+                // Always a way out: without a configured destination (or offline) the report can still be copied and
+                // pasted into an e-mail or an issue.
+                Button(copied ? tx("Copied", "Copiado") : tx("Copy report", "Copiar informe")) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(fullText, forType: .string)
+                    copied = true
+                }
+                .help(tx("Copies exactly what would be sent, so you can paste it anywhere.", "Copia exactamente lo que se enviaría, para pegarlo donde quieras."))
+                if crash == nil && !sent && !sending && message.trimmingCharacters(in: .whitespacesAndNewlines).count < 10 && Telemetry.isConfigured {
+                    Text(tx("Write at least a short sentence to send.", "Escribe al menos una frase corta para enviar."))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button(sent ? tx("Close", "Cerrar") : tx("Cancel", "Cancelar")) { close() }.keyboardShortcut(.cancelAction)
                 if !sent {
