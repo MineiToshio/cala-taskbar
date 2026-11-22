@@ -171,10 +171,10 @@ struct FlyoutSecondary: ViewModifier {
 struct ThemedPanel: ViewModifier {
     @Environment(\.colorScheme) private var systemScheme
     var radius: CGFloat = 18
+    var theme: BarTheme?
 
     func body(content: Content) -> some View {
-        let cfg = ConfigStore.shared.config
-        let t = BarTheme.named(cfg.theme)
+        let t = theme ?? BarTheme.named(ConfigStore.shared.config.theme)
         let shape = RoundedRectangle(cornerRadius: radius)
         let dark = t.dark ?? (systemScheme == .dark)
         content
@@ -194,7 +194,9 @@ struct ThemedPanel: ViewModifier {
     }
 }
 extension View {
-    func themedPanel(radius: CGFloat = 18) -> some View { modifier(ThemedPanel(radius: radius)) }
+    func themedPanel(radius: CGFloat = 18, theme: BarTheme? = nil) -> some View {
+        modifier(ThemedPanel(radius: radius, theme: theme))
+    }
     func flyoutSection() -> some View { modifier(FlyoutSection()) }
     func flyoutControls() -> some View { modifier(FlyoutControls()) }
     func flyoutSecondary() -> some View { modifier(FlyoutSecondary()) }

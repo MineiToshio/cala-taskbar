@@ -28,10 +28,6 @@ struct DiskInfo: Equatable {
     }
 }
 
-func diskBytes(_ n: Int64) -> String {
-    ByteCountFormatter.string(fromByteCount: n, countStyle: .file)
-}
-
 /// Warning colors only when space is short; otherwise the tray stays monochrome.
 func diskTint(_ d: DiskInfo) -> Color {
     d.freeFraction < 0.10 ? .red : (d.freeFraction < 0.20 ? .orange : Color.primary.opacity(0.85))

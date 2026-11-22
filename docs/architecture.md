@@ -12,15 +12,19 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `CalendarViews.swift` | Upcoming event list and Calendar settings section, sharing flyout styles |
 | `CalendarText.swift` | Spanish/English string chooser shared by calendar and permission messages |
 | `UsagePace.swift` | Burn-rate projection per quota window and the low-quota / will-run-out notifications |
-| `SystemMonitor.swift` | CPU / memory / pressure sampling (`host_statistics`, `sysctl`), per-app load via `libproc`, the "why is it slow" verdict and the system panel |
+| `SystemMonitor.swift` | CPU, memory and pressure sampling, process grouping via `libproc`, and the SwiftUI system panel and details |
+| `SystemRules.swift` | Pure load classification, launcher lookup, severity, message and action selection, and CPU and memory breakdowns |
+| `RestartRules.swift` | Pure restart recommendations, reason text and maintenance summary |
+| `Formatting.swift` | Shared disk byte and binary memory formatting |
+| `SystemFixtures.swift` | Debug-only sample panel models and PNG rendering |
 | `TrayLayout.swift` | Tray item catalog, defaults, and the bar / ^ / hidden placement and ordering stored in `Config` |
 | `Overflow.swift` | "^" panel, Downloads panel, Trash (through Finder AppleScript) and the `flyoutRefit` notification |
 | `Telemetry.swift` | Sentry envelope transport (no SDK): DSN from Info.plist, feedback and crash events with attachments |
 | `CrashSummary.swift` | Parses a macOS `.ips` crash report into a Sentry exception, stack frames and a grouping fingerprint |
 | `Watchdog.swift` | Detached watcher script that reopens Cala after a crash; clean-exit marker, loop guard, `running.lock` |
 | `Feedback.swift` | Redaction, diagnostics text, crash-report detection at launch and the "Reportar un problema" window |
-| `SystemAdvice.swift` | Plain-language CPU / memory / heat guidance (pure rules) and the card with its "Cerrar X" action |
-| `RestartAdvisor.swift` | "Recomendamos reiniciar": pure rules, uptime and pending-update reading, banner, reasons page and the restart action |
+| `SystemAdvice.swift` | Status cards and notes, plus AppKit actions for quitting or activating an app and opening Activity Monitor |
+| `RestartAdvisor.swift` | Uptime and pending-update reading, restart advice state and snoozing, reasons page and Finder restart action |
 | `Cleanup.swift` | "Limpiar espacio" window: git worktree discovery and safety checks (`/usr/bin/git`, `lsof`), cache emptying, confirmation and removal |
 | `Disk.swift` | Free-space reading (`DiskInfo`), background folder sizing (`DiskService`), tray storage panel |
 | `Usage.swift` | Claude/Codex usage detection, read-only fetches, local events, refresh policy and cache |
@@ -101,6 +105,15 @@ Only when auto-hide is off and only on the primary screen: every 0.6 s, if the f
 - Keyboard: Carbon Text Input Sources (`TISCreateInputSourceList`, `TISSelectInputSource`).
 - Users: the profiles panel loads names and photos on a background queue (`dscl` for names, `JPEGPhoto` or `Picture` for photos). `Users.switchTo` loads the PRIVATE `login.framework` symbol `SACSwitchToUser` with checked `dlopen`/`dlsym`. On a background queue it reads the local user's OpenDirectory record (RecordName, UniqueID, GeneratedUID, RealName, NFSHomeDirectory, PrimaryGroupID, UserShell, RecordType, AppleMetaNodeLocation, JPEGPhoto and masked Password). The dictionary uses `dsAttrTypeStandard:*` keys and array values; RecordName[0] must match the non-empty target short name and binary plist serialization must succeed before calling the API. loginwindow uses this record to preselect the target, including users without an open session. Return 0 means only that loginwindow received the request; the switch is asynchronous. The same background queue polls the PRIVATE SkyLight `SLSCopySessionList` every 0.25 s for up to about 3 s, checking the original session's `kCGSSessionOnConsoleKey`. Lookup, validation, API or verification failure triggers one Ctrl+Cmd+Q lock fallback on the main queue. A main-queue guard ignores further switch requests until completion. Success is sticky for each attempt; the main-queue fallback rechecks the attempt and success state. A continuous monotonic clock measures the timeout, including suspension: verification delayed beyond 6 s is logged as unknown, probably switched, and does not lock the screen. `SLSSessionSwitch*` calls are blocked for non-Apple callers and are not used. Both login.framework and SkyLight are PRIVATE APIs that may break in any macOS update.
 - Low Power Mode: a background `Process` runs `/usr/bin/osascript -e` with `do shell script "pmset -a lowpowermode …" with administrator privileges` (password prompt each time). The toggle refreshes the actual system state on completion and every 2 s; no AppleScript executes on the main thread.
+
+## System panel
+`SystemMonitor` samples process CPU and total CPU over the same window. It publishes a `ProcessReading` only when total CPU is within 0–100%, process values are finite and nonnegative, and their sum is at most five percentage points above the total. When validation fails, the last valid reading stays in `LoadSnapshot` and the sampling counters advance. The CPU meter, breakdown and attributed action use that same reading. Before the first valid reading, the meter uses the latest overall CPU sample and the list shows **Midiendo…**.
+
+The monitor tracks continuous critical memory pressure and thermal state separately. `SystemRules` uses those durations for red severity and the smoothed CPU duration for sustained-load guidance. App processes are grouped by bundle path, and multiple running instances leave the group without a quit PID.
+
+`SystemPane` passes live monitor and restart state to `SystemPanelView` as a model and callbacks. `SystemRules` and `RestartRules` work on values with Foundation. The SwiftUI views render their results, and AppKit actions run through `SystemAdvice` and `RestartAdvisor`.
+
+`scripts/check-rules.sh` compiles the pure sources with `CalendarText.swift` and `Checks/SystemRules/main.swift` using `swiftc`. The checks live outside the SwiftPM executable target. The debug `--render-system <dir>` entry point runs before `AppDelegate` and uses `NSHostingView` to capture the fixtures as PNGs.
 
 ## Code signing and permissions
 Ad-hoc signed with a fixed designated requirement (`designated => identifier "local.cala"`) so macOS keeps Accessibility / Screen Recording grants across rebuilds. Without it, every rebuild invalidates the grants. Private CoreGraphics cursor symbols are resolved with checked `dlopen` / `dlsym`, rather than mandatory link-time symbols.

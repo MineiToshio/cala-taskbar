@@ -557,6 +557,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+#if DEBUG
+if let index = CommandLine.arguments.firstIndex(of: "--render-system"), index + 1 < CommandLine.arguments.count {
+    let dir = CommandLine.arguments[index + 1]
+    DispatchQueue.main.async { SystemRender.run(dir: dir) }
+    app.run()
+}
+#endif
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

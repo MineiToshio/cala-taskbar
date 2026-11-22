@@ -125,7 +125,12 @@ The storage panel has **Revisar y limpiar espacio…**, which only opens a windo
 After a run the window shows how much space was actually freed.
 
 ## System monitor
-A **CPU** gauge with the current load sits next to the disk icon (orange when the average of the last ~9 s is above 75% or memory pressure is high, red above 90% or critical pressure). Click it for the "Sistema" panel: a plain-language verdict on why the Mac may feel slow (memory under pressure and which app uses most, busy processor and the heaviest app, overheating, Low Power Mode, or "everything looks normal"); CPU with a 3-minute graph and user / system split; memory used (apps + system + compressed, the same breakdown as Activity Monitor), pressure level, swap and a graph; and a "What is using the most" section with a Processor / Memory switch listing the five heaviest apps, each with a proportional bar (it opens on whichever one is under strain). Processes are grouped by app (all of Chrome's helpers count as "Google Chrome ×35"). It reads the numbers with system calls only, needs no permissions, and per-app sampling runs only while the panel is open. Processes owned by other users or the system itself (WindowServer, kernel_task) cannot be read and are not listed. Turn it off in Settings → General → Sistema.
+Click the CPU gauge in the tray to open **Sistema**. Two matching meters show processor load across all cores and memory used out of installed RAM, each with a short history graph and a status label. The footer opens **Monitor de Actividad** or **Detalles**, where Cala shows the CPU user/system split and core count, memory breakdown, swap, pressure and uptime.
+
+**Lo que más usa** switches between Processor and Memory and shows up to three groups with proportional bars. App helpers count toward their app. A standalone tool can show its launcher, for example **Node.js · de Claude**, when Cala can trace it to a running app. When present, **Sistema y otros** follows the last attributed row.
+
+- **Processor.** The displayed total, rows and any action based on CPU attribution use the same validated reading. **Sistema y otros** accounts for the remaining load, including small or unreadable processes. Rounding is apportioned so the rows add up to the displayed percentage. Cala keeps the last valid reading when a new one fails validation.
+- **Memory.** Rows show each group's memory footprint. **Sistema y otros** shows the difference from used memory when at least 100 MiB remains. Footprints can overlap, so the displayed rows may exceed used memory.
 
 ## Tray layout and the "^" panel
 Every tray item (keyboard, Wi-Fi, Bluetooth, brightness, volume, Claude and Codex, CPU and memory, disk, battery, user, Downloads, Trash) can be set to **En la barra** (always visible), **En ^** (behind the chevron at the start of the tray) or **Oculto**, and dragged to change its order (top to bottom = left to right on the bar). Settings → **Bandeja**; "Restablecer valores" returns to the defaults. By default Wi-Fi, volume, Claude and Codex, CPU, disk and battery are on the bar; keyboard, Bluetooth, brightness, user, Downloads and Trash are behind **^**. The chevron appears only when something is inside, shows its items as tiles, and each tile opens that item's usual panel with a "‹ Más" back button. The old on/off switches for the disk and system monitor items still apply to configs saved before this existed.
@@ -154,31 +159,26 @@ While Settings, "Reportar un problema" or "Limpiar espacio" is open, **Cala** ap
 Cala reopens itself within a couple of seconds if it crashes or is force-quit (Settings → Avanzado → "Volver a abrir Cala si se cierra sola", on by default). A crashed process cannot restart itself, so at launch Cala starts a tiny detached shell script (`~/Library/Application Support/Cala/watchdog.sh`) that watches its pid. A normal quit (Salir de Cala, logout, shutdown, the installer) writes a `clean-exit-<pid>` marker first, and then the script does nothing; without the marker it opens Cala again. It gives up after 3 relaunches in 2 minutes (`relaunch-times`), so a crash at startup cannot loop forever. Switching the setting off writes a `no-relaunch` file that the running script respects. After an abnormal end, the next launch also keeps looking for the crash report for up to 90 s (macOS writes it a few seconds after the crash) so the "Ver y enviar…" prompt still appears. Force quit counts as abnormal: if you really want Cala gone, use "Salir de Cala".
 
 ## "Recomendamos reiniciar"
-When at least one reason applies, the system panel shows an amber strip, **"Recomendamos reiniciar · N motivos ›"** (and, when a reason is strong, a small orange dot on the CPU icon in the bar). Clicking it opens **"Por qué conviene reiniciar"**: one card per reason with a plain sentence and the data, an optional action ("Cerrar Chrome liberaría unos 3 GB"), a collapsible **"Revisado y está bien"** list of what was checked and is fine, and the buttons **Reiniciar ahora…** (confirmation first, then Finder restarts the Mac; same Automation permission as the Trash), **Más tarde** (hides it for 3 days, except under critical memory pressure) and **Abrir Actualización de software**. The panel footer always shows how long the Mac has been on. Settings → Avanzado → "Recomendar reiniciar el Mac" turns it off. No notifications are sent.
+Restart advice appears in a separate **Mantenimiento** row when a reason applies. The row summarizes the leading reason, shows a count of additional reasons when applicable and marks strong advice with an orange dot on the row and the tray gauge. It opens **Por qué conviene reiniciar**, with the reasons, **Revisado y está bien**, and actions to restart with confirmation or open Software Update as appropriate. **Más tarde** hides the advice for three days unless memory pressure becomes critical. Settings → Avanzado → **Recomendar reiniciar el Mac** turns it off.
 
-The reasons and when they apply (`RestartAdvisor.swift`, pure rules):
-- **macOS update waiting that needs a restart** (strong): read offline from `RecommendedUpdates` in `/Library/Preferences/com.apple.SoftwareUpdate.plist` (`MobileSoftwareUpdate = 1`, newer than the installed version). The action is Software Update, because restarting alone does not install it.
-- **Many days on:** 14+ days (soft), 30+ (strong).
-- **Swap:** 4 GB or 25% of RAM or more, with 3+ days on (strong if memory pressure is not normal).
-- **Compressed memory:** 35% of RAM or more, with 3+ days on.
-- **Memory pressure above normal for 10+ minutes** (strong).
-- **Disk under 15% free with 4+ GB of swap files.**
-Not offered because they cannot be measured honestly: flaky Bluetooth/Wi-Fi, and WindowServer's own memory (a system process Cala cannot read).
+Reasons include a pending macOS update that requires a restart, 14+ days of uptime (strong at 30), swap at or above the greater of 4 GiB and 25% of RAM with 3+ days of uptime, compressed memory at or above 35% with 3+ days of uptime, 10+ minutes of elevated memory pressure, and under 15% free disk space with 4+ GiB of allocated swap.
 
-## Guidance in the system panel (calm, with a way out)
-The old red "El procesador está ocupado" line is gone. Each section now explains itself where the data is:
-- **Under the CPU graph:** nothing while the load is normal. A **short spike** (above 75% for less than 2 minutes) shows a neutral note: *"Trabajando a tope en este momento. Es normal en picos cortos… No hace falta hacer nada."* and which app is behind it ("unos 4 de tus 10 núcleos"). Only **sustained** load (2+ minutes) turns amber: *"El procesador lleva 3 min muy ocupado…"*, with the culprit and, when it is a normal app, a **"Cerrar X"** button (asks first; the app still offers to save) plus **"Ver qué lo usa"**. If the culprit is not an app (node, postgres…) it says it may be a long task and points to Activity Monitor. While the heaviest app is still being measured it says "Midiendo qué lo está usando…" instead of guessing.
-- **Under the memory graph:** nothing while the pressure is normal; with memory pressure it explains that the Mac is leaning on the disk and offers to close the app that uses the most ("Cerrar Chrome", with how much it frees).
-- **Heat and Low Power Mode** appear as small notes under the CPU section.
-- **"Mantenimiento"** is a separate block at the bottom that holds "Recomendamos reiniciar", so a busy processor no longer reads as a reason to restart.
-- The CPU icon in the bar only changes color for load that lasts (orange after 2 minutes above 75%, red after 5 minutes above 90%) or for memory pressure.
-Closing never touches Finder, Dock or Cala itself.
+## Guidance in the system panel
+The panel shows one message at a time. Higher severity wins. At the same severity, memory comes first, then heat, then CPU. A short CPU spike or Low Power Mode can show a neutral note.
 
-## System panel, compact version
-The panel was too tall for the screen, so it is now built for people who will not read much (about 530 px instead of 790):
-- **CPU and memory side by side**, each with a big number, a small graph and one word ("Normal", "Ocupado", "Poca libre").
-- **One message at a time**, the most important first, in one or two short sentences (e.g. *"Lleva 3 min muy ocupado por Xcode. Si no la necesitas, ciérrala."* with a **Cerrar Xcode** button). Spikes only say it is normal and settles by itself.
-- **"Lo que más usa":** the top 3 for Processor or Memory, with percentages of the whole processor (they match the big CPU number) instead of "% of one core".
-- **"Recomendamos reiniciar"** is a single strip, only when there is a reason.
-- The technical breakdown (user/system, apps/system/compressed, swap, cores) is behind a collapsed **"Detalles técnicos"**.
-- `notifyutil -p local.cala.openSystemPanel` opens the panel without clicking.
+- **Todo bien.** A CPU spike can show as busy before it reaches two minutes. High memory pressure under two minutes can show as **Justa** with a neutral status.
+- **Revisa esto** (amber). CPU at or above 75% on the smoothed reading for two minutes, high memory pressure for two minutes, serious thermal state, or a critical memory or thermal reading that has yet to reach the red threshold.
+- **Actúa ahora** (red). Memory pressure that stays critical for at least one minute or a thermal state that stays critical for at least two minutes. Sustained CPU load stays amber. The tray gauge uses the same severity.
+
+For sustained CPU load, the message distinguishes how long the Mac has been busy from which group leads in the latest valid reading. A group is singled out when it accounts for at least 10 percentage points and a quarter of the total, provided less than half of the load is unattributed. Without a valid reading, Cala says **Viendo qué lo está usando…**. If at least half the load is unattributed, Cala says it could come from macOS or another account and suggests waiting a few minutes, then opening **Monitor de Actividad** if it persists. When the load is attributable but no group meets the threshold, the message describes it as spread across processes.
+
+Cala offers **Cerrar** only for a single eligible app instance and asks for confirmation. For a standalone tool with a known launcher, **Ir a** brings that app forward. Memory guidance prefers the largest eligible app and shows its footprint.
+
+## Checking the system panel
+From the repository root, run `scripts/check-rules.sh` to check the rules with `swiftc`. To render the sample panels in light and dark mode, build and run the debug executable:
+
+```sh
+swift build && .build/debug/Cala --render-system "$TMPDIR/cala-system" -AppleLanguages '(es)'
+```
+
+Use `'(en)'` for English. To open the live panel in a running Cala instance, use `notifyutil -p local.cala.openSystemPanel`.
