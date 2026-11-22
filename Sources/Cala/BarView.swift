@@ -216,6 +216,7 @@ struct TrayView: View {
     @ObservedObject var model: TaskbarModel
     @ObservedObject private var store = ConfigStore.shared
     @ObservedObject private var monitor = SystemMonitor.shared
+    @ObservedObject private var advisor = RestartAdvisor.shared
 
     var body: some View {
         HStack(spacing: 0) {
@@ -236,7 +237,9 @@ struct TrayView: View {
             cell(nil, id: traySystem, text: nil, custom: AnyView(VStack(spacing: 3) {
                 TrayGlyph(id: id, model: model)
                 Text("\(Int(monitor.cpu.rounded()))%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
-            }.foregroundStyle(monitorTint(monitor))))
+            }
+            .overlay(alignment: .topTrailing) { if advisor.strongVisible { Circle().fill(Color.orange).frame(width: 7, height: 7).offset(x: 5, y: -2) } }
+            .foregroundStyle(monitorTint(monitor))))
         case trayDisk:
             if let d = model.disk {
                 cell(nil, id: trayDisk, text: nil, custom: AnyView(VStack(spacing: 3) {

@@ -152,3 +152,15 @@ While Settings, "Reportar un problema" or "Limpiar espacio" is open, **Cala** ap
 
 ## Automatic relaunch after a crash
 Cala reopens itself within a couple of seconds if it crashes or is force-quit (Settings → Avanzado → "Volver a abrir Cala si se cierra sola", on by default). A crashed process cannot restart itself, so at launch Cala starts a tiny detached shell script (`~/Library/Application Support/Cala/watchdog.sh`) that watches its pid. A normal quit (Salir de Cala, logout, shutdown, the installer) writes a `clean-exit-<pid>` marker first, and then the script does nothing; without the marker it opens Cala again. It gives up after 3 relaunches in 2 minutes (`relaunch-times`), so a crash at startup cannot loop forever. Switching the setting off writes a `no-relaunch` file that the running script respects. After an abnormal end, the next launch also keeps looking for the crash report for up to 90 s (macOS writes it a few seconds after the crash) so the "Ver y enviar…" prompt still appears. Force quit counts as abnormal: if you really want Cala gone, use "Salir de Cala".
+
+## "Recomendamos reiniciar"
+When at least one reason applies, the system panel shows an amber strip, **"Recomendamos reiniciar · N motivos ›"** (and, when a reason is strong, a small orange dot on the CPU icon in the bar). Clicking it opens **"Por qué conviene reiniciar"**: one card per reason with a plain sentence and the data, an optional action ("Cerrar Chrome liberaría unos 3 GB"), a collapsible **"Revisado y está bien"** list of what was checked and is fine, and the buttons **Reiniciar ahora…** (confirmation first, then Finder restarts the Mac; same Automation permission as the Trash), **Más tarde** (hides it for 3 days, except under critical memory pressure) and **Abrir Actualización de software**. The panel footer always shows how long the Mac has been on. Settings → Avanzado → "Recomendar reiniciar el Mac" turns it off. No notifications are sent.
+
+The reasons and when they apply (`RestartAdvisor.swift`, pure rules):
+- **macOS update waiting that needs a restart** (strong): read offline from `RecommendedUpdates` in `/Library/Preferences/com.apple.SoftwareUpdate.plist` (`MobileSoftwareUpdate = 1`, newer than the installed version). The action is Software Update, because restarting alone does not install it.
+- **Many days on:** 14+ days (soft), 30+ (strong).
+- **Swap:** 4 GB or 25% of RAM or more, with 3+ days on (strong if memory pressure is not normal).
+- **Compressed memory:** 35% of RAM or more, with 3+ days on.
+- **Memory pressure above normal for 10+ minutes** (strong).
+- **Disk under 15% free with 4+ GB of swap files.**
+Not offered because they cannot be measured honestly: flaky Bluetooth/Wi-Fi, and WindowServer's own memory (a system process Cala cannot read).

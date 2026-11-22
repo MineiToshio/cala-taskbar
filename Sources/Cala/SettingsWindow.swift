@@ -653,6 +653,10 @@ struct AdvancedPane: View {
                     Button("Reportar…") { FeedbackWindowController.shared.show() }
                 }
                 RowDivider()
+                SettingRow(title: "Recomendar reiniciar el Mac", caption: "En el panel de CPU y memoria, avisa cuando conviene reiniciar y explica los motivos: actualización pendiente, muchos días encendido, mucho swap o memoria bajo presión.") {
+                    Toggle("", isOn: Binding(get: { store.config.restartAdvice }, set: { store.config.restartAdvice = $0 })).toggleStyle(.switch).labelsHidden()
+                }
+                RowDivider()
                 SettingRow(title: "Volver a abrir Cala si se cierra sola", caption: "Si Cala falla, se abre otra vez en unos segundos para que nunca te quedes sin barra. Si falla tres veces seguidas, se detiene para no entrar en un bucle.") {
                     Toggle("", isOn: Binding(get: { store.config.relaunchOnCrash }, set: { store.config.relaunchOnCrash = $0; Watchdog.sync(store) })).toggleStyle(.switch).labelsHidden()
                 }

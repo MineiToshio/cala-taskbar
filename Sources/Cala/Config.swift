@@ -34,6 +34,8 @@ struct Config: Codable, Equatable {
     var crashReports = "ask"
     /// Open Cala again by itself if it crashes (see Watchdog).
     var relaunchOnCrash = true
+    /// Suggest restarting the Mac, with the reasons, in the system panel.
+    var restartAdvice = true
     var hideMenuBar = false
     var restoreMenuBarOnQuit = true
     /// Ids of macOS menu bar icons (see MenuBarIcons) to hide, and the original value of each so it can be restored.
@@ -77,7 +79,7 @@ struct Config: Codable, Equatable {
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
-        case crashReports, relaunchOnCrash, menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
+        case crashReports, relaunchOnCrash, restartAdvice, menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
     }
@@ -112,6 +114,7 @@ extension Config {
         hideMenuBar = field(Bool.self, .hideMenuBar) ?? hideMenuBar
         crashReports = field(String.self, .crashReports) ?? crashReports
         relaunchOnCrash = field(Bool.self, .relaunchOnCrash) ?? relaunchOnCrash
+        restartAdvice = field(Bool.self, .restartAdvice) ?? restartAdvice
         if !["ask", "auto", "never"].contains(crashReports) { crashReports = "ask"; invalid = true }
         menuBarHiddenIcons = field([String].self, .menuBarHiddenIcons) ?? menuBarHiddenIcons
         menuBarIconBackupV2 = field([String: String].self, .menuBarIconBackupV2) ?? menuBarIconBackupV2

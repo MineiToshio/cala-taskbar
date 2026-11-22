@@ -39,6 +39,7 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var memoryWired: UInt64 = 0
     @Published private(set) var memoryCompressed: UInt64 = 0
     @Published private(set) var swapUsed: UInt64 = 0
+    @Published private(set) var swapTotal: UInt64 = 0
     @Published private(set) var pressure = MemoryPressure.normal
     @Published private(set) var thermal = ProcessInfo.ThermalState.nominal
     @Published private(set) var cpuHistory: [Double] = []
@@ -102,7 +103,7 @@ final class SystemMonitor: ObservableObject {
         var level: Int32 = 1, size = MemoryLayout<Int32>.size
         if sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) == 0 { pressure = MemoryPressure(rawValue: Int(level)) ?? .normal }
         var swap = xsw_usage(), swapSize = MemoryLayout<xsw_usage>.size
-        if sysctlbyname("vm.swapusage", &swap, &swapSize, nil, 0) == 0 { swapUsed = swap.xsu_used }
+        if sysctlbyname("vm.swapusage", &swap, &swapSize, nil, 0) == 0 { swapUsed = swap.xsu_used; swapTotal = swap.xsu_total }
     }
 
     /// Average of the last ~9 seconds, so the tray does not flicker on short spikes.
@@ -235,10 +236,12 @@ struct SystemPane: View {
     @Environment(\.themeAccent) private var accent
     private let rows = 5
     @State private var tab = 0   // 0 = processor, 1 = memory
+    @State private var showRestart = false
+    @ObservedObject private var advisor = RestartAdvisor.shared
 
     private func pressureColor(_ p: MemoryPressure) -> Color { p == .normal ? .green : (p == .warning ? .orange : .red) }
 
-    var body: some View {
+    @ViewBuilder private var mainPage: some View {
         let d = m.diagnosis
         VStack(alignment: .leading, spacing: 14) {
             Header(title: calendarText("System", "Sistema"))
@@ -247,6 +250,7 @@ struct SystemPane: View {
                 .foregroundStyle(d.level == .ok ? Color.green : (d.level == .warn ? Color.orange : Color.red))
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(minHeight: 34, alignment: .topLeading)
+            RestartBanner { showRestart = true }
             Divider()
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
@@ -294,9 +298,21 @@ struct SystemPane: View {
             Row(icon: "gauge.with.dots.needle.67percent", title: calendarText("Open Activity Monitor", "Abrir Monitor de Actividad")) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
             }
+            Text(calendarText("On for \(RestartRules.uptimeText(advisor.uptime))", "Encendido hace \(RestartRules.uptimeText(advisor.uptime))"))
+                .font(.system(size: 10.5)).flyoutSecondary()
         }
-        .onAppear { tab = (m.pressure != .normal || m.memoryUsed * 10 > m.memoryTotal * 8) && m.smoothedCPU < 75 ? 1 : 0; m.resetProcessSample(); m.tick(); m.sampleProcesses() }
-        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in m.tick(); m.sampleProcesses() }
+    }
+
+    var body: some View {
+        Group {
+            if showRestart { RestartPane { showRestart = false } } else { mainPage }
+        }
+        .onChange(of: showRestart) { _, _ in DispatchQueue.main.async { NotificationCenter.default.post(name: .flyoutRefit, object: nil) } }
+        .onAppear { showRestart = false; tab = (m.pressure != .normal || m.memoryUsed * 10 > m.memoryTotal * 8) && m.smoothedCPU < 75 ? 1 : 0; m.resetProcessSample(); m.tick(); m.sampleProcesses(); advisor.refresh(disk: ConfigStore.shared.config.place(trayDisk) == .hidden ? DiskInfo.read() : DiskInfo.read()) }
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+            m.tick(); m.sampleProcesses(); advisor.refresh(disk: DiskInfo.read())
+            if advisor.visible == false && showRestart { showRestart = false }
+        }
     }
 
     private func list(_ items: [ProcessGroup], value: @escaping (ProcessGroup) -> String, fraction: @escaping (ProcessGroup) -> Double) -> some View {
