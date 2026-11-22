@@ -1,6 +1,6 @@
 #!/bin/zsh
-# Build, then install Cala into ~/Applications (user-only writable) and
-# point the login LaunchAgent at it.
+# Developer install: build, then replace ~/Applications/Cala.app (user-only writable) and open it.
+# End users install from the disk image made by scripts/release.sh instead (see INSTALL.md).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -54,27 +54,5 @@ chmod -R go-w "$DEST"
 codesign --verify --deep --strict "$DEST"
 echo "Instalado: $DEST"
 
-# LaunchAgent: same shape the app writes itself (/usr/bin/open -a <bundle>).
-if [[ -f "$PLIST" ]]; then
-  current=$($PB -c "Print :ProgramArguments:2" "$PLIST" 2>/dev/null || true)
-  if [[ "$current" != "$DEST" ]]; then
-    $PB -c "Delete :ProgramArguments" "$PLIST" 2>/dev/null || true
-    $PB -c "Add :ProgramArguments array" \
-        -c "Add :ProgramArguments:0 string /usr/bin/open" \
-        -c "Add :ProgramArguments:1 string -a" \
-        -c "Add :ProgramArguments:2 string $DEST" "$PLIST"
-    echo "LaunchAgent actualizado: $PLIST"
-  fi
-  chmod 644 "$PLIST"
-  if [[ "$(stat -f %u "$PLIST")" != "$(id -u)" ]]; then
-    echo "$PLIST is not owned by $USER" >&2
-    exit 1
-  fi
-  # No launchctl bootout/bootstrap: the job has RunAtLoad, so reloading would
-  # run `open -a` against the instance started below and pop its Settings
-  # window. launchd re-reads the plist at the next login.
-else
-  echo "Sin LaunchAgent ($PLIST); actívalo desde Ajustes si lo quieres."
-fi
-
+# Open at login is managed by the app (System Settings → Login Items); an old LaunchAgent is migrated on launch.
 open "$DEST"

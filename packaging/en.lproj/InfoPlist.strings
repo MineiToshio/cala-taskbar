@@ -1,0 +1,8 @@
+"CFBundleDisplayName" = "Cala";
+"NSAppleEventsUsageDescription" = "Cala asks Finder to count and empty the Trash, and to restart your Mac, only when you ask it to.";
+"NSCalendarsFullAccessUsageDescription" = "Cala shows your upcoming events in the clock panel and a Join button before video calls. Events stay on this Mac.";
+"NSCalendarsUsageDescription" = "Cala shows your upcoming events in the clock panel. Events stay on this Mac.";
+"NSBluetoothAlwaysUsageDescription" = "Cala lists and connects your paired Bluetooth devices from the tray.";
+"NSLocationWhenInUseUsageDescription" = "macOS only shows Wi-Fi network names to apps with Location. Cala does not read where you are.";
+"NSLocationUsageDescription" = "macOS only shows Wi-Fi network names to apps with Location. Cala does not read where you are.";
+"NSScreenCaptureUsageDescription" = "Cala draws thumbnails of your windows when you hover over an app. Your screen is never recorded or sent.";

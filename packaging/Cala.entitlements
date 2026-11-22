@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened runtime exceptions Cala needs (only applied to Developer ID builds). Nothing else is requested. -->
+<plist version="1.0"><dict>
+    <!-- Finder: count/empty the Trash and restart the Mac when the user asks. -->
+    <key>com.apple.security.automation.apple-events</key><true/>
+    <!-- Upcoming events in the clock panel. -->
+    <key>com.apple.security.personal-information.calendars</key><true/>
+    <!-- macOS only reveals Wi-Fi network names to apps with Location. -->
+    <key>com.apple.security.personal-information.location</key><true/>
+</dict></plist>

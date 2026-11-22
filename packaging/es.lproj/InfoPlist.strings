@@ -1,0 +1,8 @@
+"CFBundleDisplayName" = "Cala";
+"NSAppleEventsUsageDescription" = "Cala le pide a Finder contar y vaciar la Papelera, y reiniciar tu Mac, solo cuando tú lo pides.";
+"NSCalendarsFullAccessUsageDescription" = "Cala muestra tus próximos eventos en el panel del reloj y un botón Unirse antes de las videollamadas. Los eventos no salen de este Mac.";
+"NSCalendarsUsageDescription" = "Cala muestra tus próximos eventos en el panel del reloj. Los eventos no salen de este Mac.";
+"NSBluetoothAlwaysUsageDescription" = "Cala lista y conecta tus dispositivos Bluetooth vinculados desde la bandeja.";
+"NSLocationWhenInUseUsageDescription" = "macOS solo muestra los nombres de las redes Wi-Fi a las apps con Ubicación. Cala no lee dónde estás.";
+"NSLocationUsageDescription" = "macOS solo muestra los nombres de las redes Wi-Fi a las apps con Ubicación. Cala no lee dónde estás.";
+"NSScreenCaptureUsageDescription" = "Cala dibuja miniaturas de tus ventanas al pasar el mouse por una app. Tu pantalla nunca se graba ni se envía.";
