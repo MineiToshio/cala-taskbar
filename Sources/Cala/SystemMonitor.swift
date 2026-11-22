@@ -5,6 +5,11 @@ import Combine
 
 let traySystem = "__t_system"
 
+enum RestProbe {
+    case available([ProcessUsage])
+    case unavailable
+}
+
 /// CPU, memory and per-app load, read with the same system calls Activity Monitor uses (no helper, no admin rights).
 /// The cheap numbers (CPU %, memory, pressure) are sampled every few seconds while the tray item is on; the
 /// per-process list is only sampled while the panel is open.
@@ -26,6 +31,7 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var cpuHistory: [Double] = []
     @Published private(set) var memoryHistory: [Double] = []
     @Published private var lastReading: ProcessReading?
+    @Published private(set) var restProbe: RestProbe?
 
     var processReading: ProcessReading? {
         guard let lastReading, lastReading.isFresh(at: samplingTime) else { return nil }
@@ -47,6 +53,10 @@ final class SystemMonitor: ObservableObject {
     private var processGeneration = 0
     private let processQueue = DispatchQueue(label: "local.cala.monitor", qos: .utility)
     private var sampling = false
+    private let restQueue = DispatchQueue(label: "local.cala.monitor.ps", qos: .utility)
+    private var restExpanded = false
+    private var restInFlight = false
+    private var restGeneration = 0
     private let timebase: mach_timebase_info_data_t = {
         var t = mach_timebase_info_data_t(); mach_timebase_info(&t); return t
     }()
@@ -181,6 +191,7 @@ final class SystemMonitor: ObservableObject {
     }
 
     func sampleProcesses() {
+        refreshRest()
         guard !sampling else { return }
         sampling = true
         let lastSample = lastProcessSample
@@ -216,8 +227,11 @@ final class SystemMonitor: ObservableObject {
             let uid = getuid()
             var cpuNs: [pid_t: (start: UInt64, time: UInt64)] = [:]
             var groups: [String: AppLoad] = [:]
+            var measured: [MeasuredProcess] = []
             for pid in table.keys.sorted() {
-                if let owner = table[pid]?.uid, owner >= 501 && owner != uid { otherAccounts += 1 }
+                guard let owner = table[pid]?.uid else { continue }
+                let otherAccount = SystemRules.isOtherAccount(owner, currentUID: uid)
+                if otherAccount { otherAccounts += 1 }
                 var usage = rusage_info_v4()
                 let result = withUnsafeMutablePointer(to: &usage) {
                     $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
@@ -236,6 +250,12 @@ final class SystemMonitor: ObservableObject {
                 if let before = previous?.cpuNs[pid], before.start == start, ns >= before.time, elapsed > 0 {
                     cpu = Double(ns - before.time) / (elapsed * 1_000_000_000) * 100 / cores
                 }
+                if otherAccount {
+                    let sample = ProcessUsage(pid: pid, uid: owner, executable: "", cpu: cpu, memory: usage.ri_phys_footprint)
+                    measured.append(MeasuredProcess(usage: sample, loadKey: nil))
+                    continue
+                }
+
                 let (path, executable) = Self.processName(pid)
                 let launcher = SystemRules.enclosingApp(path: path, apps: apps) == nil
                     ? SystemRules.launcher(of: pid, parents: parents, apps: regularPIDs) : nil
@@ -245,6 +265,8 @@ final class SystemMonitor: ObservableObject {
                 group.memory += usage.ri_phys_footprint
                 group.count += 1
                 groups[key] = group
+                let sample = ProcessUsage(pid: pid, uid: owner, executable: executable, cpu: cpu, memory: usage.ri_phys_footprint)
+                measured.append(MeasuredProcess(usage: sample, loadKey: key))
 
                 if case .app(let appPID) = kind, appPID == pid {
                     executableNames[key] = executable
@@ -254,7 +276,7 @@ final class SystemMonitor: ObservableObject {
             }
             let orderedLoads = groups.values.sorted { $0.cpu == $1.cpu ? $0.key < $1.key : $0.cpu > $1.cpu }
             let sample = ProcessSample(date: now, capturedAt: capturedAt, ticks: ticks, cpuNs: cpuNs)
-            let details = (unreadable: unreadable, otherAccounts: otherAccounts, executableNames: executableNames)
+            let details = (unreadable: unreadable, otherAccounts: otherAccounts, executableNames: executableNames, measured: measured)
             DispatchQueue.main.async {
                 self.sampling = false
                 guard self.processGeneration == generation else { return }
@@ -270,11 +292,64 @@ final class SystemMonitor: ObservableObject {
                 // Advance counters for rejected samples without extending the valid reading's lifetime.
                 if let reading = ProcessReading(capturedAt: capturedAt, cpuWindow: cpuWindow, loads: loads,
                                                 unreadable: details.unreadable, otherAccounts: details.otherAccounts,
-                                                executableNames: details.executableNames) {
+                                                executableNames: details.executableNames, processes: details.measured) {
                     self.publish(reading)
                 }
             }
         }
+    }
+
+    func setRestExpanded(_ expanded: Bool) {
+        guard restExpanded != expanded else { return }
+        restExpanded = expanded
+        restGeneration += 1
+        restProbe = nil
+        if expanded { refreshRest() }
+    }
+
+    private func refreshRest() {
+        guard restExpanded, !restInFlight else { return }
+        restInFlight = true
+        let generation = restGeneration
+        restQueue.async {
+            let probe = Self.runPS()
+            DispatchQueue.main.async {
+                self.restInFlight = false
+                guard self.restExpanded else { return }
+                guard self.restGeneration == generation else {
+                    self.refreshRest()
+                    return
+                }
+                self.restProbe = probe
+            }
+        }
+    }
+
+    private static func runPS() -> RestProbe {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-A", "-o", "pid=,uid=,pcpu=,rss=,comm="]
+        process.environment = ["LC_ALL": "C"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return .unavailable
+        }
+
+        let timeout = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1, execute: timeout)
+        defer { timeout.cancel() }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return .unavailable }
+        let samples = SystemRules.parsePS(String(decoding: data, as: UTF8.self), currentUID: getuid())
+        return samples.isEmpty ? .unavailable : .available(samples)
     }
 
     private func publish(_ reading: ProcessReading) {
@@ -368,6 +443,13 @@ struct SystemPanelModel {
     var maintenance: (text: String, strong: Bool, more: Int)?
     var tab: Int
     var icons: [String: NSImage] = [:]
+    var expandedKey: String?
+    var reservesExpandedHeight = false
+    var restProbe: RestProbe?
+    var currentUID: UInt32 = 0
+    var cores = 1
+
+    var metric: LoadMetric { tab == 1 ? .memory : .cpu }
 
     var cpuValue: Int { Int((snapshot.cpuWindow ?? snapshot.cpuNow).rounded()) }
 
@@ -381,6 +463,27 @@ struct SystemPanelModel {
         guard let reading = snapshot.reading else { return nil }
         return SystemRules.memoryBreakdown(reading.loads, used: snapshot.memoryUsed,
                                            lang: Locale.preferredLanguages.first, locale: .current)
+    }
+
+    func detailRows(for row: Breakdown.Row, in breakdown: Breakdown) -> [LoadDetail] {
+        let lang = Locale.preferredLanguages.first
+        let layout = LoadDetailLayout(parentCount: breakdown.rows.count, showsEstimate: row.isRest)
+        if row.isRest {
+            let ps: [ProcessUsage]?
+            if case .available(let samples) = restProbe { ps = samples } else { ps = nil }
+            return SystemRules.restDetails(row, breakdown: breakdown, loads: snapshot.loads,
+                                           measured: snapshot.reading?.processes ?? [], ps: ps, metric: metric,
+                                           currentUID: currentUID, cores: cores, lang: lang, capacity: layout.capacity)
+        }
+        return SystemRules.toolDetails(row, loads: snapshot.loads, metric: metric, lang: lang, capacity: layout.capacity)
+    }
+
+    var restNote: String {
+        if case .available(let samples) = restProbe,
+           samples.contains(where: { $0.uid < 500 && (metric == .cpu ? $0.cpu != nil : $0.memory != nil) }) {
+            return calendarText("Estimated breakdown", "Reparto aproximado")
+        }
+        return calendarText("Only available measurements", "Solo mediciones disponibles")
     }
 
     static func initialTab(_ s: LoadSnapshot) -> Int {
@@ -413,26 +516,36 @@ struct SystemPane: View {
         let kind: SystemMessage.Kind?
         let style: SystemMessage.Style?
         let maintenance: Bool
+        let expanded: Bool
     }
 
     @ObservedObject private var m = SystemMonitor.shared
     @ObservedObject private var advisor = RestartAdvisor.shared
     @State private var page = Page.main
     @State private var tab = 0
+    @State private var expandedKey: String?
+    @State private var reservesExpandedHeight = false
     @State private var reservation = PanelReservation()
 
     var body: some View {
         let snapshot = m.snapshot()
         let message = SystemRules.message(snapshot)
         let maintenance = advisor.visible ? RestartRules.summary(advisor.advice, lang: Locale.preferredLanguages.first) : nil
-        let signature = LayoutSignature(page: page, kind: message?.kind, style: message?.style, maintenance: maintenance != nil)
+        let model = panelModel(snapshot, maintenance: maintenance)
+        let restIsExpanded = page == .main && expandedKey == "rest"
+            && model.breakdown?.rows.contains(where: \.isRest) == true
+        let signature = LayoutSignature(page: page, kind: message?.kind, style: message?.style,
+                                        maintenance: maintenance != nil, expanded: reservesExpandedHeight)
         VStack(spacing: 0) {
             switch page {
             case .main:
-                let model = panelModel(snapshot, maintenance: maintenance)
-                SystemPanelView(model: model, reservation: $reservation, onTab: { tab = $0 },
-                                onAction: { perform($0, from: snapshot) }, openRestart: { page = .restart },
-                                openDetails: { page = .details })
+                SystemPanelView(model: model, reservation: $reservation,
+                                onTab: { tab = $0; expandedKey = nil; m.setRestExpanded(false) },
+                                onExpand: toggleExpansion,
+                                onAction: { perform($0, from: snapshot) },
+                                onDetailAction: { performDetail($0, from: snapshot) },
+                                openRestart: { m.setRestExpanded(false); page = .restart },
+                                openDetails: { m.setRestExpanded(false); page = .details })
             case .restart: RestartPane { page = .main }
             case .details:
                 SystemDetailsPane(monitor: m, uptime: advisor.uptime) { page = .main }
@@ -443,6 +556,8 @@ struct SystemPane: View {
                 NotificationCenter.default.post(name: .flyoutRefit, object: nil)
             }
         }
+        .onChange(of: restIsExpanded) { _, expanded in m.setRestExpanded(expanded) }
+        .onDisappear { m.setRestExpanded(false) }
         .onAppear {
             m.resetProcessSample()
             m.tick()
@@ -467,10 +582,28 @@ struct SystemPane: View {
         SystemAdvice.perform(action)
     }
 
+    private func toggleExpansion(_ row: Breakdown.Row) {
+        expandedKey = expandedKey == row.key ? nil : row.key
+        reservesExpandedHeight = true
+        m.setRestExpanded(expandedKey == "rest")
+    }
+
+    private func performDetail(_ action: SystemAction, from displayed: LoadSnapshot) {
+        let current = m.snapshot()
+        let model = panelModel(current, maintenance: nil)
+        guard displayed.reading?.isFresh(at: current.observedAt) == true,
+              let breakdown = model.breakdown,
+              let row = breakdown.rows.first(where: { $0.isTool && $0.key == expandedKey }),
+              model.detailRows(for: row, in: breakdown).contains(where: { $0.action == action }) else { return }
+        SystemAdvice.perform(action)
+    }
+
     private func panelModel(_ snapshot: LoadSnapshot, maintenance: (text: String, strong: Bool, more: Int)?) -> SystemPanelModel {
         var model = SystemPanelModel(snapshot: snapshot, cpuHistory: m.cpuHistory, memoryHistory: m.memoryHistory,
-                                     maintenance: maintenance, tab: tab)
-        let visibleKeys = Set(model.breakdown?.rows.map(\.key) ?? [])
+                                     maintenance: maintenance, tab: tab, expandedKey: expandedKey,
+                                     reservesExpandedHeight: reservesExpandedHeight, restProbe: m.restProbe,
+                                     currentUID: getuid(), cores: ProcessInfo.processInfo.activeProcessorCount)
+        let visibleKeys = Set(model.breakdown?.rows.flatMap(\.loadKeys) ?? [])
         for load in snapshot.loads where visibleKeys.contains(load.key) {
             if case .app(let pid?) = load.kind {
                 model.icons[load.key] = NSRunningApplication(processIdentifier: pid)?.icon
@@ -485,20 +618,29 @@ struct SystemPanelView: View {
     let model: SystemPanelModel
     @Binding var reservation: PanelReservation
     let onTab: (Int) -> Void
+    var onExpand: (Breakdown.Row) -> Void = { _ in }
     let onAction: (SystemAction) -> Void
+    var onDetailAction: (SystemAction) -> Void = { _ in }
     let openRestart: () -> Void
     let openDetails: () -> Void
 
     var body: some View {
         let s = model.snapshot
         let message = SystemRules.message(s)
+        let breakdown = model.breakdown
+        let rows = breakdown?.rows ?? []
+        let expanded = rows.first { $0.expandable && $0.key == model.expandedKey }
+        let reservedHeight = CGFloat(LoadDetailLayout.listHeight)
+        let foldedHeight = CGFloat(max(26, rows.count * 30 - 4))
+        let retainedAfterFold = model.reservesExpandedHeight && expanded == nil
+        let listHeight = expanded != nil ? reservedHeight : (retainedAfterFold ? foldedHeight : 116)
         VStack(alignment: .leading, spacing: 10) {
             header(SystemRules.level(s))
             meters(s)
             if message != nil || reservation.message > 0 {
                 messageSlot(message)
             }
-            usageList
+            usageList(breakdown, rows: rows, expanded: expanded, height: listHeight)
             VStack(spacing: 8) {
                 Divider().frame(height: 1)
                     .accessibilityHidden(true)
@@ -508,6 +650,7 @@ struct SystemPanelView: View {
                 footer
             }
         }
+        .padding(.bottom, retainedAfterFold ? reservedHeight - foldedHeight : 0)
         .onPreferenceChange(PanelReservationKey.self) { next in
             let measured = PanelReservation(message: max(reservation.message, next.message),
                                             maintenance: max(reservation.maintenance, next.maintenance))
@@ -587,9 +730,9 @@ struct SystemPanelView: View {
         .frame(maxWidth: .infinity, minHeight: reservation.message, alignment: .topLeading)
     }
 
-    private var usageList: some View {
-        let breakdown = model.breakdown
-        let rows = breakdown?.rows ?? []
+    private func usageList(_ breakdown: Breakdown?, rows: [Breakdown.Row], expanded: Breakdown.Row?,
+                           height: CGFloat) -> some View {
+        let layout = expanded.map { LoadDetailLayout(parentCount: rows.count, showsEstimate: $0.isRest) }
         return VStack(spacing: 6) {
             HStack {
                 Text(calendarText("What uses the most", "Lo que más usa")).font(.system(size: 12.5, weight: .semibold))
@@ -603,25 +746,73 @@ struct SystemPanelView: View {
                 .frame(width: 170)
             }
             .frame(height: 22)
-            VStack(spacing: 4) {
-                ForEach(0..<(SystemRules.topRows + 1), id: \.self) { i in
-                    Group {
-                        if i < rows.count {
-                            let row = rows[i]
-                            LoadRowView(row: row, load: model.snapshot.loads.first { $0.key == row.key },
-                                        icon: model.icons[row.key], executable: model.snapshot.reading?.executableNames[row.key])
-                        } else if i == 0 {
-                            Text(breakdown == nil ? calendarText("Measuring…", "Midiendo…") :
-                                    calendarText("Nothing noticeable now.", "Nada destacable ahora."))
-                                .font(.system(size: 12.5)).flyoutSecondary()
-                        } else {
-                            Color.clear.accessibilityHidden(true)
-                        }
+            VStack(alignment: .leading, spacing: CGFloat(layout?.spacing ?? 4)) {
+                if rows.isEmpty {
+                    Text(breakdown == nil ? calendarText("Measuring…", "Midiendo…") :
+                            calendarText("Nothing noticeable now.", "Nada destacable ahora."))
+                        .font(.system(size: 12.5)).flyoutSecondary().frame(height: 26)
+                }
+                ForEach(rows, id: \.key) { row in
+                    let isExpanded = expanded?.key == row.key
+                    let rowHeight = layout.map { isExpanded ? LoadDetailLayout.expandedRowHeight : $0.siblingHeight } ?? 26
+                    loadRow(row, isExpanded: isExpanded, height: CGFloat(rowHeight))
+                    if isExpanded, let breakdown, let layout {
+                        loadDetails(row, in: breakdown, layout: layout)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 26, maxHeight: 26, alignment: .leading)
                 }
             }
+            .frame(maxWidth: .infinity)
+            .frame(height: height, alignment: .topLeading)
         }
+    }
+
+    @ViewBuilder private func loadRow(_ row: Breakdown.Row, isExpanded: Bool, height: CGFloat) -> some View {
+        let key = row.loadKeys.first
+        let view = LoadRowView(row: row, icon: model.icons[row.key],
+                               executable: key.flatMap { model.snapshot.reading?.executableNames[$0] },
+                               isExpanded: isExpanded, height: height)
+        if row.expandable {
+            Button { onExpand(row) } label: { view.contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .accessibilityHint(isExpanded ? calendarText("Collapse breakdown", "Plegar desglose")
+                                   : calendarText("Expand breakdown", "Expandir desglose"))
+        } else {
+            view
+        }
+    }
+
+    private func loadDetails(_ row: Breakdown.Row, in breakdown: Breakdown, layout: LoadDetailLayout) -> some View {
+        let details = model.detailRows(for: row, in: breakdown)
+        return VStack(alignment: .leading, spacing: 0) {
+            if row.isRest {
+                Text(model.restNote).font(.system(size: 10)).flyoutSecondary()
+                    .frame(height: CGFloat(layout.headerHeight))
+            }
+            ForEach(details) { detail in
+                HStack(spacing: 6) {
+                    Text(detail.name).lineLimit(1).layoutPriority(1)
+                    if let count = detail.count {
+                        Text(calendarText(count == 1 ? "1 process" : "\(count) processes",
+                                          count == 1 ? "1 proceso" : "\(count) procesos"))
+                            .lineLimit(1).flyoutSecondary()
+                    }
+                    Spacer(minLength: 0)
+                    if let action = detail.action {
+                        Button(SystemRules.actionLabel(action, lang: Locale.preferredLanguages.first)) {
+                            onDetailAction(action)
+                        }
+                        .buttonStyle(.plain).foregroundStyle(Color.accentColor).lineLimit(1)
+                    }
+                    Text(model.metric.value(detail.amount, locale: .current))
+                        .monospacedDigit().frame(minWidth: 42, alignment: .trailing)
+                }
+                .frame(height: CGFloat(LoadDetailLayout.detailRowHeight))
+            }
+        }
+        .font(.system(size: 11.5))
+        .padding(.leading, 24).padding(.trailing, 8)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 5))
+        .id(row.key)
     }
 
     private var maintenanceSlot: some View {
@@ -721,12 +912,13 @@ struct MeterTile: View {
 struct LoadRowView: View {
     @Environment(\.themeAccent) private var accent
     let row: Breakdown.Row
-    let load: AppLoad?
     let icon: NSImage?
     let executable: String?
+    let isExpanded: Bool
+    let height: CGFloat
 
     var body: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: height < 26 ? 1 : 3) {
             HStack(spacing: 8) {
                 Group {
                     if let icon {
@@ -746,32 +938,36 @@ struct LoadRowView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 Spacer(minLength: 0)
+                if row.expandable {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold)).flyoutSecondary()
+                        .frame(width: 9).accessibilityHidden(true)
+                }
                 Text(row.value).font(.system(size: 12, weight: .medium)).monospacedDigit()
                     .frame(width: 48, alignment: .trailing)
             }
             .frame(height: 15)
-            GeometryReader { geometry in
-                Capsule().fill(Color.primary.opacity(0.08))
-                    .overlay(alignment: .leading) {
-                        Capsule().fill(row.isRest ? Color.primary.opacity(0.3) : accent.opacity(0.85))
-                            .frame(width: max(3, geometry.size.width * row.fraction))
-                    }
+            if height > 16 {
+                GeometryReader { geometry in
+                    Capsule().fill(Color.primary.opacity(0.08))
+                        .overlay(alignment: .leading) {
+                            Capsule().fill(row.isRest ? Color.primary.opacity(0.3) : accent.opacity(0.85))
+                                .frame(width: max(3, geometry.size.width * row.fraction))
+                        }
+                }
+                .frame(height: height < 26 ? 4 : 5)
+                .accessibilityHidden(true)
             }
-            .frame(height: 5)
-            .accessibilityHidden(true)
         }
-        .frame(height: 26)
+        .frame(height: height)
         .accessibilityElement(children: .combine)
-        .help(load.map { "\(executable ?? $0.name) ×\($0.count)" } ?? row.name)
+        .help(executable ?? row.name)
     }
 
     private var symbol: String {
         if row.isRest { return "gearshape.2" }
-        switch load?.kind {
-        case .app: return "app"
-        case .tool: return "terminal"
-        default: return "gearshape"
-        }
+        if row.isTool { return "terminal" }
+        return row.suffix == nil ? "app" : "gearshape"
     }
 }
 

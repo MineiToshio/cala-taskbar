@@ -60,7 +60,7 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 - Closing uses the AX close button. After 0.5 s the fallback rechecks that the same window still exists, is not minimized and has no sheet, raises it, then checks again after 0.15 s that it remains the focused window of the front app before posting Cmd+W.
 
 ## Menus and dynamic items
-Menus are `NSMenu` popped up above the bar (`position y = barTop + menu height + 4`). `BlockItem` is an `NSMenuItem` subclass that runs a closure. "New…" items are found by reading the app's AX menu bar (File menu = item index 2) and pressing the matching item with `AXPress`.
+Menus are `NSMenu` popped up above the bar (`position y = barTop + menu height + 4`). `BlockItem` is an `NSMenuItem` subclass that runs a closure. "New…" items are found by reading the app's AX menu bar (File menu = item index 2) and pressing the matching item with `AXPress`. `main.swift` calls `NSRunningApplication.terminate()` directly for eligible **Salir de…** entries. Cala's **Cerrar ventanas** uses `TaskbarModel.ownWindows()` to close titled app windows that are visible or minimized.
 
 ## Badges
 `DockBadges.read()` walks the Dock's AX tree and reads `AXStatusLabel` for each item, keyed by item title and by `path:<bundle path>`. Refreshed every 2 s on a background queue, with an in-flight guard so slow reads cannot accumulate.
@@ -107,11 +107,15 @@ Only when auto-hide is off and only on the primary screen: every 0.6 s, if the f
 - Low Power Mode: a background `Process` runs `/usr/bin/osascript -e` with `do shell script "pmset -a lowpowermode …" with administrator privileges` (password prompt each time). The toggle refreshes the actual system state on completion and every 2 s; no AppleScript executes on the main thread.
 
 ## System panel
-`SystemMonitor` samples process CPU and total CPU over the same window. It publishes a `ProcessReading` only when total CPU is within 0–100%, process values are finite and nonnegative, and their sum is at most five percentage points above the total. When validation fails, the last valid reading stays in `LoadSnapshot` and the sampling counters advance. The CPU meter, breakdown and attributed action use that same reading. Before the first valid reading, the meter uses the latest overall CPU sample and the list shows **Midiendo…**.
+`SystemMonitor` samples process CPU and total CPU over the same window. It publishes a `ProcessReading` only when total CPU is within 0–100%, process values are finite and nonnegative, and their sum is at most five percentage points above the total. When validation fails, the sampling counters advance and the last valid reading stays available until it expires, four seconds after capture. The CPU meter, breakdown and attributed action use that same reading. Without a fresh valid reading, the meter uses the latest overall CPU sample and the list shows **Midiendo…**.
 
 The monitor tracks continuous critical memory pressure and thermal state separately. `SystemRules` uses those durations for red severity and the smoothed CPU duration for sustained-load guidance. App processes are grouped by bundle path, and multiple running instances leave the group without a quit PID.
 
 `SystemPane` passes live monitor and restart state to `SystemPanelView` as a model and callbacks. `SystemRules` and `RestartRules` work on values with Foundation. The SwiftUI views render their results, and AppKit actions run through `SystemAdvice` and `RestartAdvisor`.
+
+`SystemRules` groups tool rows by name and splits their details by launcher. `SystemMonitor` probes `/bin/ps` in the background only while **Sistema y otros** is expanded. The pure rules strip other accounts' executable names, skip processes already represented in visible rows and use CPU and RSS as weights for an estimated split of the existing remainder. The probe leaves the parent total and guidance tied to the validated reading. Panel actions recheck the current reading, and quitting through `SystemAdvice` still asks for confirmation.
+
+`RestartAdvisor.swift` bounds the reasons viewport and shows a scroll hint when reasons extend below it. The permission message and action buttons sit outside the scroll area.
 
 `scripts/check-rules.sh` compiles the pure sources with `CalendarText.swift` and `Checks/SystemRules/main.swift` using `swiftc`. The checks live outside the SwiftPM executable target. The debug `--render-system <dir>` entry point runs before `AppDelegate` and uses `NSHostingView` to capture the fixtures as PNGs.
 

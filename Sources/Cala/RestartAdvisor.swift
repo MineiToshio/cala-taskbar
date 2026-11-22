@@ -97,46 +97,178 @@ struct RestartPane: View {
     @ObservedObject private var advisor = RestartAdvisor.shared
     @ObservedObject private var monitor = SystemMonitor.shared
     let back: () -> Void
-    @State private var showFine = false
     @State private var message = ""
 
     var body: some View {
+        RestartPanelView(advice: advisor.advice, uptime: advisor.uptime, heaviest: monitor.heaviestClosableLoad,
+                         message: message, back: back, later: { advisor.snooze(); back() },
+                         openSoftwareUpdate: openSoftwareUpdate, restart: restart)
+    }
+
+    private func openSoftwareUpdate() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension")!)
+    }
+
+    private func restart() {
+        guard RestartAdvisor.confirmRestart() else { return }
+        RestartAdvisor.restart { ok, denied in
+            if !ok { message = Self.restartError(denied: denied) }
+        }
+    }
+
+    static func restartError(denied: Bool) -> String {
+        if denied {
+            return calendarText("Cala needs permission to control Finder. Allow it in System Settings → Privacy & Security → Automation.",
+                                "Cala necesita permiso para controlar Finder. Actívalo en Ajustes del Sistema → Privacidad y seguridad → Automatización.")
+        }
+        return calendarText("Could not restart.", "No se pudo reiniciar.")
+    }
+}
+
+private enum RestartScrollSection: Hashable {
+    case reason(String)
+    case checks
+}
+
+private struct RestartSectionFrames: PreferenceKey {
+    static let defaultValue: [RestartScrollSection: CGRect] = [:]
+
+    static func reduce(value: inout [RestartScrollSection: CGRect], nextValue: () -> [RestartScrollSection: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
+struct RestartPanelView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let advice: RestartAdvice
+    let uptime: TimeInterval
+    let heaviest: AppLoad?
+    let message: String
+    let back: () -> Void
+    let later: () -> Void
+    let openSoftwareUpdate: () -> Void
+    let restart: () -> Void
+
+    @State private var showFine = false
+    @State private var sectionFrames: [RestartScrollSection: CGRect] = [:]
+
+    private let reasonsSpace = "restart-reasons"
+    private let hintHeight: CGFloat = 32
+
+    var body: some View {
+        let errorHeight: CGFloat = 46
+        let viewport: CGFloat = message.isEmpty ? 378 : 378 - errorHeight - 12
         VStack(alignment: .leading, spacing: 12) {
             Button(action: back) {
                 Label(calendarText("System", "Sistema"), systemImage: "chevron.left").font(.system(size: 11.5, weight: .medium))
             }.buttonStyle(.plain).flyoutSecondary()
-            VStack(alignment: .leading, spacing: 3) {
-                Text(calendarText("Why restarting helps", "Por qué conviene reiniciar")).font(.system(size: 17, weight: .semibold))
-                Text(calendarText("Your Mac has been on for \(RestartRules.uptimeText(advisor.uptime)). These are the reasons:", "Tu Mac lleva \(RestartRules.uptimeText(advisor.uptime)) encendido. Estos son los motivos:"))
-                    .font(.system(size: 12)).flyoutSecondary()
+
+            ViewThatFits(in: .vertical) {
+                content.fixedSize(horizontal: false, vertical: true)
+                scrollContent(height: viewport)
             }
-            ForEach(advisor.advice.reasons) { reason in card(reason) }
-            DisclosureGroup(isExpanded: $showFine) {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(advisor.advice.fine, id: \.self) { line in
-                        Label(line, systemImage: "checkmark.circle.fill").font(.system(size: 11.5)).foregroundStyle(Color.green)
-                            .labelStyle(.titleAndIcon)
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
-            } label: {
-                Text(calendarText("Checked and fine", "Revisado y está bien")).font(.system(size: 12, weight: .medium))
+            .frame(maxHeight: viewport, alignment: .top)
+
+            if !message.isEmpty {
+                Text(message).font(.system(size: 11.5)).foregroundStyle(Color.orange)
+                    .lineLimit(3).frame(height: errorHeight, alignment: .topLeading)
+                    .help(message)
             }
             Divider()
-            if !message.isEmpty { Text(message).font(.system(size: 11.5)).foregroundStyle(Color.orange).fixedSize(horizontal: false, vertical: true) }
-            let onlyUpdate = advisor.advice.reasons.allSatisfy { $0.id == "update" }
-            HStack {
-                Button(calendarText("Later", "Más tarde")) { advisor.snooze(); back() }
-                Spacer()
-                if advisor.advice.reasons.contains(where: { $0.id == "update" }) {
-                    if onlyUpdate {
-                        Button(calendarText("Open Software Update", "Abrir Actualización de software")) { openSoftwareUpdate() }.buttonStyle(.borderedProminent)
-                    } else {
-                        Button(calendarText("Open Software Update", "Abrir Actualización de software")) { openSoftwareUpdate() }.buttonStyle(.bordered)
-                    }
+            controls
+        }
+    }
+
+    private func scrollContent(height: CGFloat) -> some View {
+        let edge = height - hintHeight + 1
+        let remaining = advice.reasons.compactMap { sectionFrames[.reason($0.id)] }.filter { $0.maxY > edge }
+        let more = remaining.filter { $0.minY >= edge }.count
+        let checksBelow = sectionFrames[.checks].map { $0.maxY > edge } ?? false
+        return ScrollView {
+            content.padding(.trailing, 10).padding(.bottom, hintHeight)
+        }
+        .scrollIndicators(.visible)
+        .frame(height: height)
+        .coordinateSpace(name: reasonsSpace)
+        .onPreferenceChange(RestartSectionFrames.self) { sectionFrames = $0 }
+        .overlay(alignment: .bottom) {
+            if !remaining.isEmpty || checksBelow {
+                let surface = FlyoutStyle.surface(dark: colorScheme == .dark)
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, surface], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 12)
+                        .accessibilityHidden(true)
+                    Text(scrollHint(more: more, checksBelow: checksBelow))
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: hintHeight - 12)
+                        .background(surface)
                 }
-                if !onlyUpdate {
-                    Button(calendarText("Restart now…", "Reiniciar ahora…")) { restart() }.buttonStyle(.borderedProminent)
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func scrollHint(more: Int, checksBelow: Bool) -> String {
+        guard more > 0 else {
+            return checksBelow ? calendarText("See checks ↓", "Ver revisión ↓")
+                               : calendarText("Keep reading ↓", "Sigue leyendo ↓")
+        }
+        let count = calendarText(more == 1 ? "1 more reason" : "\(more) more reasons",
+                                 more == 1 ? "1 motivo más" : "\(more) motivos más")
+        return checksBelow ? calendarText("\(count) and checks ↓", "\(count) y revisión ↓") : "\(count) ↓"
+    }
+
+    private func sectionFrame(_ section: RestartScrollSection) -> some View {
+        GeometryReader { geometry in
+            Color.clear.preference(key: RestartSectionFrames.self,
+                                   value: [section: geometry.frame(in: .named(reasonsSpace))])
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(calendarText("Why restarting helps", "Por qué conviene reiniciar")).font(.system(size: 17, weight: .semibold))
+                Text(calendarText("Your Mac has been on for \(RestartRules.uptimeText(uptime)). These are the reasons:",
+                                  "Tu Mac lleva \(RestartRules.uptimeText(uptime)) encendido. Estos son los motivos:"))
+                    .font(.system(size: 12)).flyoutSecondary()
+            }
+            ForEach(advice.reasons) { reason in
+                card(reason).background { sectionFrame(.reason(reason.id)) }
+            }
+            if !advice.fine.isEmpty {
+                DisclosureGroup(isExpanded: $showFine) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(advice.fine, id: \.self) { line in
+                            Label(line, systemImage: "checkmark.circle.fill").font(.system(size: 11.5)).foregroundStyle(Color.green)
+                                .labelStyle(.titleAndIcon)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                } label: {
+                    Text(calendarText("Checked and fine", "Revisado y está bien")).font(.system(size: 12, weight: .medium))
                 }
+                .background { sectionFrame(.checks) }
+            }
+        }
+    }
+
+    private var controls: some View {
+        let onlyUpdate = advice.reasons.allSatisfy { $0.id == "update" }
+        return HStack {
+            Button(calendarText("Later", "Más tarde"), action: later)
+            Spacer()
+            if advice.reasons.contains(where: { $0.id == "update" }) {
+                if onlyUpdate {
+                    Button(calendarText("Open Software Update", "Abrir Actualización de software"), action: openSoftwareUpdate)
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button(calendarText("Software Update", "Actualizar macOS"), action: openSoftwareUpdate)
+                        .buttonStyle(.bordered)
+                }
+            }
+            if !onlyUpdate {
+                Button(calendarText("Restart now…", "Reiniciar ahora…"), action: restart).buttonStyle(.borderedProminent)
             }
         }
     }
@@ -149,7 +281,7 @@ struct RestartPane: View {
                 Text(r.detail).font(.system(size: 11.5)).flyoutSecondary().fixedSize(horizontal: false, vertical: true)
                 switch r.action {
                 case .closeApp:
-                    if let app = monitor.heaviestClosableLoad {
+                    if let app = heaviest {
                         let amount = diskBytes(Int64(app.memory))
                         Text(calendarText("Closing \(app.name) would free about \(amount).",
                                           "Cerrar \(app.name) liberaría unos \(amount)."))
@@ -164,14 +296,4 @@ struct RestartPane: View {
         .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.06)))
     }
 
-    private func openSoftwareUpdate() {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Software-Update-Settings.extension")!)
-    }
-
-    private func restart() {
-        guard RestartAdvisor.confirmRestart() else { return }
-        RestartAdvisor.restart { ok, denied in
-            if !ok { message = denied ? calendarText("Cala needs permission to control Finder to restart. Allow it in System Settings → Privacy & Security → Automation.", "Cala necesita permiso para controlar Finder y poder reiniciar. Actívalo en Ajustes del Sistema → Privacidad y seguridad → Automatización.") : calendarText("Could not restart.", "No se pudo reiniciar.") }
-        }
-    }
 }

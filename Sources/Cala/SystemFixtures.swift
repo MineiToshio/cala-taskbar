@@ -18,9 +18,9 @@ enum SystemFixtures {
         AppLoad(key: name, name: name, kind: .app(pid: pid), cpu: cpu, memory: gib(memory), count: 1, closable: true)
     }
 
-    private static func node(_ cpu: Double, launcher: String, pid: Int32) -> AppLoad {
+    private static func node(_ cpu: Double, launcher: String, pid: Int32, count: Int = 16) -> AppLoad {
         let group = SystemRules.classify(path: "/opt/homebrew/bin/node", executable: "node", apps: [], launcher: (launcher, pid))
-        return AppLoad(key: group.key, name: group.name, kind: group.kind, cpu: cpu, memory: gib(1.4), count: 16, closable: false)
+        return AppLoad(key: group.key, name: group.name, kind: group.kind, cpu: cpu, memory: gib(1.4), count: count, closable: false)
     }
 
     private static func snapshot(cpu: Double, smoothed: Double, busy: Double = 0, loads: [AppLoad]) -> LoadSnapshot {
@@ -98,6 +98,34 @@ enum SystemFixtures {
         idleXcode.cpu = 0
         memory.lastReading = ProcessReading(capturedAt: 100, cpuWindow: 21, loads: [lightChrome, idleXcode, app("Slack", 0, pid: 102, memory: 0.9), mail])
 
+        let manyLaunchers = snapshot(cpu: 85, smoothed: 90, busy: 4, loads: [
+            node(40, launcher: "Terminal", pid: 700, count: 12),
+            node(20, launcher: "Claude", pid: 697, count: 5)
+        ])
+        var expandedNode = model(manyLaunchers)
+        expandedNode.expandedKey = expandedNode.breakdown?.rows.first(where: \.isTool)?.key
+        expandedNode.reservesExpandedHeight = true
+        var expandedRest = model(background)
+        expandedRest.expandedKey = "rest"
+        expandedRest.reservesExpandedHeight = true
+        expandedRest.currentUID = 501
+        expandedRest.cores = 8
+        expandedRest.restProbe = .available(SystemRules.parsePS(
+            """
+            11 0 224.0 240000 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+            12 0 112.0 120000 kernel_task
+            13 0 96.0 42000 /System/Library/Frameworks/CoreServices.framework/mds
+            14 502 144.0 160000 /Users/demo/Private.app
+            15 0 48.0 24000 /System/Library/CoreServices/backupd
+            """, currentUID: 501))
+        var expandedWorst = model(worstCase, maintenance: maintenance)
+        expandedWorst.expandedKey = expandedRest.expandedKey
+        expandedWorst.reservesExpandedHeight = true
+        expandedWorst.currentUID = expandedRest.currentUID
+        expandedWorst.cores = expandedRest.cores
+        expandedWorst.restProbe = expandedRest.restProbe
+        var foldedRest = expandedRest
+        foldedRest.expandedKey = nil
         return [
             ("todo-bien", model(fine)),
             ("pico-corto", model(spike)),
@@ -107,10 +135,29 @@ enum SystemFixtures {
             ("memoria-alta-cpu", model(critical, tab: 0)),
             ("no-atribuible", model(background)),
             ("con-mantenimiento", model(worstCase, maintenance: maintenance)),
+            ("expandido-node", expandedNode),
+            ("expandido-sistema", expandedRest),
+            ("expandido-sistema-desde-mas", expandedWorst),
+            ("plegado-sistema", foldedRest),
             ("midiendo", model(measuring)),
             ("lista-memoria", model(memory, tab: 1))
         ]
     }()
+    static func restartSample(reasonCount: Int, denied: Bool) -> RestartPanelView {
+        let input = RestartInput(uptime: 34 * 86_400, swapUsed: gib(6), swapTotal: gib(7), ram: gib(16),
+                                 compressed: gib(6), pressure: .critical, pressureMinutes: 12,
+                                 diskFreeFraction: 0.1, pendingUpdate: "macOS Tahoe", heaviestApp: ("Google Chrome", gib(3.2)))
+        var advice = RestartRules.evaluate(input)
+        precondition(advice.reasons.count == 6)
+        if reasonCount < advice.reasons.count {
+            advice.reasons = Array(advice.reasons.prefix(reasonCount))
+            advice.fine = [calendarText("Disk space is fine", "Espacio en disco correcto")]
+        }
+        return RestartPanelView(advice: advice, uptime: input.uptime, heaviest: chrome,
+                                message: denied ? RestartPane.restartError(denied: true) : "",
+                                back: {}, later: {}, openSoftwareUpdate: {}, restart: {})
+    }
+
 }
 
 @MainActor
@@ -138,22 +185,43 @@ enum SystemRender {
                     let label = model.tab == 0 ? "CPU" : "CPU (muestra de la pestaña Memoria)"
                     print("\(label) \(fixture.name) → \(cpu.joined(separator: " + ")) = \(model.cpuValue)%")
                 }
-                let light = try png(view, name: fixture.name, dark: false, in: output)
-                if fixture.name != "midiendo", fixture.name != "lista-memoria" {
-                    try light.write(to: output.appendingPathComponent("\(fixture.name).png"), options: .atomic)
-                }
-                try png(view, name: fixture.name, dark: true, in: output)
-                if fixture.name == "con-mantenimiento" {
-                    let overflow = VStack(alignment: .leading, spacing: 8) {
-                        Button {} label: {
-                            Label(calendarText("More", "Más"), systemImage: "chevron.left")
-                                .font(.system(size: 11.5, weight: .medium))
-                        }.buttonStyle(.plain).flyoutSecondary()
-                        view
+                if let breakdown = model.breakdown,
+                   let parent = breakdown.rows.first(where: { $0.key == model.expandedKey }) {
+                    let children = model.detailRows(for: parent, in: breakdown)
+                    let layout = LoadDetailLayout(parentCount: breakdown.rows.count, showsEstimate: parent.isRest)
+                    guard children.count <= layout.capacity, children.reduce(0, { $0 + $1.amount }) == parent.amount else {
+                        throw RenderError.invalidBreakdown(name: fixture.name, total: parent.amount,
+                                                           values: children.map { String($0.amount) })
                     }
-                    try png(overflow, name: "con-mantenimiento-desde-mas", dark: false, in: output)
-                    try png(overflow, name: "con-mantenimiento-desde-mas", dark: true, in: output)
+                    print("Desglose \(fixture.name) → \(children.map { String($0.amount) }.joined(separator: " + ")) = \(parent.amount)")
                 }
+                if fixture.name == "expandido-sistema-desde-mas" {
+                    let light = try png(withMore(view), name: fixture.name, dark: false, in: output)
+                    try light.write(to: output.appendingPathComponent("\(fixture.name).png"), options: .atomic)
+                    try png(withMore(view), name: fixture.name, dark: true, in: output)
+                } else {
+                    let light = try png(view, name: fixture.name, dark: false, in: output)
+                    if fixture.name != "midiendo", fixture.name != "lista-memoria" {
+                        try light.write(to: output.appendingPathComponent("\(fixture.name).png"), options: .atomic)
+                    }
+                    try png(view, name: fixture.name, dark: true, in: output)
+                }
+                if fixture.name == "con-mantenimiento" {
+                    try png(withMore(view), name: "con-mantenimiento-desde-mas", dark: false, in: output)
+                    try png(withMore(view), name: "con-mantenimiento-desde-mas", dark: true, in: output)
+                }
+            }
+            let restartFixtures = [
+                ("reinicio-6-motivos", 6, false),
+                ("reinicio-error-permiso", 6, true),
+                ("reinicio-revision", 3, false)
+            ]
+            for (name, reasonCount, denied) in restartFixtures {
+                let restart = SystemFixtures.restartSample(reasonCount: reasonCount, denied: denied)
+                let image = try png(restart, name: name, dark: false, in: output, hasMeters: false)
+                try image.write(to: output.appendingPathComponent("\(name).png"), options: .atomic)
+                try png(restart, name: name, dark: true, in: output, hasMeters: false)
+                try png(withMore(restart), name: "\(name)-desde-mas", dark: false, in: output, hasMeters: false)
             }
             exit(0)
         } catch {
@@ -162,8 +230,19 @@ enum SystemRender {
         }
     }
 
+    private static func withMore<V: View>(_ view: V) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {} label: {
+                Label(calendarText("More", "Más"), systemImage: "chevron.left")
+                    .font(.system(size: 11.5, weight: .medium))
+            }.buttonStyle(.plain).flyoutSecondary()
+            view
+        }
+    }
+
     @discardableResult
-    private static func png<V: View>(_ view: V, name: String, dark: Bool, in directory: URL) throws -> Data {
+    private static func png<V: View>(_ view: V, name: String, dark: Bool, in directory: URL,
+                                     hasMeters: Bool = true) throws -> Data {
         var meters: [String: CGRect] = [:]
         let root = view.padding(18).frame(width: 380).flyoutControls().themedPanel(theme: .named("system")).fixedSize()
             .environment(\.colorScheme, dark ? .dark : .light)
@@ -183,9 +262,9 @@ enum SystemRender {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
         let frames = meters.values.sorted { $0.minX < $1.minX }
         let expected = CGSize(width: MeterTile.width, height: MeterTile.height)
-        guard size.width == 380, size.height <= 520, frames.count == 2,
-              frames[0].size == expected, frames[1].size == expected,
-              frames[0].minY == frames[1].minY, frames[1].minX - frames[0].maxX == 12 else {
+        let metersMatch = frames.count == 2 && frames[0].size == expected && frames[1].size == expected
+            && frames[0].minY == frames[1].minY && frames[1].minX - frames[0].maxX == 12
+        guard size.width == 380, size.height <= 520, !hasMeters || metersMatch else {
             throw RenderError.invalidLayout(name: name, size: size, meters: meters)
         }
         guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { throw RenderError.bitmapUnavailable }
@@ -193,7 +272,8 @@ enum SystemRender {
         guard let data = bitmap.representation(using: .png, properties: [:]) else { throw RenderError.bitmapUnavailable }
         let style = dark ? "dark" : "light"
         try data.write(to: directory.appendingPathComponent("\(name)-\(style).png"), options: .atomic)
-        print("\(name)-\(style) → \(Int(size.width))×\(Int(size.height.rounded(.up))) pt, medidores 166×68 pt")
+        let metersNote = hasMeters ? ", medidores 166×68 pt" : ""
+        print("\(name)-\(style) → \(Int(size.width))×\(Int(size.height.rounded(.up))) pt\(metersNote)")
         return data
     }
 }

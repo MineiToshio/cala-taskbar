@@ -66,6 +66,72 @@ struct CriticalDuration {
     }
 }
 
+enum LoadMetric {
+    case cpu, memory
+
+    func weight(_ load: AppLoad) -> Double {
+        switch self {
+        case .cpu: return load.cpu
+        case .memory: return Double(load.memory)
+        }
+    }
+
+    func value(_ amount: Int, locale: Locale) -> String {
+        switch self {
+        case .cpu: return "\(amount)%"
+        case .memory: return memoryText(UInt64(amount), locale: locale)
+        }
+    }
+}
+
+struct ProcessUsage: Equatable {
+    let pid: Int32
+    let uid: UInt32
+    let executable: String
+    let cpu: Double?
+    let memory: UInt64?
+}
+
+struct MeasuredProcess {
+    let usage: ProcessUsage
+    let loadKey: String?
+}
+
+struct LoadDetail: Equatable, Identifiable {
+    let id: String
+    let name: String
+    let count: Int?
+    let amount: Int
+    let action: SystemAction?
+}
+
+struct LoadDetailLayout {
+    static let listHeight = 150
+    static let expandedRowHeight = 22
+    static let detailRowHeight = 18
+    static let maxDetailRows = 5
+
+    let siblingHeight: Int
+    let spacing: Int
+    let headerHeight: Int
+    let capacity: Int
+
+    init(parentCount: Int, showsEstimate: Bool) {
+        let header = showsEstimate ? 14 : 0
+        let normalBudget = Self.listHeight - parentCount * (Self.expandedRowHeight + 4) - header
+        let useCompactSiblings = normalBudget < 2 * Self.detailRowHeight
+        let siblingHeight = useCompactSiblings ? 16 : Self.expandedRowHeight
+        let spacing = useCompactSiblings ? 3 : 4
+        let budget = Self.listHeight - Self.expandedRowHeight - max(0, parentCount - 1) * siblingHeight
+            - parentCount * spacing - header
+        self.siblingHeight = siblingHeight
+        self.spacing = spacing
+        headerHeight = header
+        // The subtotal takes one slot when needed. Integer division leaves any partial slot unused.
+        capacity = min(Self.maxDetailRows, max(0, budget) / Self.detailRowHeight)
+    }
+}
+
 /// A complete process window. Small sampling skew is handled by the CPU breakdown;
 /// larger discrepancies are rejected before any of these values reach the panel.
 struct ProcessReading {
@@ -78,9 +144,10 @@ struct ProcessReading {
     let unreadable: Int
     let otherAccounts: Int
     let executableNames: [String: String]
+    let processes: [MeasuredProcess]
 
     init?(capturedAt: TimeInterval, cpuWindow: Double, loads: [AppLoad], unreadable: Int = 0, otherAccounts: Int = 0,
-          executableNames: [String: String] = [:]) {
+          executableNames: [String: String] = [:], processes: [MeasuredProcess] = []) {
         guard (0...100).contains(cpuWindow),
               loads.allSatisfy({ $0.cpu.isFinite && $0.cpu >= 0 }),
               loads.reduce(0, { $0 + $1.cpu }) <= cpuWindow + SystemRules.mismatch else { return nil }
@@ -90,6 +157,7 @@ struct ProcessReading {
         self.unreadable = unreadable
         self.otherAccounts = otherAccounts
         self.executableNames = executableNames
+        self.processes = processes
     }
 
     var expiresAt: TimeInterval { capturedAt + Self.maxAge }
@@ -178,6 +246,11 @@ struct Breakdown: Equatable {
         let value: String
         let fraction: Double
         let isRest: Bool
+        let amount: Int
+        let loadKeys: [String]
+        var isTool = false
+
+        var expandable: Bool { isRest || isTool }
     }
     var rows: [Row]
     var consistent: Bool
@@ -290,14 +363,6 @@ enum SystemRules {
     static func text(_ m: SystemMessage, lang: String? = Locale.preferredLanguages.first,
                      locale: Locale = .current) -> MessageText {
         func tr(_ en: String, _ es: String) -> String { calendarText(en, es, preferredLanguage: lang) }
-        func actionText(_ action: SystemAction) -> String {
-            switch action {
-            case .quit(let name, _, _): return tr("Quit \(short(name))…", "Cerrar \(short(name, limit: 16))…")
-            case .activate(let name, _): return tr("Go to \(short(name))", "Ir a \(short(name))")
-            case .openActivityMonitor: return tr("Activity Monitor", "Monitor de Actividad")
-            }
-        }
-
         let title: String
         let detail: String?
         switch m.kind {
@@ -370,7 +435,19 @@ enum SystemRules {
         }
         return MessageText(title: short(title, limit: 46),
                            detail: detail.map { short($0, limit: 105) },
-                           primary: m.primary.map(actionText), secondary: m.secondary.map(actionText))
+                           primary: m.primary.map { actionLabel($0, lang: lang) },
+                           secondary: m.secondary.map { actionLabel($0, lang: lang) })
+    }
+
+    static func actionLabel(_ action: SystemAction, lang: String?) -> String {
+        switch action {
+        case .quit(let name, _, _):
+            return calendarText("Quit \(short(name))…", "Cerrar \(short(name, limit: 16))…", preferredLanguage: lang)
+        case .activate(let name, _):
+            return calendarText("Go to \(short(name))", "Ir a \(short(name))", preferredLanguage: lang)
+        case .openActivityMonitor:
+            return calendarText("Activity Monitor", "Monitor de Actividad", preferredLanguage: lang)
+        }
     }
 
     private static func short(_ text: String, limit: Int = nameMax) -> String {
@@ -385,24 +462,51 @@ enum SystemRules {
         }
     }
 
+    private struct DisplayLoad {
+        let key: String
+        var load: AppLoad
+        var loadKeys: [String]
+        let isTool: Bool
+    }
+
+    /// Panel rows combine a tool across launchers. Culprit actions still use separate samples per launcher PID.
+    private static func displayLoads(_ loads: [AppLoad]) -> [DisplayLoad] {
+        var groups: [String: DisplayLoad] = [:]
+        for load in loads {
+            let isTool: Bool
+            if case .tool = load.kind { isTool = true } else { isTool = false }
+            let key = isTool ? "tool|\(load.name)" : load.key
+            if var group = groups[key] {
+                group.load.cpu += load.cpu
+                group.load.memory += load.memory
+                group.load.count += load.count
+                group.loadKeys.append(load.key)
+                groups[key] = group
+            } else {
+                groups[key] = DisplayLoad(key: key, load: load, loadKeys: [load.key], isTool: isTool)
+            }
+        }
+        return Array(groups.values)
+    }
+
     static func cpuBreakdown(_ loads: [AppLoad], total: Double, lang: String?) -> Breakdown {
-        let top = loads.filter { $0.cpu >= rowMin }.sorted {
-            $0.cpu == $1.cpu ? $0.key < $1.key : $0.cpu > $1.cpu
+        let top = displayLoads(loads).filter { $0.load.cpu >= rowMin }.sorted {
+            $0.load.cpu == $1.load.cpu ? $0.key < $1.key : $0.load.cpu > $1.load.cpu
         }.prefix(topRows)
-        let sum = top.reduce(0) { $0 + $1.cpu }
+        let sum = top.reduce(0) { $0 + $1.load.cpu }
         let rest = total - sum
         guard rest >= -mismatch else { return Breakdown(rows: [], consistent: false) }
         let scale = rest < 0 ? total / sum : 1
-        let values = top.map { $0.cpu * scale } + [max(0, rest)]
+        let values = top.map { $0.load.cpu * scale } + [max(0, rest)]
         let integers = apportion(values, to: Int(total.rounded()))
         let denominator = max(total, 10)
-        var rows = zip(top, zip(values, integers)).compactMap { load, value -> Breakdown.Row? in
+        var rows = zip(top, zip(values, integers)).compactMap { group, value -> Breakdown.Row? in
             let (raw, integer) = value
             guard integer > 0 else { return nil }
-            return row(load, value: "\(integer)%", fraction: raw / denominator, lang: lang)
+            return row(group, value: "\(integer)%", amount: integer, fraction: raw / denominator, lang: lang)
         }
         if let remainder = integers.last, remainder >= 1 {
-            rows.append(restRow(value: "\(remainder)%", fraction: max(0, rest) / denominator, lang: lang))
+            rows.append(restRow(value: "\(remainder)%", amount: remainder, fraction: max(0, rest) / denominator, lang: lang))
         }
         return Breakdown(rows: rows, consistent: true)
     }
@@ -421,28 +525,32 @@ enum SystemRules {
     }
 
     static func memoryBreakdown(_ loads: [AppLoad], used: UInt64, lang: String?, locale: Locale) -> Breakdown {
-        let top = loads.sorted {
-            $0.memory == $1.memory ? $0.key < $1.key : $0.memory > $1.memory
+        let top = displayLoads(loads).sorted {
+            $0.load.memory == $1.load.memory ? $0.key < $1.key : $0.load.memory > $1.load.memory
         }.prefix(topRows)
         let denominator = Double(max(1, used))
         var rows = top.map {
-            row($0, value: memoryText($0.memory, locale: locale), fraction: Double($0.memory) / denominator, lang: lang)
+            row($0, value: memoryText($0.load.memory, locale: locale), amount: Int($0.load.memory),
+                fraction: Double($0.load.memory) / denominator, lang: lang)
         }
-        let measured = top.reduce(0) { $0 + $1.memory }
+        let measured = top.reduce(0) { $0 + $1.load.memory }
         if used > measured, used - measured >= 100 * 1_048_576 {
             let rest = used - measured
-            rows.append(restRow(value: memoryText(rest, locale: locale), fraction: Double(rest) / denominator, lang: lang))
+            rows.append(restRow(value: memoryText(rest, locale: locale), amount: Int(rest),
+                                fraction: Double(rest) / denominator, lang: lang))
         }
         return Breakdown(rows: rows, consistent: true)
     }
 
-    private static func row(_ load: AppLoad, value: String, fraction: Double, lang: String?) -> Breakdown.Row {
+    private static func row(_ group: DisplayLoad, value: String, amount: Int,
+                            fraction: Double, lang: String?) -> Breakdown.Row {
+        let load = group.load
         let suffix: String?
         switch load.kind {
         case .app: suffix = nil
-        case .tool(_, let launcher?, _):
+        case .tool(_, let launcher?, _) where group.loadKeys.count == 1:
             suffix = calendarText("from \(launcher)", "de \(launcher)", preferredLanguage: lang)
-        case .tool(let executable, nil, _):
+        case .tool(let executable, _, _):
             let what = friendly(executable: executable)?.what ?? (en: "background process", es: "proceso sin ventana")
             suffix = calendarText(what.en, what.es, preferredLanguage: lang)
         case .system:
@@ -451,7 +559,8 @@ enum SystemRules {
         }
         let name: String
         if case .app = load.kind { name = load.name } else { name = displayName(load.name, lang: lang) }
-        return Breakdown.Row(key: load.key, name: name, suffix: suffix, value: value, fraction: min(1, fraction), isRest: false)
+        return Breakdown.Row(key: group.key, name: name, suffix: suffix, value: value, fraction: min(1, fraction),
+                             isRest: false, amount: amount, loadKeys: group.loadKeys, isTool: group.isTool)
     }
 
     private static func displayName(_ name: String, lang: String?) -> String {
@@ -476,9 +585,153 @@ enum SystemRules {
         return friendly(executable: executable)?.what ?? ("macOS services", "servicios de macOS")
     }
 
-    private static func restRow(value: String, fraction: Double, lang: String?) -> Breakdown.Row {
+    private static func restRow(value: String, amount: Int, fraction: Double, lang: String?) -> Breakdown.Row {
         Breakdown.Row(key: "rest", name: calendarText("System and others", "Sistema y otros", preferredLanguage: lang),
-                      suffix: nil, value: value, fraction: fraction, isRest: true)
+                      suffix: nil, value: value, fraction: fraction, isRest: true, amount: amount, loadKeys: [])
+    }
+
+    private struct DetailGroup {
+        let id: String
+        let name: String
+        var count: Int? = nil
+        var weight = 0.0
+        var action: SystemAction? = nil
+    }
+
+    static func toolDetails(_ row: Breakdown.Row, loads: [AppLoad], metric: LoadMetric, lang: String?,
+                            capacity: Int = LoadDetailLayout.maxDetailRows) -> [LoadDetail] {
+        let keys = Set(row.loadKeys)
+        var groups: [String: DetailGroup] = [:]
+        for load in loads where keys.contains(load.key) {
+            guard case .tool(_, let launcher, let pid) = load.kind else { continue }
+            let id = pid.map { "launcher|\($0)" } ?? "unlaunched"
+            let name = launcher ?? calendarText("No launcher", "Sin lanzador", preferredLanguage: lang)
+            let action = launcher.flatMap { name in pid.map { SystemAction.activate(name: name, pid: $0) } }
+            var group = groups[id] ?? DetailGroup(id: id, name: name, count: 0, action: action)
+            group.count = (group.count ?? 0) + load.count
+            group.weight += metric.weight(load)
+            groups[id] = group
+        }
+        return detailRows(Array(groups.values), parent: row.amount, capacity: capacity, lang: lang)
+    }
+
+    static func isOtherAccount(_ uid: UInt32, currentUID: UInt32) -> Bool {
+        (500..<0xFF_FF_FF_00).contains(uid) && uid != currentUID
+    }
+
+    static func parsePS(_ output: String, currentUID: UInt32) -> [ProcessUsage] {
+        output.split(whereSeparator: \.isNewline).compactMap { line in
+            let fields = line.split(maxSplits: 4, whereSeparator: \.isWhitespace)
+            guard fields.count == 5, let pid = Int32(fields[0]), pid >= 0,
+                  let uid = UInt32(fields[1]) ?? Int32(fields[1]).map(UInt32.init(bitPattern:)) else { return nil }
+            let cpu = Double(fields[2]).flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+            let memory = UInt64(fields[3]).flatMap { $0 <= UInt64.max / 1_024 ? $0 * 1_024 : nil }
+            guard cpu != nil || memory != nil else { return nil }
+            let executable = isOtherAccount(uid, currentUID: currentUID) ? "" : String(fields[4])
+            return ProcessUsage(pid: pid, uid: uid, executable: executable, cpu: cpu, memory: memory)
+        }
+    }
+
+    static func restDetails(_ row: Breakdown.Row, breakdown: Breakdown, loads: [AppLoad], measured: [MeasuredProcess],
+                            ps: [ProcessUsage]?, metric: LoadMetric, currentUID: UInt32, cores: Int, lang: String?,
+                            capacity: Int = LoadDetailLayout.maxDetailRows) -> [LoadDetail] {
+        let visibleKeys = Set(breakdown.rows.flatMap(\.loadKeys))
+        let measuredByPID = Dictionary(uniqueKeysWithValues: measured.map { ($0.usage.pid, $0) })
+        let loadsByKey = Dictionary(uniqueKeysWithValues: loads.map { ($0.key, $0) })
+        let available = ps ?? measured.map(\.usage)
+        let otherID = "other"
+        var groups: [String: DetailGroup] = [:]
+        for process in available {
+            let match = measuredByPID[process.pid].flatMap { $0.usage.uid == process.uid ? $0 : nil }
+            if let key = match?.loadKey, visibleKeys.contains(key) { continue }
+            let weight: Double
+            switch metric {
+            case .cpu: weight = (process.cpu ?? 0) / Double(ps == nil ? 1 : max(1, cores))
+            case .memory: weight = Double(process.memory ?? 0)
+            }
+            guard weight > 0 else { continue }
+            let id: String
+            let name: String
+            if isOtherAccount(process.uid, currentUID: currentUID) {
+                id = "otherAccount"
+                name = calendarText("Another Mac account", "Otra cuenta del Mac", preferredLanguage: lang)
+            } else if process.uid == currentUID, let app = measuredApp(match) {
+                id = "app|\(app.key)"
+                name = app.name
+            } else if let service = systemProcess(process.executable, lang: lang) {
+                (id, name) = service
+            } else {
+                id = otherID
+                name = calendarText("Other", "Otros", preferredLanguage: lang)
+            }
+            var group = groups[id] ?? DetailGroup(id: id, name: name)
+            group.weight += weight
+            groups[id] = group
+        }
+
+        func measuredApp(_ process: MeasuredProcess?) -> AppLoad? {
+            guard let key = process?.loadKey, let load = loadsByKey[key] else { return nil }
+            if case .app = load.kind { return load }
+            if case .tool(_, _, let launcherPID?) = load.kind,
+               let launcher = measuredByPID[launcherPID], launcher.usage.uid == currentUID,
+               let launcherKey = launcher.loadKey, let app = loadsByKey[launcherKey], case .app = app.kind {
+                return app
+            }
+            return nil
+        }
+        // ps %CPU is a decaying, per-core average and RSS can count shared pages. Treat both as weights,
+        // cap overestimates proportionally and leave any unexplained share in “Other” within the sampled parent.
+        let attributed = groups.values.reduce(0) { $0 + $1.weight }
+        let residual = max(0, Double(row.amount) - attributed)
+        if residual > 0 {
+            var other = groups[otherID] ?? DetailGroup(id: otherID, name: calendarText("Other", "Otros", preferredLanguage: lang))
+            other.weight += residual
+            groups[otherID] = other
+        }
+        return detailRows(Array(groups.values), parent: row.amount, capacity: capacity, keep: otherID, lang: lang)
+    }
+
+    private static func detailRows(_ groups: [DetailGroup], parent: Int, capacity: Int, keep: String? = nil,
+                                   lang: String?) -> [LoadDetail] {
+        guard capacity > 0 else { return [] }
+        let sorted = groups.sorted { $0.weight == $1.weight ? $0.id < $1.id : $0.weight > $1.weight }
+        let sum = sorted.reduce(0) { $0 + $1.weight }
+        let values = apportion(sorted.map { sum > 0 ? $0.weight / sum * Double(parent) : 0 }, to: sum > 0 ? parent : 0)
+        var all = zip(sorted, values).compactMap { group, value -> LoadDetail? in
+            guard value > 0 || group.id == keep else { return nil }
+            return LoadDetail(id: group.id, name: group.name, count: group.count, amount: value, action: group.action)
+        }
+        guard all.count > capacity else { return all }
+        var visible = Array(all.prefix(capacity - 1))
+        all.removeFirst(capacity - 1)
+        if capacity > 3, let keep, let index = all.firstIndex(where: { $0.id == keep }) {
+            let retained = all.remove(at: index)
+            all.insert(visible.removeLast(), at: 0)
+            visible.append(retained)
+        }
+        let n = all.count
+        visible.append(LoadDetail(id: "more", name: calendarText("and \(n) more", "y \(n) más", preferredLanguage: lang),
+                                  count: nil, amount: all.reduce(0) { $0 + $1.amount }, action: nil))
+        return visible
+    }
+
+    static func systemProcess(_ path: String, lang: String?) -> (id: String, name: String)? {
+        let executable = (path as NSString).lastPathComponent.lowercased()
+        let info: (String, String, String)
+        switch executable {
+        case "windowserver": info = ("windows", "Display and windows (macOS)", "Pantalla y ventanas (macOS)")
+        case "kernel_task": info = ("kernel", "Temperature control (macOS)", "Control de temperatura (macOS)")
+        case "mds", "mds_stores", "mdworker", "mdworker_shared", "corespotlightd":
+            info = ("spotlight", "Spotlight indexing", "Spotlight indexando")
+        case "backupd", "backupd-helper": info = ("backup", "Time Machine", "Time Machine")
+        case "photoanalysisd", "mediaanalysisd": info = ("photos", "Photo analysis", "Análisis de fotos")
+        case "bird", "cloudd", "fileproviderd": info = ("icloud", "iCloud sync", "Sincronización de iCloud")
+        case "fseventsd": info = ("files", "File changes (macOS)", "Cambios de archivos (macOS)")
+        case "softwareupdated": info = ("update", "macOS Update", "Actualización de macOS")
+        case "coreaudiod": info = ("audio", "Audio (macOS)", "Audio (macOS)")
+        default: return nil
+        }
+        return (info.0, calendarText(info.1, info.2, preferredLanguage: lang))
     }
 
     static func friendly(executable: String) -> (name: String, what: (en: String, es: String), system: Bool)? {

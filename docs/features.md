@@ -26,7 +26,8 @@
 
 ## Context menu on an icon (opens above the bar)
 - **Dynamic "New…" items** read from the app's own File menu (items starting with "New"/"Nuev", up to 4). No per-app hardcoding.
-- Open (if not running), Pin/Unpin, Show in Finder, Close all windows, Quit.
+- Open (if not running), Pin/Unpin and Show in Finder. Other running apps offer **Cerrar todas las ventanas**. Regular apps other than Finder and Dock also offer **Salir de…**, which requests a normal quit without a Cala confirmation.
+- Cala's own icon offers **Cerrar ventanas** when it has windows open. It closes those windows, including minimized ones, and Cala keeps running.
 
 ## Quick menu (right-click empty bar space)
 Hide automatically, Theme (submenu), Transparency (submenu), **Configuración…** (opens the Settings window). There is deliberately no Quit here, so nobody exits by accident.
@@ -127,9 +128,11 @@ After a run the window shows how much space was actually freed.
 ## System monitor
 Click the CPU gauge in the tray to open **Sistema**. Two matching meters show processor load across all cores and memory used out of installed RAM, each with a short history graph and a status label. The footer opens **Monitor de Actividad** or **Detalles**, where Cala shows the CPU user/system split and core count, memory breakdown, swap, pressure and uptime.
 
-**Lo que más usa** switches between Processor and Memory and shows up to three groups with proportional bars. App helpers count toward their app. A standalone tool can show its launcher, for example **Node.js · de Claude**, when Cala can trace it to a running app. When present, **Sistema y otros** follows the last attributed row.
+**Lo que más usa** switches between Processor and Memory and shows up to three groups with proportional bars. App helpers count toward their app. Expand a standalone tool row to see its processes grouped by launcher app, with **Ir a…** to bring a known launcher forward. When present, **Sistema y otros** follows the last attributed row and also expands.
 
-- **Processor.** The displayed total, rows and any action based on CPU attribution use the same validated reading. **Sistema y otros** accounts for the remaining load, including small or unreadable processes. Rounding is apportioned so the rows add up to the displayed percentage. Cala keeps the last valid reading when a new one fails validation.
+Cala runs `/bin/ps` only while **Sistema y otros** is expanded. The detail uses friendly names for macOS services, groups identifiable helpers under their app, and combines processes from other accounts under **Otra cuenta del Mac** without showing names. **Otros** collects the remaining share. **Reparto aproximado** appears when the probe supplies system-process readings for the selected metric. Otherwise the note reads **Solo mediciones disponibles**.
+
+- **Processor.** The displayed total, rows and any action based on CPU attribution use the same validated reading. **Sistema y otros** accounts for the remaining load, including small or unreadable processes. Rounding is apportioned so the rows add up to the displayed percentage. Cala keeps the last valid reading while it is less than four seconds old.
 - **Memory.** Rows show each group's memory footprint. **Sistema y otros** shows the difference from used memory when at least 100 MiB remains. Footprints can overlap, so the displayed rows may exceed used memory.
 
 ## Tray layout and the "^" panel
@@ -161,6 +164,8 @@ Cala reopens itself within a couple of seconds if it crashes or is force-quit (S
 ## "Recomendamos reiniciar"
 Restart advice appears in a separate **Mantenimiento** row when a reason applies. The row summarizes the leading reason, shows a count of additional reasons when applicable and marks strong advice with an orange dot on the row and the tray gauge. It opens **Por qué conviene reiniciar**, with the reasons, **Revisado y está bien**, and actions to restart with confirmation or open Software Update as appropriate. **Más tarde** hides the advice for three days unless memory pressure becomes critical. Settings → Avanzado → **Recomendar reiniciar el Mac** turns it off.
 
+When the reasons need more space, they scroll within the page. **N motivos más ↓** indicates reasons below the visible area. The action buttons stay in view, with any Finder permission message fixed above them.
+
 Reasons include a pending macOS update that requires a restart, 14+ days of uptime (strong at 30), swap at or above the greater of 4 GiB and 25% of RAM with 3+ days of uptime, compressed memory at or above 35% with 3+ days of uptime, 10+ minutes of elevated memory pressure, and under 15% free disk space with 4+ GiB of allocated swap.
 
 ## Guidance in the system panel
@@ -172,7 +177,7 @@ The panel shows one message at a time. Higher severity wins. At the same severit
 
 For sustained CPU load, the message distinguishes how long the Mac has been busy from which group leads in the latest valid reading. A group is singled out when it accounts for at least 10 percentage points and a quarter of the total, provided less than half of the load is unattributed. Without a valid reading, Cala says **Viendo qué lo está usando…**. If at least half the load is unattributed, Cala says it could come from macOS or another account and suggests waiting a few minutes, then opening **Monitor de Actividad** if it persists. When the load is attributable but no group meets the threshold, the message describes it as spread across processes.
 
-Cala offers **Cerrar** only for a single eligible app instance and asks for confirmation. For a standalone tool with a known launcher, **Ir a** brings that app forward. Memory guidance prefers the largest eligible app and shows its footprint.
+The panel’s **Cerrar** button is available for a single eligible app instance and asks for confirmation. For a standalone tool with a known launcher, **Ir a** brings that app forward. Memory guidance prefers the largest eligible app and shows its footprint.
 
 ## Checking the system panel
 From the repository root, run `scripts/check-rules.sh` to check the rules with `swiftc`. To render the sample panels in light and dark mode, build and run the debug executable:

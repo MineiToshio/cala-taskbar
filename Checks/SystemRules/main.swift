@@ -298,7 +298,7 @@ let terminalRows = SystemRules.cpuBreakdown(twoTerminals.loads, total: 85, lang:
 checkMessage("M28 Ir a Terminal apunta al lanzador que concentra la carga", twoTerminals,
              kind: .toolBusy(tool: "Node.js", launcher: "Terminal", minutes: 4),
              level: .attention, primary: .activate(name: "Terminal", pid: 702), secondary: .openActivityMonitor,
-             extra: terminalRows.map(\.value) == ["60%", "5%", "20%"])
+             extra: terminalRows.map(\.value) == ["65%", "20%"])
 
 expect("M16 nivel coherente en todas las tarjetas", messageCases.allSatisfy {
     guard let message = SystemRules.message($0), message.style == .card else { return true }
@@ -400,6 +400,213 @@ let restart = RestartRules.evaluate(RestartInput(uptime: 21 * 86_400, ram: gib(1
 let summary = RestartRules.summary(restart, lang: lang)
 expect("S1 actualización tiene prioridad", summary?.text == "actualización de macOS pendiente" && summary?.strong == true && summary?.more == 1)
 expect("S2 sin mantenimiento", RestartRules.summary(RestartAdvice(), lang: lang) == nil)
+
+let launcherLoads = [node(40, launcher: "Terminal", pid: 701, memory: 1.5),
+                     node(20, launcher: "Claude", pid: 702, memory: 1.0)]
+let launcherCPU = SystemRules.cpuBreakdown(launcherLoads, total: 85, lang: lang)
+let nodeCPU = launcherCPU.rows.first!
+let launcherCPUDetails = SystemRules.toolDetails(nodeCPU, loads: launcherLoads, metric: .cpu, lang: lang)
+expect("E1 una fila de Node.js se reparte por lanzador con sus acciones",
+       nodeCPU.isTool && nodeCPU.amount == 60 && launcherCPU.rows.last?.amount == 25
+       && launcherCPUDetails.map(\.name) == ["Terminal", "Claude"] && launcherCPUDetails.map(\.amount) == [40, 20]
+       && launcherCPUDetails.map(\.count) == [16, 16]
+       && launcherCPUDetails.map(\.action) == [.activate(name: "Terminal", pid: 701), .activate(name: "Claude", pid: 702)])
+
+let launcherMemory = SystemRules.memoryBreakdown(launcherLoads, used: gib(8), lang: lang, locale: locale)
+let nodeMemory = launcherMemory.rows.first!
+let launcherMemoryDetails = SystemRules.toolDetails(nodeMemory, loads: launcherLoads, metric: .memory, lang: lang)
+expect("E2 memoria de Node.js se normaliza en bytes al total de la fila",
+       nodeMemory.isTool && nodeMemory.value == "2,5 GB"
+           && launcherMemoryDetails.map(\.amount) == [Int(gib(1.5)), Int(gib(1))]
+           && launcherMemoryDetails.reduce(0) { $0 + $1.amount } == nodeMemory.amount)
+
+let sixLaunchers = (1...6).map { node(Double(7 - $0), launcher: "L\($0)", pid: Int32(710 + $0)) }
+let sixRow = SystemRules.cpuBreakdown(sixLaunchers, total: 25, lang: lang).rows.first!
+let sixDetails = SystemRules.toolDetails(sixRow, loads: sixLaunchers, metric: .cpu, lang: lang)
+expect("E3 cuatro subfilas y un subtotal para los dos lanzadores restantes",
+       sixDetails.count == 5 && sixDetails.last?.name == "y 2 más" && sixDetails.last?.amount == 3
+           && sixDetails.last?.action == nil && sixDetails.reduce(0) { $0 + $1.amount } == sixRow.amount)
+
+let orphan = node(4, launcher: nil, pid: nil)
+let orphanRow = SystemRules.cpuBreakdown([orphan], total: 4, lang: lang).rows.first!
+let orphanDetails = SystemRules.toolDetails(orphanRow, loads: [orphan], metric: .cpu, lang: lang)
+expect("E4 un proceso sin lanzador conserva su parte sin acción",
+       orphanDetails.count == 1 && orphanDetails.first?.name == "Sin lanzador"
+           && orphanDetails.first?.amount == 4 && orphanDetails.first?.action == nil)
+
+let psText = """
+   11    0   80.0  8192 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+   12    0   16.0  2048 kernel_task
+   13  499   16.0   128 /System/Library/Services/mds
+   14    0   32.0   512 mdworker
+   15  502   32.0  1024 /Users/other/Private Tool.app/Contents/MacOS/Secret
+   16  503    8.0   256 /System/Library/Not WindowServer/WindowServer
+   17  501   12.5   100 /Users/me/My Script
+   18  501      -  2048 /Users/me/Memory Only
+   19  501    nan     - invalid
+   20  501   98.0  2048 /Applications/Already Counted.app
+"""
+let ps = SystemRules.parsePS(psText, currentUID: 501)
+expect("E5 parser conserva rutas con espacios y RSS con CPU no disponible",
+       ps.count == 9 && ps.first(where: { $0.pid == 17 })?.executable == "/Users/me/My Script"
+           && ps.first(where: { $0.pid == 18 })?.cpu == nil && ps.first(where: { $0.pid == 18 })?.memory == 2_097_152)
+expect("E6 las muestras de otras cuentas pierden sus nombres al leer ps",
+       ps.filter { $0.uid == 502 || $0.uid == 503 }.allSatisfy { $0.executable.isEmpty }
+           && ps.filter { $0.uid == 502 || $0.uid == 503 }.count == 2
+           && !SystemRules.isOtherAccount(499, currentUID: 501) && SystemRules.isOtherAccount(500, currentUID: 501))
+expect("E7 nombres conocidos de macOS y aliases de Spotlight",
+       SystemRules.systemProcess("WindowServer", lang: lang)?.name == "Pantalla y ventanas (macOS)"
+           && SystemRules.systemProcess("kernel_task", lang: lang)?.name == "Control de temperatura (macOS)"
+           && ["mds", "mdworker", "mds_stores"].allSatisfy { SystemRules.systemProcess($0, lang: lang)?.name == "Spotlight indexando" }
+           && SystemRules.systemProcess("backupd", lang: lang)?.name == "Time Machine"
+           && SystemRules.systemProcess("backupd", lang: "en")?.name == "Time Machine"
+           && SystemRules.systemProcess("no-match", lang: lang) == nil)
+
+let referenceApp = app("Already counted", 35, pid: 20, memory: 2)
+let measuredApp = MeasuredProcess(usage: ProcessUsage(pid: 20, uid: 501, executable: "Already Counted", cpu: 35, memory: gib(2)),
+                                  loadKey: referenceApp.key)
+let restCPU = SystemRules.cpuBreakdown([referenceApp], total: 70, lang: lang)
+let restParent = restCPU.rows.last!
+let restRows = SystemRules.restDetails(restParent, breakdown: restCPU, loads: [referenceApp], measured: [measuredApp], ps: ps,
+                                      metric: .cpu, currentUID: 501, cores: 8, lang: lang)
+expect("E8 el resto excluye PID visibles, agrupa cuentas y conserva el residuo",
+       restRows.first(where: { $0.id == "otherAccount" })?.amount == 5
+           && restRows.first(where: { $0.id == "spotlight" })?.amount == 6
+           && restRows.contains { $0.name == "Otros" }
+           && !restRows.contains { $0.name.contains("Counted") || $0.name.contains("Secret") }
+           && restRows.reduce(0) { $0 + $1.amount } == restParent.amount)
+
+let over = SystemRules.cpuBreakdown([], total: 10, lang: lang)
+let overParent = over.rows.first!
+let overRows = SystemRules.restDetails(overParent, breakdown: over, loads: [], measured: [], ps: Array(ps.prefix(2)),
+                                      metric: .cpu, currentUID: 501, cores: 8, lang: lang)
+expect("E9 las medias de ps se escalan si superan la fila padre",
+       overRows.map(\.amount) == [8, 2] && overRows.reduce(0) { $0 + $1.amount } == overParent.amount)
+
+let measuredFallback = MeasuredProcess(usage: ProcessUsage(pid: 31, uid: 501, executable: "mdworker", cpu: 3, memory: gib(0.5)),
+                                       loadKey: "below-cut")
+let withoutPS = SystemRules.restDetails(restParent, breakdown: restCPU, loads: [referenceApp], measured: [measuredApp, measuredFallback], ps: nil,
+                                       metric: .cpu, currentUID: 501, cores: 8, lang: lang)
+expect("E10 sin ps solo se usa lo medido y lo demás queda en Otros",
+       withoutPS.map(\.name) == ["Otros", "Spotlight indexando"] && withoutPS.map(\.amount) == [32, 3])
+let noMeasurements = SystemRules.restDetails(restParent, breakdown: restCPU, loads: [referenceApp], measured: [], ps: nil,
+                                            metric: .cpu, currentUID: 501, cores: 8, lang: lang)
+expect("E11 sin ninguna medición todo el resto sigue contabilizado",
+       noMeasurements.count == 1 && noMeasurements[0].name == "Otros" && noMeasurements[0].amount == restParent.amount)
+let restMemory = SystemRules.memoryBreakdown([referenceApp], used: gib(8), lang: lang, locale: locale)
+let restMemoryParent = restMemory.rows.last!
+let memoryPS = ps.filter { $0.uid != 501 || $0.pid == 20 }
+let memoryRows = SystemRules.restDetails(restMemoryParent, breakdown: restMemory, loads: [referenceApp], measured: [measuredApp], ps: memoryPS,
+                                        metric: .memory, currentUID: 501, cores: 8, lang: lang)
+expect("E12 RSS se reparte dentro de los bytes de la fila padre de Memoria",
+       memoryRows.first(where: { $0.id == "otherAccount" })?.amount == 1_310_720
+           && memoryRows.reduce(0) { $0 + $1.amount } == restMemoryParent.amount)
+
+let fourParents = LoadDetailLayout(parentCount: 4, showsEstimate: true)
+let occupiedHeight = LoadDetailLayout.expandedRowHeight + 3 * fourParents.siblingHeight + 4 * fourParents.spacing
+    + fourParents.headerHeight + fourParents.capacity * LoadDetailLayout.detailRowHeight
+expect("E13 cuatro filas con cabecera admiten tres subfilas completas",
+       fourParents.capacity == 3 && fourParents.siblingHeight == 16
+           && occupiedHeight <= LoadDetailLayout.listHeight
+           && occupiedHeight + LoadDetailLayout.detailRowHeight > LoadDetailLayout.listHeight)
+let fullToolParents = LoadDetailLayout(parentCount: 4, showsEstimate: false)
+expect("E14 cuatro filas de lanzadores conservan sus barras cuando caben dos subfilas",
+       fullToolParents.capacity == 2 && fullToolParents.siblingHeight == LoadDetailLayout.expandedRowHeight)
+
+let limited = SystemRules.toolDetails(sixRow, loads: sixLaunchers, metric: .cpu, lang: lang, capacity: fourParents.capacity)
+expect("E15 el subtotal ocupa un hueco entero y conserva el total",
+       limited.count == 3 && limited.map(\.amount) == [6, 5, 10] && limited.last?.name == "y 4 más")
+
+let fiveLaunchers = Array(sixLaunchers.prefix(5))
+let fiveRow = SystemRules.cpuBreakdown(fiveLaunchers, total: 25, lang: lang).rows.first!
+let namedFifth = SystemRules.toolDetails(fiveRow, loads: fiveLaunchers, metric: .cpu, lang: lang)
+expect("E16 con cinco grupos y cinco huecos el último conserva su nombre y acción",
+       namedFifth.count == 5 && namedFifth.last?.name == "L5" && namedFifth.last?.action != nil)
+let threeLaunchers = Array(sixLaunchers.prefix(3))
+let threeRow = SystemRules.cpuBreakdown(threeLaunchers, total: 25, lang: lang).rows.first!
+let namedThird = SystemRules.toolDetails(threeRow, loads: threeLaunchers, metric: .cpu, lang: lang, capacity: fourParents.capacity)
+expect("E17 con tres huecos el tercer grupo conserva su nombre", namedThird.map(\.name) == ["L1", "L2", "L3"])
+
+let tinyLoads = [node(0.9, launcher: "Terminal", pid: 715), node(0.1, launcher: "Claude", pid: 716)]
+let tinyRow = SystemRules.cpuBreakdown(tinyLoads, total: 1, lang: lang).rows.first!
+let tinyDetails = SystemRules.toolDetails(tinyRow, loads: tinyLoads, metric: .cpu, lang: lang)
+expect("E18 se ocultan lanzadores que redondean a 0%", tinyDetails.map(\.name) == ["Terminal"] && tinyDetails.map(\.amount) == [1])
+let tinyRest = SystemRules.cpuBreakdown([], total: 1, lang: lang)
+let tinyPS = SystemRules.parsePS("1 0 50 0 WindowServer\n2 0 1 0 mds\n3 0 0.01 0 desconocido", currentUID: 501)
+let tinyRestDetails = SystemRules.restDetails(tinyRest.rows[0], breakdown: tinyRest, loads: [], measured: [],
+                                             ps: tinyPS, metric: .cpu, currentUID: 501, cores: 1, lang: lang)
+expect("E19 Spotlight a 0% se oculta y se conserva Otros a 0%",
+       tinyRestDetails.map(\.name) == ["Pantalla y ventanas (macOS)", "Otros"] && tinyRestDetails.map(\.amount) == [1, 0])
+
+let specialPS = SystemRules.parsePS("1 -2 2 1 nobody\n2 4294967294 3 1 nobody\n3 4294967040 4 1 system\n4 502 5 1 privado",
+                                    currentUID: 501)
+let specialBreakdown = SystemRules.cpuBreakdown([], total: 14, lang: lang)
+let specialDetails = SystemRules.restDetails(specialBreakdown.rows[0], breakdown: specialBreakdown, loads: [], measured: [],
+                                             ps: specialPS, metric: .cpu, currentUID: 501, cores: 1, lang: lang)
+expect("E20 nobody firmado, sin signo y UID reservados se contabilizan fuera de otras cuentas",
+       specialPS.map(\.uid) == [4_294_967_294, 4_294_967_294, 0xFF_FF_FF_00, 502]
+           && specialDetails.map(\.name) == ["Otros", "Otra cuenta del Mac"] && specialDetails.map(\.amount) == [9, 5])
+
+let hiddenClaude = app("Claude", 8, pid: 100)
+let hiddenChrome = app("Google Chrome", 7, pid: 104)
+let cliLoad = AppLoad(key: "Claude Code|Claude|100", name: "Claude Code",
+                      kind: .tool(executable: "claude", launcher: "Claude", launcherPID: 100),
+                      cpu: 5, memory: 0, count: 1, closable: false)
+let unmappedCLI = AppLoad(key: "Codex|-", name: "Codex", kind: .tool(executable: "codex", launcher: nil, launcherPID: nil),
+                           cpu: 3, memory: 0, count: 1, closable: false)
+let appLoads = [app("A", 30), app("B", 20), app("C", 15), hiddenClaude, hiddenChrome, cliLoad, unmappedCLI]
+let ownPS = SystemRules.parsePS("""
+    100 501 2 0 /Applications/Claude.app/Contents/MacOS/Claude
+    101 501 3 0 /Applications/Claude.app/Contents/Frameworks/Claude Helper (Renderer)
+    102 501 5 0 /usr/local/bin/claude
+    104 501 4 0 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+    105 501 3 0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (GPU)
+    106 501 3 0 /usr/local/bin/codex
+    107 501 2 0 /usr/local/bin/unknown
+    108   0 6 0 /System/Library/mds
+    109 502 1 0 /Users/other/Claude
+    """, currentUID: 501)
+let measuredKeys: [Int32: String] = [
+    100: hiddenClaude.key, 101: hiddenClaude.key, 102: cliLoad.key,
+    104: hiddenChrome.key, 105: hiddenChrome.key, 106: unmappedCLI.key
+]
+let appSamples = ownPS.compactMap { process in
+    measuredKeys[process.pid].map { MeasuredProcess(usage: process, loadKey: $0) }
+} + [MeasuredProcess(usage: ProcessUsage(pid: 109, uid: 501, executable: "Claude", cpu: 0, memory: 0), loadKey: hiddenClaude.key)]
+let appRest = SystemRules.cpuBreakdown(appLoads, total: 100, lang: lang)
+let appDetail = SystemRules.restDetails(appRest.rows.last!, breakdown: appRest, loads: appLoads, measured: appSamples,
+                                        ps: ownPS, metric: .cpu, currentUID: 501, cores: 1, lang: lang)
+expect("E21 ps une los helpers y CLI verificados bajo su app, y anonimiza los desconocidos",
+       appDetail.map(\.name) == ["Otros", "Claude", "Google Chrome", "Spotlight indexando", "Otra cuenta del Mac"]
+           && appDetail.map(\.amount) == [11, 10, 7, 6, 1])
+let appDetailFallback = SystemRules.restDetails(appRest.rows.last!, breakdown: appRest, loads: appLoads, measured: appSamples,
+                                                ps: nil, metric: .cpu, currentUID: 501, cores: 1, lang: lang)
+expect("E22 sin ps se mantienen las apps agrupadas y no aparecen nombres de binarios",
+       appDetailFallback.map(\.name) == ["Otros", "Claude", "Google Chrome"]
+           && appDetailFallback.map(\.amount) == [18, 10, 7])
+
+let rankedRest = SystemRules.cpuBreakdown([], total: 100, lang: lang)
+let rankedPS = SystemRules.parsePS("1 0 45 0 WindowServer\n2 0 25 0 mds\n3 0 15 0 kernel_task\n4 0 10 0 backupd",
+                                   currentUID: 501)
+func rankedDetails(_ capacity: Int, ps: [ProcessUsage] = rankedPS) -> [LoadDetail] {
+    SystemRules.restDetails(rankedRest.rows[0], breakdown: rankedRest, loads: [], measured: [],
+                            ps: ps, metric: .cpu, currentUID: 501, cores: 1, lang: lang, capacity: capacity)
+}
+let threeSlots = rankedDetails(3)
+let twoSlots = rankedDetails(2)
+expect("E23 con dos o tres huecos se muestran los grupos más grandes y Otros va al subtotal",
+       threeSlots.map(\.id) == ["windows", "spotlight", "more"] && threeSlots.map(\.amount) == [45, 25, 30]
+           && threeSlots.last?.name == "y 3 más"
+           && twoSlots.map(\.id) == ["windows", "more"] && twoSlots.map(\.amount) == [45, 55]
+           && twoSlots.last?.name == "y 4 más")
+let fourSlots = rankedDetails(4)
+expect("E24 con cuatro huecos se conserva la fila Otros aunque sea pequeña",
+       fourSlots.map(\.id) == ["windows", "spotlight", "other", "more"] && fourSlots.map(\.amount) == [45, 25, 5, 25])
+let largestOtherPS = SystemRules.parsePS("1 0 20 0 WindowServer\n2 0 10 0 mds\n3 0 5 0 kernel_task\n4 0 5 0 backupd",
+                                         currentUID: 501)
+let largestOther = rankedDetails(3, ps: largestOtherPS)
+expect("E25 un Otros grande conserva su posición entre los primeros grupos",
+       largestOther.map(\.id) == ["other", "windows", "more"] && largestOther.map(\.amount) == [60, 20, 20])
 
 print("\(passes) PASS, \(failures) FAIL")
 exit(failures == 0 ? 0 : 1)

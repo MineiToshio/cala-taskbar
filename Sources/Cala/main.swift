@@ -516,14 +516,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let url = item.url {
             menu.addItem(BlockItem("Mostrar en Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) })
         }
-        if let pid = item.pid {
+        if let pid = item.pid, pid == ProcessInfo.processInfo.processIdentifier {
+            if !TaskbarModel.ownWindows().isEmpty {
+                menu.addItem(.separator())
+                menu.addItem(BlockItem(calendarText("Close windows", "Cerrar ventanas")) {
+                    for window in TaskbarModel.ownWindows() {
+                        if window.isMiniaturized { window.close() }
+                        else { window.performClose(nil) }
+                    }
+                })
+            }
+        } else if let pid = item.pid {
             menu.addItem(.separator())
-            menu.addItem(BlockItem("Cerrar todas las ventanas") {
+            menu.addItem(BlockItem(calendarText("Close all windows", "Cerrar todas las ventanas")) {
                 WindowService.windows(for: pid).forEach(WindowService.close)
             })
-            menu.addItem(BlockItem("Salir de \(item.name)") {
-                NSRunningApplication(processIdentifier: pid)?.terminate()
-            })
+            if let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular,
+               !["com.apple.finder", "com.apple.dock"].contains(app.bundleIdentifier?.lowercased() ?? "") {
+                menu.addItem(BlockItem(calendarText("Quit \(item.name)", "Salir de \(item.name)")) {
+                    app.terminate()
+                })
+            }
         }
         return menu
     }
