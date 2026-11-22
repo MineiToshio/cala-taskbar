@@ -512,17 +512,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !news.isEmpty { menu.addItem(.separator()) }
         }
         if item.pid == nil, let url = item.url {
-            menu.addItem(BlockItem("Abrir") {
+            menu.addItem(BlockItem(tx("Open", "Abrir")) {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             })
         }
         if item.pid != ProcessInfo.processInfo.processIdentifier {
-            menu.addItem(BlockItem(item.pinned ? "Desanclar de la barra" : "Anclar a la barra") { [model] in
+            menu.addItem(BlockItem(item.pinned ? tx("Unpin from bar", "Desanclar de la barra") : tx("Pin to bar", "Anclar a la barra")) { [model] in
                 model.togglePin(item)
             })
         }
         if let url = item.url {
-            menu.addItem(BlockItem("Mostrar en Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) })
+            menu.addItem(BlockItem(tx("Show in Finder", "Mostrar en Finder")) { NSWorkspace.shared.activateFileViewerSelecting([url]) })
         }
         if let pid = item.pid, pid == ProcessInfo.processInfo.processIdentifier {
             if !TaskbarModel.ownWindows().isEmpty {
@@ -551,26 +551,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func settingsMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(BlockItem("Ocultar barra automáticamente", checked: store.config.autoHide) { [store] in
+        menu.addItem(BlockItem(tx("Hide bar automatically", "Ocultar barra automáticamente"), checked: store.config.autoHide) { [store] in
             store.config.autoHide.toggle()
         })
         let themes = NSMenu()
         for t in BarTheme.all {
             themes.addItem(BlockItem(t.name, checked: store.config.theme == t.id) { [store] in store.config.theme = t.id })
         }
-        let themeItem = NSMenuItem(title: "Tema", action: nil, keyEquivalent: "")
+        let themeItem = NSMenuItem(title: tx("Theme", "Tema"), action: nil, keyEquivalent: "")
         themeItem.submenu = themes
         menu.addItem(themeItem)
         let trans = NSMenu()
-        for (label, v) in [("Ninguna", 1.0), ("Ligera", 0.82), ("Media", 0.62), ("Alta", 0.42), ("Muy alta", 0.22)] {
+        for (label, v) in [(tx("None", "Ninguna"), 1.0), (tx("Light", "Ligera"), 0.82), (tx("Medium", "Media"), 0.62), (tx("High", "Alta"), 0.42), (tx("Very high", "Muy alta"), 0.22)] {
             trans.addItem(BlockItem(label, checked: abs(store.config.barOpacity - v) < 0.01) { [store] in store.config.barOpacity = v })
         }
-        let transItem = NSMenuItem(title: "Transparencia", action: nil, keyEquivalent: "")
+        let transItem = NSMenuItem(title: tx("Transparency", "Transparencia"), action: nil, keyEquivalent: "")
         transItem.submenu = trans
         menu.addItem(transItem)
         menu.addItem(.separator())
-        menu.addItem(BlockItem("Configuración…") { SettingsWindowController.shared.show() })
-        menu.addItem(BlockItem("Reportar un problema…") { FeedbackWindowController.shared.show() })
+        menu.addItem(BlockItem(tx("Settings…", "Configuración…")) { SettingsWindowController.shared.show() })
+        menu.addItem(BlockItem(tx("Report a Problem…", "Reportar un problema…")) { FeedbackWindowController.shared.show() })
         return menu
     }
 

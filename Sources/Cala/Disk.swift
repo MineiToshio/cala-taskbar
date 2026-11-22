@@ -61,10 +61,10 @@ final class DiskService: ObservableObject {
     static func candidates(extra: [String]) -> [DiskFolder] {
         let h = NSHomeDirectory()
         let builtin: [(String, String, String)] = [
-            ("/Applications", "Aplicaciones", "app.fill"),
-            (h + "/Library/Developer", "Xcode y simuladores", "hammer.fill"),
-            (h + "/Library/Caches", "Cachés", "tray.full.fill"),
-            (h + "/Library/Application Support", "Datos de apps", "folder.fill"),
+            ("/Applications", tx("Applications", "Aplicaciones"), "app.fill"),
+            (h + "/Library/Developer", tx("Xcode and simulators", "Xcode y simuladores"), "hammer.fill"),
+            (h + "/Library/Caches", tx("Caches", "Cachés"), "tray.full.fill"),
+            (h + "/Library/Application Support", tx("App data", "Datos de apps"), "folder.fill"),
             (h + "/.claude", "Claude Code", "sparkles"),
             (h + "/.codex", "Codex", "sparkles"),
             (h + "/.npm", "npm", "shippingbox.fill"),
@@ -83,12 +83,12 @@ final class DiskService: ObservableObject {
             seen.insert(p); out.append(DiskFolder(path: p, name: name, symbol: symbol, bytes: nil))
         }
         for (p, n, s) in builtin { add(p, n, s) }
-        add("/Users/Shared", "Compartido (/Users/Shared)", "person.2.fill")
+        add("/Users/Shared", tx("Shared (/Users/Shared)", "Compartido (/Users/Shared)"), "person.2.fill")
         // Other macOS user accounts on this Mac (e.g. a work session): their folders count against the same disk.
         let me = (h as NSString).lastPathComponent
         let others = (try? FileManager.default.contentsOfDirectory(atPath: "/Users")) ?? []
         for u in others.sorted() where u != "Shared" && u != me && !u.hasPrefix(".") && u != "Guest" {
-            add("/Users/" + u, "Sesión: " + u, "person.fill")
+            add("/Users/" + u, tx("Account: ", "Sesión: ") + u, "person.fill")
         }
         for e in extra {
             let p = (e.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath
@@ -97,7 +97,7 @@ final class DiskService: ObservableObject {
         // Everything else in the user's own folder (Documents, Downloads, Desktop, Movies...), so the list adds up.
         // Reading those folders makes macOS ask for permission once each.
         let inHome = out.map(\.path).filter { $0.hasPrefix(h + "/") }
-        out.append(DiskFolder(path: h, name: "Tu carpeta personal (resto)", symbol: "house.fill", bytes: nil, excluding: inHome))
+        out.append(DiskFolder(path: h, name: tx("Your home folder (rest)", "Tu carpeta personal (resto)"), symbol: "house.fill", bytes: nil, excluding: inHome))
         return out
     }
 
@@ -193,31 +193,31 @@ struct DiskPane: View {
     private var remainder: DiskFolder? {
         guard let d = model.disk, !service.folders.isEmpty, service.folders.allSatisfy({ $0.bytes != nil }) else { return nil }
         let measured = service.folders.reduce(Int64(0)) { $0 + ($1.bytes ?? 0) }
-        return DiskFolder(path: "", name: "Sistema y otros (no medido)", symbol: "gearshape.2.fill", bytes: max(0, d.usedBytes - measured))
+        return DiskFolder(path: "", name: tx("System and others (not measured)", "Sistema y otros (no medido)"), symbol: "gearshape.2.fill", bytes: max(0, d.usedBytes - measured))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Header(title: "Almacenamiento")
+            Header(title: tx("Storage", "Almacenamiento"))
             if let d = model.disk {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(diskBytes(d.available)) disponibles").font(.system(size: 20, weight: .semibold))
-                    Text("de \(diskBytes(d.total)) · \(d.freePercent)% libre").font(.system(size: 12)).flyoutSecondary()
+                    Text(tx("\(diskBytes(d.available)) available", "\(diskBytes(d.available)) disponibles")).font(.system(size: 20, weight: .semibold))
+                    Text(tx("of \(diskBytes(d.total)) · \(d.freePercent)% free", "de \(diskBytes(d.total)) · \(d.freePercent)% libre")).font(.system(size: 12)).flyoutSecondary()
                 }
                 DiskBar(info: d)
                 HStack(spacing: 14) {
-                    legend(accent, "Usado", d.usedBytes)
-                    if d.purgeable > 0 { legend(accent.opacity(0.38), "Liberable", d.purgeable) }
-                    legend(Color.primary.opacity(0.18), "Libre", d.freeBytes)
+                    legend(accent, tx("Used", "Usado"), d.usedBytes)
+                    if d.purgeable > 0 { legend(accent.opacity(0.38), tx("Purgeable", "Liberable"), d.purgeable) }
+                    legend(Color.primary.opacity(0.18), tx("Free", "Libre"), d.freeBytes)
                 }
                 if d.isLow {
-                    Label("Queda poco espacio. Empieza por lo más grande de la lista.", systemImage: "exclamationmark.triangle.fill")
+                    Label(tx("Space is running low. Start with the biggest items in the list.", "Queda poco espacio. Empieza por lo más grande de la lista."), systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 11)).foregroundStyle(Color.orange).fixedSize(horizontal: false, vertical: true)
                 }
             }
             Divider()
             HStack {
-                Text("Dónde se va el espacio").font(.system(size: 12, weight: .semibold)).flyoutSecondary()
+                Text(tx("Where the space goes", "Dónde se va el espacio")).font(.system(size: 12, weight: .semibold)).flyoutSecondary()
                 Spacer()
                 if service.scanning { ProgressView().controlSize(.small).scaleEffect(0.7) }
             }
@@ -226,17 +226,17 @@ struct DiskPane: View {
                     let top = Double(sorted.first?.bytes ?? 1)
                     ForEach(sorted) { f in folderRow(f, top: max(1, top)) }
                     if let r = remainder { folderRow(r, top: max(1, top)) }
-                    else if !service.folders.isEmpty { folderRow(DiskFolder(path: "", name: "Sistema y otros (no medido)", symbol: "gearshape.2.fill", bytes: nil), top: 1) }
+                    else if !service.folders.isEmpty { folderRow(DiskFolder(path: "", name: tx("System and others (not measured)", "Sistema y otros (no medido)"), symbol: "gearshape.2.fill", bytes: nil), top: 1) }
                 }
             }
             .frame(height: min(CGFloat(service.folders.count + 1) * rowHeight, 272))
             Divider()
-            Row(icon: "sparkles", title: "Revisar y limpiar espacio…", subtitle: "Solo abre una lista; no borra nada") {
+            Row(icon: "sparkles", title: tx("Review and free up space…", "Revisar y limpiar espacio…"), subtitle: tx("Only opens a list; deletes nothing", "Solo abre una lista; no borra nada")) {
                 (NSApp.delegate as? AppDelegate)?.flyout.hide()
                 CleanupWindowController.shared.show()
             }
-            Row(icon: "arrow.clockwise", title: "Volver a medir") { service.refresh(extra: store.config.diskFolders, force: true) }
-            LinkRow(title: "Ajustes de almacenamiento…", pane: "com.apple.settings.Storage")
+            Row(icon: "arrow.clockwise", title: tx("Measure again", "Volver a medir")) { service.refresh(extra: store.config.diskFolders, force: true) }
+            LinkRow(title: tx("Storage settings…", "Ajustes de almacenamiento…"), pane: "com.apple.settings.Storage")
         }
     }
 
@@ -269,6 +269,6 @@ struct DiskPane: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(f.path.isEmpty ? "macOS, datos del sistema, la Papelera y lo que no está en la lista" : f.partial ? f.path + " — hay archivos sin permiso de lectura; el tamaño real es mayor" : f.path)
+        .help(f.path.isEmpty ? tx("macOS, system data, the Trash and anything not in the list", "macOS, datos del sistema, la Papelera y lo que no está en la lista") : f.partial ? f.path + tx(" — some files can't be read; the real size is larger", " — hay archivos sin permiso de lectura; el tamaño real es mayor") : f.path)
     }
 }

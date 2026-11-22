@@ -25,13 +25,14 @@ struct UsageWindow: Codable, Identifiable {
         let hours = label.hasSuffix(" h") ? Double(label.dropLast(2)) : nil
         let duration = [durationMinutes, hours.map { $0 * 60 }].compactMap { $0 }
             .first { $0.isFinite && $0 > 0 } ?? .infinity
-        if id == "five_hour" || id == "session" || id.hasPrefix("session-") || label == "5-hour session" || duration == 300 {
+        if id == "five_hour" || id == "session" || id.hasPrefix("session-") || label == "5-hour session" || label == "sesión de 5 horas" || duration == 300 {
             return (0, 300)
         }
         let scoped = id.hasPrefix("weekly_scoped") || id.hasPrefix("seven_day_") ||
-            (label.hasPrefix("weekly ·") && label != "weekly · all models")
+            (label.hasPrefix("weekly ·") && label != "weekly · all models") ||
+            (label.hasPrefix("semanal ·") && label != "semanal · todos los modelos")
         if scoped { return (2, 10080) }
-        if id == "seven_day" || id.hasPrefix("weekly_all") || label == "weekly" || label == "weekly · all models" || duration == 10080 {
+        if id == "seven_day" || id.hasPrefix("weekly_all") || label == "weekly" || label == "weekly · all models" || label == "semanal" || label == "semanal · todos los modelos" || duration == 10080 {
             return (1, 10080)
         }
         return (3, duration)
@@ -52,7 +53,7 @@ struct UsageState: Identifiable {
     var id: String { provider.rawValue }
     var enabled = true
     var signedIn = false
-    var detection = "Checking…"
+    var detection = tx("Checking…", "Comprobando…")
     var reading: UsageReading?
     var error: String?
     var plan: String?
@@ -168,15 +169,15 @@ enum UsageJSON {
                 let model = ((limit["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String
                 let title: String
                 switch kind {
-                case "session": title = "5-hour session"
-                case "weekly_all": title = "Weekly · all models"
-                case "weekly_scoped": title = "Weekly · " + (model ?? "model")
+                case "session": title = tx("5-hour session", "Sesión de 5 horas")
+                case "weekly_all": title = tx("Weekly · all models", "Semanal · todos los modelos")
+                case "weekly_scoped": title = tx("Weekly · ", "Semanal · ") + (model ?? tx("model", "modelo"))
                 default: continue
                 }
                 if let w = window("\(kind)-\(index)", title, limit["percent"], limit["resets_at"]) { windows.append(w) }
             }
         } else {
-            for (key, title) in [("five_hour", "5-hour session"), ("seven_day", "Weekly · all models"), ("seven_day_opus", "Weekly · Opus"), ("seven_day_sonnet", "Weekly · Sonnet")] {
+            for (key, title) in [("five_hour", tx("5-hour session", "Sesión de 5 horas")), ("seven_day", tx("Weekly · all models", "Semanal · todos los modelos")), ("seven_day_opus", tx("Weekly · ", "Semanal · ") + "Opus"), ("seven_day_sonnet", tx("Weekly · ", "Semanal · ") + "Sonnet")] {
                 if let d = obj[key] as? [String: Any], let w = window(key, title, d[local ? "used_percentage" : "utilization"], d["resets_at"]) { windows.append(w) }
             }
         }
@@ -188,7 +189,7 @@ enum UsageJSON {
             guard let d = obj[key + (format == "http" ? "_window" : "")] as? [String: Any],
                   let duration = number(d[format == "rpc" ? "windowDurationMins" : (format == "http" ? "limit_window_seconds" : "window_minutes")]), duration > 0 else { continue }
             let minutes = format == "http" ? duration / 60 : duration
-            let title = minutes == 300 ? "5-hour session" : (minutes == 10080 ? "Weekly" : String(format: "%g h", minutes / 60))
+            let title = minutes == 300 ? tx("5-hour session", "Sesión de 5 horas") : (minutes == 10080 ? tx("Weekly", "Semanal") : String(format: "%g h", minutes / 60))
             var reset = d[format == "rpc" ? "resetsAt" : (format == "http" ? "reset_at" : "resets_at")]
             if reset == nil, let after = number(d["reset_after_seconds"]) { reset = date.timeIntervalSince1970 + after }
             if let w = window(key, title, d[format == "rpc" ? "usedPercent" : "used_percent"], reset, durationMinutes: minutes) { windows.append(w) }
@@ -457,16 +458,16 @@ final class UsageService: ObservableObject {
         let foundClaude = credential != nil || fm.fileExists(atPath: claudeDir) || findExecutable("claude") != nil || fm.fileExists(atPath: "/Applications/Claude.app") || fm.fileExists(atPath: home + "/Applications/Claude.app")
         states[0].signedIn = credential != nil
         states[0].plan = credential?.plan
-        if let credential, credential.expired { states[0].detection = "Session expired — open Claude Code to refresh" }
-        else { states[0].detection = credential != nil ? "Detected, signed in" : (foundClaude ? "Found but not signed in — run `claude` and /login" : "Claude Code not found — install Claude Code (CLI or app) and sign in to enable") }
-        if !states[0].enabled { states[0].detection = "Usage disabled" }
-        else if blockedClaudeStamp != nil && blockedClaudeStamp == knownClaudeStamp { states[0].detection = "Session expired — open Claude Code to refresh" }
+        if let credential, credential.expired { states[0].detection = tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla") }
+        else { states[0].detection = credential != nil ? tx("Detected, signed in", "Detectado, con sesión iniciada") : (foundClaude ? tx("Found but not signed in — run `claude` and /login", "Encontrado, pero sin sesión: ejecuta `claude` y /login") : tx("Claude Code not found — install Claude Code (CLI or app) and sign in to enable", "No se encontró Claude Code: instálalo (CLI o app) e inicia sesión para activarlo")) }
+        if !states[0].enabled { states[0].detection = tx("Usage disabled", "Uso desactivado") }
+        else if blockedClaudeStamp != nil && blockedClaudeStamp == knownClaudeStamp { states[0].detection = tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla") }
         executable = codexExecutable()
         states[1].enabled = config.usageEnabled && config.usageCodexEnabled
         let auth = states[1].enabled && fm.fileExists(atPath: codexHome + "/auth.json")
         states[1].signedIn = auth
-        states[1].detection = auth ? "Detected, signed in" : (executable != nil ? "Found but not signed in — open Codex and sign in with ChatGPT" : "Codex not found — install Codex CLI or app and sign in with ChatGPT")
-        if !states[1].enabled { states[1].detection = "Usage disabled" }
+        states[1].detection = auth ? tx("Detected, signed in", "Detectado, con sesión iniciada") : (executable != nil ? tx("Found but not signed in — open Codex and sign in with ChatGPT", "Encontrado, pero sin sesión: abre Codex e inicia sesión con ChatGPT") : tx("Codex not found — install Codex CLI or app and sign in with ChatGPT", "No se encontró Codex: instala la CLI o la app e inicia sesión con ChatGPT"))
+        if !states[1].enabled { states[1].detection = tx("Usage disabled", "Uso desactivado") }
         if oldClaude != claudeDir || oldCodex != codexHome || watchers.isEmpty {
             watchers.removeAll()
             watchers.append(UsageWatcher(paths: [codexHome + "/sessions"], queue: queue) { [weak self] paths in self?.localEvents(paths) })
@@ -605,7 +606,7 @@ final class UsageService: ObservableObject {
                 guard currentGeneration == (self.generations[p] ?? 0) else { self.publish(); self.fetch(p, force: false); return }
                 self.states[i].error = result.error
                 self.recordOutcome(result, provider: p)
-                if result.expired { self.states[i].detection = p == .claude ? "Session expired — open Claude Code to refresh" : "Session expired — open Codex to refresh" }
+                if result.expired { self.states[i].detection = p == .claude ? tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla") : tx("Session expired — open Codex to refresh", "Sesión caducada: abre Codex para renovarla") }
                 let cooldown = max(0, self.states[i].cooldownUntil?.timeIntervalSinceNow ?? 0)
                 log("usage: \(p.rawValue) fetch status=\(result.status) duration=\(Int(Date().timeIntervalSince(started) * 1000))ms cooldown=\(Int(cooldown))s outcome=\(result.reading == nil ? "unavailable" : "ok")")
                 self.publish()
@@ -641,48 +642,48 @@ final class UsageService: ObservableObject {
         var credential = read()
         for attempt in 0...1 {
             guard let current = credential, !current.expired else {
-                return FetchResult(status: 401, error: "Session expired — open Claude Code to refresh", expired: true, credentialStamp: credential?.stamp ?? CredentialStamp())
+                return FetchResult(status: 401, error: tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla"), expired: true, credentialStamp: credential?.stamp ?? CredentialStamp())
             }
             let (data, response) = send("https://api.anthropic.com/api/oauth/usage", ["Authorization": "Bearer " + current.token, "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"])
             let status = response?.statusCode ?? 0
             if status == 401 && attempt == 0 {
                 let reread = read()
                 if let reread, reread.token != current.token { credential = reread; continue }
-                return FetchResult(status: 401, error: "Session expired — open Claude Code to refresh", expired: true, credentialStamp: reread?.stamp ?? CredentialStamp())
+                return FetchResult(status: 401, error: tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla"), expired: true, credentialStamp: reread?.stamp ?? CredentialStamp())
             }
-            if status == 429 { return FetchResult(status: status, error: "Rate-limited", retryAfter: retryAfter(response)) }
+            if status == 429 { return FetchResult(status: status, error: tx("Rate-limited", "Límite de uso alcanzado"), retryAfter: retryAfter(response)) }
             guard status == 200, let obj = UsageJSON.object(data) else {
-                return FetchResult(status: status, error: status == 401 ? "Session expired — open Claude Code to refresh" : "n/a — usage unavailable", expired: status == 401, credentialStamp: current.stamp)
+                return FetchResult(status: status, error: status == 401 ? tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla") : tx("n/a — usage unavailable", "n/d: uso no disponible"), expired: status == 401, credentialStamp: current.stamp)
             }
             var reading = UsageJSON.claude(obj, at: Date())
             reading.plan = current.plan
-            return FetchResult(reading: reading, status: status, error: reading.windows.isEmpty ? "n/a — unrecognized usage data" : nil)
+            return FetchResult(reading: reading, status: status, error: reading.windows.isEmpty ? tx("n/a — unrecognized usage data", "n/d: datos de uso no reconocidos") : nil)
         }
         return FetchResult(error: "n/a")
     }
     private static func fetchCodex(home: String, executable: String?, environment: [String: String]) -> FetchResult {
         if let executable {
             let result = UsageProcess.run(executable, ["app-server"], timeout: 10, environment: environment, rpc: true)
-            guard let obj = UsageJSON.object(result.data) else { return FetchResult(error: result.timedOut ? "n/a — Codex timed out" : "n/a — Codex unavailable") }
+            guard let obj = UsageJSON.object(result.data) else { return FetchResult(error: result.timedOut ? tx("n/a — Codex timed out", "n/d: Codex tardó demasiado") : tx("n/a — Codex unavailable", "n/d: Codex no disponible")) }
             if let error = obj["error"] as? [String: Any] {
                 // Inspect the message for classification, never publish or log arbitrary server text.
                 let text = (error["message"] as? String ?? "").lowercased()
                 let rateLimited = text.contains("429") || text.contains("rate limit")
                 let expired = text.contains("unauthorized") || text.contains("not logged") || text.contains("401")
-                return FetchResult(status: rateLimited ? 429 : (expired ? 401 : -1), error: rateLimited ? "Rate-limited" : (expired ? "Session expired — open Codex to refresh" : "n/a — Codex unavailable"), expired: expired)
+                return FetchResult(status: rateLimited ? 429 : (expired ? 401 : -1), error: rateLimited ? tx("Rate-limited", "Límite de uso alcanzado") : (expired ? tx("Session expired — open Codex to refresh", "Sesión caducada: abre Codex para renovarla") : tx("n/a — Codex unavailable", "n/d: Codex no disponible")), expired: expired)
             }
-            guard let limits = (obj["result"] as? [String: Any])?["rateLimits"] as? [String: Any] else { return FetchResult(error: "n/a — unrecognized usage data") }
+            guard let limits = (obj["result"] as? [String: Any])?["rateLimits"] as? [String: Any] else { return FetchResult(error: tx("n/a — unrecognized usage data", "n/d: datos de uso no reconocidos")) }
             let reading = UsageJSON.codex(limits, at: Date(), format: "rpc")
-            return FetchResult(reading: reading, status: 200, error: reading.windows.isEmpty ? "n/a — unrecognized usage data" : nil)
+            return FetchResult(reading: reading, status: 200, error: reading.windows.isEmpty ? tx("n/a — unrecognized usage data", "n/d: datos de uso no reconocidos") : nil)
         }
-        guard let tokens = readJSON(URL(fileURLWithPath: home + "/auth.json"))?["tokens"] as? [String: Any], let token = tokens["access_token"] as? String, !token.isEmpty, let account = tokens["account_id"] as? String, !account.isEmpty else { return FetchResult(error: "n/a — sign in to Codex with ChatGPT") }
+        guard let tokens = readJSON(URL(fileURLWithPath: home + "/auth.json"))?["tokens"] as? [String: Any], let token = tokens["access_token"] as? String, !token.isEmpty, let account = tokens["account_id"] as? String, !account.isEmpty else { return FetchResult(error: tx("n/a — sign in to Codex with ChatGPT", "n/d: inicia sesión en Codex con ChatGPT")) }
         let (data, response) = http("https://chatgpt.com/backend-api/wham/usage", headers: ["Authorization": "Bearer " + token, "ChatGPT-Account-Id": account, "Accept": "application/json"])
         let status = response?.statusCode ?? 0
-        if status == 429 { return FetchResult(status: status, error: "Rate-limited", retryAfter: retryAfter(response)) }
-        guard status == 200, let obj = UsageJSON.object(data), var limits = obj["rate_limit"] as? [String: Any] else { return FetchResult(status: status, error: status == 401 ? "Session expired — open Codex to refresh" : "n/a — usage unavailable", expired: status == 401) }
+        if status == 429 { return FetchResult(status: status, error: tx("Rate-limited", "Límite de uso alcanzado"), retryAfter: retryAfter(response)) }
+        guard status == 200, let obj = UsageJSON.object(data), var limits = obj["rate_limit"] as? [String: Any] else { return FetchResult(status: status, error: status == 401 ? tx("Session expired — open Codex to refresh", "Sesión caducada: abre Codex para renovarla") : tx("n/a — usage unavailable", "n/d: uso no disponible"), expired: status == 401) }
         limits["plan_type"] = obj["plan_type"]
         let reading = UsageJSON.codex(limits, at: Date(), format: "http")
-        return FetchResult(reading: reading, status: status, error: reading.windows.isEmpty ? "n/a — unrecognized usage data" : nil)
+        return FetchResult(reading: reading, status: status, error: reading.windows.isEmpty ? tx("n/a — unrecognized usage data", "n/d: datos de uso no reconocidos") : nil)
     }
     private static func readJSON(_ url: URL) -> [String: Any]? {
         guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= 1_048_576,
@@ -799,20 +800,20 @@ final class UsageService: ObservableObject {
         do {
             var isDirectory: ObjCBool = false
             guard fm.fileExists(atPath: directory, isDirectory: &isDirectory), isDirectory.boolValue else {
-                message("Claude config folder must already exist; no settings were changed."); return
+                message(tx("Claude config folder must already exist; no settings were changed.", "La carpeta de configuración de Claude debe existir ya; no se cambió ningún ajuste.")); return
             }
             var object: [String: Any] = [:]
             let exists = fm.fileExists(atPath: settings.path)
             let original = exists ? try Data(contentsOf: settings) : Data()
             if exists {
-                guard let parsed = UsageJSON.object(original) else { message("Cannot edit malformed settings.json"); return }
+                guard let parsed = UsageJSON.object(original) else { message(tx("Cannot edit malformed settings.json", "No se puede editar un settings.json con formato incorrecto")); return }
                 object = parsed
             }
             let entry = object["statusLine"] as? [String: Any]
             let legacyScript = AppPaths.legacySupportDirectory.appendingPathComponent("claude-statusline.sh").path
             let current = entry?["command"] as? String
             let ours = entry?["type"] as? String == "command" && (current == command || current == script.path || current == quote(legacyScript) || current == legacyScript)
-            if enable && ours { message("Live updates already configured."); return }
+            if enable && ours { message(tx("Live updates already configured.", "Las actualizaciones en vivo ya están configuradas.")); return }
             if enable {
                 try fm.createDirectory(at: support, withIntermediateDirectories: true)
                 // JXA is provided by macOS: no jq, Python or third-party runtime is required.
@@ -835,7 +836,7 @@ final class UsageService: ObservableObject {
                 """
                 try Data(body.utf8).write(to: script, options: .atomic)
                 try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-                if object["statusLine"] != nil && !ours { message("You already have a statusLine; add this line to your script: " + snippet); return }
+                if object["statusLine"] != nil && !ours { message(tx("You already have a statusLine; add this line to your script: ", "Ya tienes una statusLine; añade esta línea a tu script: ") + snippet); return }
                 object["statusLine"] = ["type": "command", "command": command]
             } else {
                 guard ours else { message(""); return }
@@ -845,7 +846,7 @@ final class UsageService: ObservableObject {
             if exists && !fm.fileExists(atPath: backup.path) { try original.write(to: backup, options: .withoutOverwriting) }
             let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
             try data.write(to: settings, options: .atomic)
-            message(enable ? "Live updates enabled for new Claude Code sessions." : "")
-        } catch { message("Could not update Claude settings; check folder permissions."); log("usage: statusLine configuration failed") }
+            message(enable ? tx("Live updates enabled for new Claude Code sessions.", "Actualizaciones en vivo activadas para las nuevas sesiones de Claude Code.") : "")
+        } catch { message(tx("Could not update Claude settings; check folder permissions.", "No se pudieron actualizar los ajustes de Claude; revisa los permisos de la carpeta.")); log("usage: statusLine configuration failed") }
     }
 }

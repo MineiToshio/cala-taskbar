@@ -94,7 +94,7 @@ struct FlyoutView: View {
         VStack(alignment: .leading, spacing: 8) {
             if fm.fromMore && fm.kind != trayMore {
                 Button { fm.fromMore = false; fm.kind = trayMore; fm.token += 1 } label: {
-                    Label("Más", systemImage: "chevron.left").font(.system(size: 11.5, weight: .medium))
+                    Label(tx("More", "Más"), systemImage: "chevron.left").font(.system(size: 11.5, weight: .medium))
                 }.buttonStyle(.plain).flyoutSecondary()
             }
             Group {
@@ -142,26 +142,26 @@ struct WifiPane: View {
             if model.wifiOn {
                 Divider().padding(.vertical, 2)
                 PermissionHint(kind: .location, text: tx("To show network names, macOS requires Location for Cala.", "Para mostrar los nombres de las redes, macOS exige Ubicación para Cala."))
-                if let cur { Row(icon: "wifi", title: cur, subtitle: "Conectado", checked: true, level: model.wifiSignal) {} }
-                else { Text(model.wifiConnected ? "Conectado" : "Sin conexión").font(.system(size: 12)).flyoutSecondary() }
+                if let cur { Row(icon: "wifi", title: cur, subtitle: tx("Connected", "Conectado"), checked: true, level: model.wifiSignal) {} }
+                else { Text(model.wifiConnected ? tx("Connected", "Conectado") : tx("Not connected", "Sin conexión")).font(.system(size: 12)).flyoutSecondary() }
                 let near = w.nearby.filter { $0.ssid != cur }
                 let nearKnown = near.filter { known.contains($0.ssid) }
                 let others = near.filter { !known.contains($0.ssid) }.prefix(6)
                 if !nearKnown.isEmpty {
-                    Text("Redes conocidas").font(.system(size: 11)).flyoutSecondary().padding(.top, 4)
+                    Text(tx("Known networks", "Redes conocidas")).font(.system(size: 11)).flyoutSecondary().padding(.top, 4)
                     ForEach(nearKnown, id: \.ssid) { n in Row(icon: "wifi", title: n.ssid, level: SystemTray.signal(n.rssi)) { w.connect(n.ssid) } }
                 }
                 if !others.isEmpty {
-                    Text("Otras redes").font(.system(size: 11)).flyoutSecondary().padding(.top, 4)
+                    Text(tx("Other networks", "Otras redes")).font(.system(size: 11)).flyoutSecondary().padding(.top, 4)
                     ForEach(Array(others), id: \.ssid) { n in
-                        Row(icon: "wifi", title: n.ssid, subtitle: n.secure ? "Con contraseña" : nil, level: SystemTray.signal(n.rssi)) { w.connect(n.ssid) }
+                        Row(icon: "wifi", title: n.ssid, subtitle: n.secure ? tx("Password protected", "Con contraseña") : nil, level: SystemTray.signal(n.rssi)) { w.connect(n.ssid) }
                     }
                 }
                 if near.isEmpty && cur != nil { EmptyView() }
                 else if near.isEmpty && PermissionCenter.shared.granted(.location) { Text(tx("Looking for networks…", "Buscando redes…")).font(.system(size: 12)).flyoutSecondary() }
             }
             Divider().padding(.vertical, 2)
-            LinkRow(title: "Ajustes de Wi-Fi…", pane: "com.apple.wifi-settings-extension")
+            LinkRow(title: tx("Wi-Fi Settings…", "Ajustes de Wi-Fi…"), pane: "com.apple.wifi-settings-extension")
         }
         .onAppear { WifiInfo.shared.scan() }
         .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in rev += 1 }
@@ -173,10 +173,10 @@ struct VolumePane: View {
     @State private var v: Double = 0.5
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Header(title: "Sonido", isOn: Binding(get: { !model.muted }, set: { SystemTray.setMuted(!$0); model.refreshTray() }))
+            Header(title: tx("Sound", "Sonido"), isOn: Binding(get: { !model.muted }, set: { SystemTray.setMuted(!$0); model.refreshTray() }))
             SliderRow(low: "speaker.fill", high: "speaker.wave.3.fill", value: $v) { SystemTray.setVolume(Float($0)); model.refreshTray() }
             Divider()
-            LinkRow(title: "Ajustes de sonido…", pane: "com.apple.Sound-Settings.extension")
+            LinkRow(title: tx("Sound Settings…", "Ajustes de sonido…"), pane: "com.apple.Sound-Settings.extension")
         }
         .onAppear { v = Double(SystemTray.volume() ?? 0.5) }
     }
@@ -194,13 +194,13 @@ struct BluetoothPane: View {
                 PermissionHint(kind: .bluetooth, text: tx("Cala needs Bluetooth permission to list your devices.", "Cala necesita el permiso de Bluetooth para listar tus dispositivos."))
                 if devices.isEmpty && PermissionCenter.shared.granted(.bluetooth) { Text(tx("No paired devices", "Sin dispositivos vinculados")).font(.system(size: 12)).flyoutSecondary() }
                 ForEach(devices, id: \.addr) { d in
-                    Row(icon: nil, title: d.name, subtitle: d.connected ? "Conectado" : nil, checked: d.connected, shape: AnyView(BluetoothShape().stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round)).padding(2))) {
+                    Row(icon: nil, title: d.name, subtitle: d.connected ? tx("Connected", "Conectado") : nil, checked: d.connected, shape: AnyView(BluetoothShape().stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round)).padding(2))) {
                         Bluetooth.toggle(addr: d.addr)
                     }
                 }
             }
             Divider().padding(.vertical, 2)
-            LinkRow(title: "Ajustes de Bluetooth…", pane: "com.apple.BluetoothSettings")
+            LinkRow(title: tx("Bluetooth Settings…", "Ajustes de Bluetooth…"), pane: "com.apple.BluetoothSettings")
         }
         .onAppear { devices = Bluetooth.devices(); on = Bluetooth.on }
         .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in
@@ -213,10 +213,10 @@ struct BrightPane: View {
     @State private var v: Double = 0.5
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Header(title: "Brillo")
+            Header(title: tx("Brightness", "Brillo"))
             SliderRow(low: "sun.min", high: "sun.max.fill", value: $v) { Brightness.set(Float($0)) }
             Divider()
-            LinkRow(title: "Ajustes de pantalla…", pane: "com.apple.Displays-Settings.extension")
+            LinkRow(title: tx("Display Settings…", "Ajustes de pantalla…"), pane: "com.apple.Displays-Settings.extension")
         }
         .onAppear { v = Double(Brightness.get() ?? 0.5) }
     }
@@ -226,7 +226,7 @@ struct UserPane: View {
     @State private var users: [Users.U] = []
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Header(title: "Perfiles")
+            Header(title: tx("Profiles", "Perfiles"))
             Divider().padding(.vertical, 2)
             ForEach(users, id: \.name) { u in
                 Row(icon: "person.crop.circle", title: u.full, checked: u.name == NSUserName(), image: u.photo) {
@@ -234,7 +234,7 @@ struct UserPane: View {
                 }
             }
             Divider().padding(.vertical, 2)
-            Row(icon: "lock", title: "Pantalla de inicio de sesión") { Users.lockScreen() }
+            Row(icon: "lock", title: tx("Login Window", "Pantalla de inicio de sesión")) { Users.lockScreen() }
         }
         .onAppear {
             DispatchQueue.global(qos: .utility).async {
@@ -261,7 +261,7 @@ struct KeyboardPane: View {
     @State private var cur: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Header(title: "Idioma del teclado")
+            Header(title: tx("Keyboard language", "Idioma del teclado"))
             Divider().padding(.vertical, 2)
             ForEach(sources) { s in
                 Row(icon: nil, title: s.name, subtitle: s.code, checked: s.id == cur) {
@@ -269,7 +269,7 @@ struct KeyboardPane: View {
                 }
             }
             Divider().padding(.vertical, 2)
-            LinkRow(title: "Ajustes de teclado…", pane: "com.apple.Keyboard-Settings.extension")
+            LinkRow(title: tx("Keyboard Settings…", "Ajustes de teclado…"), pane: "com.apple.Keyboard-Settings.extension")
         }
         .onAppear { sources = Keyboard.all(); cur = Keyboard.current()?.id }
     }
@@ -357,19 +357,19 @@ struct BatteryPane: View {
         let t = IOPSGetTimeRemainingEstimate()
         guard t > 0 else { return nil }
         let m = Int(t / 60)
-        return "\(m / 60) h \(m % 60) min restantes"
+        return tx("\(m / 60) h \(m % 60) min remaining", "\(m / 60) h \(m % 60) min restantes")
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Header(title: "Batería")
+            Header(title: tx("Battery", "Batería"))
             Divider().padding(.vertical, 2)
             let ac = model.batt?.charging ?? true
-            Row(icon: ac ? "powerplug.fill" : "battery.100", title: ac ? "Adaptador de corriente" : "Batería",
+            Row(icon: ac ? "powerplug.fill" : "battery.100", title: ac ? tx("Power adapter", "Adaptador de corriente") : tx("Battery", "Batería"),
                 subtitle: model.batt.map { "\($0.pct)%" + (ac ? "" : (remaining.map { " · " + $0 } ?? "")) }) {}
             HStack {
                 Image(systemName: "leaf.fill").frame(width: 18).flyoutSecondary()
-                Text("Modo de bajo consumo").font(.system(size: 13))
+                Text(tx("Low Power Mode", "Modo de bajo consumo")).font(.system(size: 13))
                 Spacer()
                 Toggle("", isOn: Binding(get: { low }, set: { v in
                     low = v
@@ -384,11 +384,11 @@ struct BatteryPane: View {
                         catch { log("low power: osascript failed: \(error)") }
                         DispatchQueue.main.async { low = ProcessInfo.processInfo.isLowPowerModeEnabled }
                     }
-                })).labelsHidden()
+                })).labelsHidden().accessibilityLabel(tx("Low Power Mode", "Modo de bajo consumo"))
             }
 
             Divider().padding(.vertical, 2)
-            LinkRow(title: "Ajustes de batería…", pane: "com.apple.Battery-Settings.extension")
+            LinkRow(title: tx("Battery Settings…", "Ajustes de batería…"), pane: "com.apple.Battery-Settings.extension")
         }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             low = ProcessInfo.processInfo.isLowPowerModeEnabled
@@ -501,21 +501,21 @@ struct UsagePane: View {
         return CGFloat(min(600, height))
     }
     private func age(_ date: Date?, now: Date) -> String {
-        guard let date else { return "Not updated yet" }
+        guard let date else { return tx("Not updated yet", "Aún sin actualizar") }
         let seconds = max(0, Int(now.timeIntervalSince(date)))
-        if seconds < 5 { return "Updated just now" }
-        if seconds < 60 { return "Updated \(seconds) s ago" }
-        if seconds < 3600 { return "Updated \(seconds / 60) min ago" }
-        if seconds < 86400 { return "Updated \(seconds / 3600) h ago" }
-        return "Updated \(seconds / 86400) d ago"
+        if seconds < 5 { return tx("Updated just now", "Actualizado ahora mismo") }
+        if seconds < 60 { return tx("Updated \(seconds) s ago", "Actualizado hace \(seconds) s") }
+        if seconds < 3600 { return tx("Updated \(seconds / 60) min ago", "Actualizado hace \(seconds / 60) min") }
+        if seconds < 86400 { return tx("Updated \(seconds / 3600) h ago", "Actualizado hace \(seconds / 3600) h") }
+        return tx("Updated \(seconds / 86400) d ago", "Actualizado hace \(seconds / 86400) d")
     }
     private func resetLabel(_ window: UsageWindow, now: Date) -> String {
-        guard let reset = window.resetsAt else { return "Reset time unavailable" }
-        if window.isResetting(now) { return "resetting…" }
+        guard let reset = window.resetsAt else { return tx("Reset time unavailable", "Hora de reinicio no disponible") }
+        if window.isResetting(now) { return tx("resetting…", "reiniciándose…") }
         let formatter = DateFormatter(); formatter.locale = Locale.current; formatter.timeZone = .current
         formatter.dateFormat = "EEE d, h:mm a"
         let relative = UsagePace.formatted(reset.timeIntervalSince(now))
-        return "resets " + formatter.string(from: reset) + " · in " + relative
+        return tx("resets ", "se reinicia ") + formatter.string(from: reset) + tx(" · in ", " · en ") + relative
     }
     private func provider(_ state: UsageState, now: Date) -> some View {
         let retry = max(0, Int(ceil(state.cooldownUntil?.timeIntervalSince(now) ?? 0)))
@@ -541,7 +541,7 @@ struct UsagePane: View {
                         Spacer(minLength: 4)
                         HStack(alignment: .firstTextBaseline, spacing: 3) {
                             Text("\(remaining)%").font(.system(size: 23, weight: .semibold))
-                            Text("left").font(.system(size: 11))
+                            Text(tx("left", "restante")).font(.system(size: 11))
                         }.monospacedDigit().foregroundStyle(FlyoutStyle.quotaText(remaining, dark: scheme == .dark)).fixedSize()
                     }
                     GeometryReader { g in
@@ -559,13 +559,13 @@ struct UsagePane: View {
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityValue("\(remaining)% left, \(Int(used.rounded()))% used")
+                .accessibilityValue(tx("\(remaining)% left, \(Int(used.rounded()))% used", "\(remaining)% restante, \(Int(used.rounded()))% usado"))
             }
             if let error = state.error {
                 Label(error, systemImage: "exclamationmark.circle").font(.system(size: 11)).flyoutSecondary()
                     .fixedSize(horizontal: false, vertical: true)
             } else if state.reading?.windows.isEmpty ?? true {
-                Text("Usage unavailable").font(.system(size: 12)).flyoutSecondary()
+                Text(tx("Usage unavailable", "Uso no disponible")).font(.system(size: 12)).flyoutSecondary()
             }
             Divider()
             HStack(spacing: 6) {

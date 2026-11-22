@@ -20,7 +20,7 @@ final class SettingsWindowController {
             w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true
             w.isReleasedWhenClosed = false
-            w.title = "Cala · Configuración"
+            w.title = tx("Cala · Settings", "Cala · Configuración")
             w.contentView = NSHostingView(rootView: SettingsView(store: ConfigStore.shared, pane: pane ?? .general))
             w.contentMinSize = NSSize(width: 780, height: 540)
             w.center()
@@ -38,22 +38,22 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .general: "General"; case .appearance: "Apariencia"; case .screens: "Pantallas"; case .tray: "Bandeja"
-        case .calendar: "Calendar"
-        case .usage: "Usage"
-        case .permissions: "Permisos"; case .about: "Avanzado"
+        case .general: tx("General", "General"); case .appearance: tx("Appearance", "Apariencia"); case .screens: tx("Screens", "Pantallas"); case .tray: tx("Tray", "Bandeja")
+        case .calendar: tx("Calendar", "Calendario")
+        case .usage: tx("Usage", "Uso")
+        case .permissions: tx("Permissions", "Permisos"); case .about: tx("Advanced", "Avanzado")
         }
     }
     var subtitle: String {
         switch self {
-        case .general: "Comportamiento de la barra y del inicio."
-        case .appearance: "Colores, transparencia y tamaños."
-        case .screens: "Cómo se acomoda la barra en cada pantalla."
-        case .tray: "Qué se ve a la derecha de la barra, qué queda detrás de la flecha ^ y qué se oculta."
-        case .calendar: "Upcoming events from your macOS calendar accounts."
-        case .usage: "Claude and Codex plan usage in one tray control."
-        case .permissions: "Lo que macOS debe permitir para que todo funcione."
-        case .about: "Archivos, registro y valores de fábrica."
+        case .general: tx("How the bar and startup behave.", "Comportamiento de la barra y del inicio.")
+        case .appearance: tx("Colors, transparency and sizes.", "Colores, transparencia y tamaños.")
+        case .screens: tx("How the bar is laid out on each screen.", "Cómo se acomoda la barra en cada pantalla.")
+        case .tray: tx("What shows on the right of the bar, what sits behind the ^ arrow and what is hidden.", "Qué se ve a la derecha de la barra, qué queda detrás de la flecha ^ y qué se oculta.")
+        case .calendar: tx("Upcoming events from your macOS calendar accounts.", "Próximos eventos de las cuentas de calendario de tu macOS.")
+        case .usage: tx("Claude and Codex plan usage in one tray control.", "El uso de tus planes de Claude y Codex en un solo control de la bandeja.")
+        case .permissions: tx("What macOS needs to allow so everything works.", "Lo que macOS debe permitir para que todo funcione.")
+        case .about: tx("Files, log and factory defaults.", "Archivos, registro y valores de fábrica.")
         }
     }
     var icon: String {
@@ -120,7 +120,7 @@ struct SettingsView: View {
                     .padding(.leading, -3.4)
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Cala").font(.system(size: 13, weight: .semibold))
-                    Text("Configuración").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(tx("Settings", "Configuración")).font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 8).padding(.top, 40).padding(.bottom, 14)
@@ -243,8 +243,9 @@ struct GeneralPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
             Card {
-                SettingRow(title: "Ocultar la barra automáticamente", caption: "Se esconde y aparece al llevar el mouse al borde inferior de la pantalla.") {
+                SettingRow(title: tx("Hide the bar automatically", "Ocultar la barra automáticamente"), caption: tx("It hides, and shows again when you move the mouse to the bottom edge of the screen.", "Se esconde y aparece al llevar el mouse al borde inferior de la pantalla.")) {
                     Toggle("", isOn: Binding(get: { store.config.autoHide }, set: { store.config.autoHide = $0 })).toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(tx("Hide the bar automatically", "Ocultar la barra automáticamente"))
                 }
                 RowDivider()
                 SettingRow(title: tx("Open at login", "Abrir al iniciar sesión"),
@@ -258,35 +259,37 @@ struct GeneralPane: View {
                     }
                 }
             }
-            SectionTitle(text: "Disco")
+            SectionTitle(text: tx("Disk", "Disco"))
             Card {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Carpetas extra a medir").font(.system(size: 13, weight: .medium))
-                    Text("Separadas por coma, por ejemplo donde viven tus proyectos o worktrees. Se suman a la lista de caches y herramientas de desarrollo.")
+                    Text(tx("Extra folders to measure", "Carpetas extra a medir")).font(.system(size: 13, weight: .medium))
+                    Text(tx("Separated by commas, for example where your projects or worktrees live. They are added to the list of caches and developer tools.", "Separadas por coma, por ejemplo donde viven tus proyectos o worktrees. Se suman a la lista de caches y herramientas de desarrollo."))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                     TextField("~/Projects, ~/worktrees", text: $diskFolders).textFieldStyle(.roundedBorder).onSubmit { applyDiskFolders() }
                         .onAppear { diskFolders = store.config.diskFolders.joined(separator: ", ") }
                 }
                 .padding(16).frame(maxWidth: .infinity, alignment: .leading)
             }
-            SectionTitle(text: "Dock de macOS")
+            SectionTitle(text: tx("macOS Dock", "Dock de macOS"))
             Card {
-                SettingRow(title: "Ocultar el Dock de macOS", caption: "Esta barra lo reemplaza. Se esconde por completo y no vuelve a aparecer al acercar el mouse. Al apagarlo, queda exactamente como estaba.") {
+                SettingRow(title: tx("Hide the macOS Dock", "Ocultar el Dock de macOS"), caption: tx("This bar replaces it. It hides completely and does not come back when you move the mouse near it. Turn it off and it is left exactly as it was.", "Esta barra lo reemplaza. Se esconde por completo y no vuelve a aparecer al acercar el mouse. Al apagarlo, queda exactamente como estaba.")) {
                     Toggle("", isOn: Binding(get: { store.config.hideNativeDock }, set: { DockControl.setHidden($0, store) })).toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(tx("Hide the macOS Dock", "Ocultar el Dock de macOS"))
                 }
                 if store.config.hideNativeDock {
                     RowDivider()
-                    SettingRow(title: "Devolver el Dock al cerrar la barra", caption: "Si sales de Cala, el Dock de macOS vuelve solo. Al abrirla otra vez se oculta de nuevo.") {
+                    SettingRow(title: tx("Bring the Dock back when the bar closes", "Devolver el Dock al cerrar la barra"), caption: tx("If you quit Cala, the macOS Dock comes back on its own. It hides again when you reopen it.", "Si sales de Cala, el Dock de macOS vuelve solo. Al abrirla otra vez se oculta de nuevo.")) {
                         Toggle("", isOn: Binding(get: { store.config.restoreDockOnQuit }, set: { store.config.restoreDockOnQuit = $0 })).toggleStyle(.switch).labelsHidden()
+                            .accessibilityLabel(tx("Bring the Dock back when the bar closes", "Devolver el Dock al cerrar la barra"))
                     }
                 }
             }
             .animation(.easeOut(duration: 0.2), value: store.config.hideNativeDock)
-            SectionTitle(text: "Barra de menús de macOS")
+            SectionTitle(text: tx("macOS menu bar", "Barra de menús de macOS"))
             Card {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Iconos de macOS que ya muestra Cala").font(.system(size: 13, weight: .medium))
-                    Text("Oculta, en la parte derecha de la barra de macOS, los iconos que Cala ya tiene. Los menús de las apps (Archivo, Edición…) no se tocan. macOS no permite ocultar el reloj, y los iconos de otras apps (Claude, Slack…) los controla cada app.")
+                    Text(tx("macOS icons that Cala already shows", "Iconos de macOS que ya muestra Cala")).font(.system(size: 13, weight: .medium))
+                    Text(tx("Hides, on the right side of the macOS menu bar, the icons Cala already has. App menus (File, Edit…) are left alone. macOS does not allow hiding the clock, and icons from other apps (Claude, Slack…) are controlled by each app.", "Oculta, en la parte derecha de la barra de macOS, los iconos que Cala ya tiene. Los menús de las apps (Archivo, Edición…) no se tocan. macOS no permite ocultar el reloj, y los iconos de otras apps (Claude, Slack…) los controla cada app."))
                         .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(16).frame(maxWidth: .infinity, alignment: .leading)
@@ -299,38 +302,43 @@ struct GeneralPane: View {
                             store.config.menuBarHiddenIcons = MenuBarIcons.all.map(\.id).filter { set.contains($0) }
                             MenuBarIcons.apply(store)
                         })).toggleStyle(.switch).labelsHidden()
+                            .accessibilityLabel(icon.title)
                     }
                 }
                 RowDivider()
                 OtherMenuBarIcons()
                 RowDivider()
-                SettingRow(title: "Devolverlos al cerrar Cala", caption: "Si sales de Cala, los iconos vuelven a mostrarse solos. Al abrirla otra vez se ocultan de nuevo.") {
+                SettingRow(title: tx("Bring them back when Cala closes", "Devolverlos al cerrar Cala"), caption: tx("If you quit Cala, the icons show again on their own. They hide again when you reopen it.", "Si sales de Cala, los iconos vuelven a mostrarse solos. Al abrirla otra vez se ocultan de nuevo.")) {
                     Toggle("", isOn: Binding(get: { store.config.restoreMenuBarOnQuit }, set: { store.config.restoreMenuBarOnQuit = $0 })).toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(tx("Bring them back when Cala closes", "Devolverlos al cerrar Cala"))
                 }
             }
             Card {
-                SettingRow(title: "Ocultar toda la barra de menús", caption: "Se esconde por completo y reaparece al llevar el mouse al borde superior de la pantalla. macOS no permite quitarla del todo. Al apagarlo, queda exactamente como estaba.") {
+                SettingRow(title: tx("Hide the whole menu bar", "Ocultar toda la barra de menús"), caption: tx("It hides completely and reappears when you move the mouse to the top edge of the screen. macOS does not allow removing it entirely. Turn it off and it is left exactly as it was.", "Se esconde por completo y reaparece al llevar el mouse al borde superior de la pantalla. macOS no permite quitarla del todo. Al apagarlo, queda exactamente como estaba.")) {
                     Toggle("", isOn: Binding(get: { store.config.hideMenuBar }, set: { MenuBarControl.setHidden($0, store) })).toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(tx("Hide the whole menu bar", "Ocultar toda la barra de menús"))
                 }
             }
-            SectionTitle(text: "Cambiar de ventana")
+            SectionTitle(text: tx("Switch windows", "Cambiar de ventana"))
             Card {
-                SettingRow(title: "Selector de ventanas (Opción + Tab)", caption: "Mantén Opción y pulsa Tab: ves todas tus ventanas, no solo las apps. Tab avanza, Mayús+Tab retrocede, Esc cancela; al soltar Opción se abre la elegida.") {
+                SettingRow(title: tx("Window switcher (Option + Tab)", "Selector de ventanas (Opción + Tab)"), caption: tx("Hold Option and press Tab: you see all your windows, not just apps. Tab moves forward, Shift+Tab goes back, Esc cancels; when you release Option the chosen one opens.", "Mantén Opción y pulsa Tab: ves todas tus ventanas, no solo las apps. Tab avanza, Mayús+Tab retrocede, Esc cancela; al soltar Opción se abre la elegida.")) {
                     Toggle("", isOn: Binding(get: { store.config.switcherEnabled }, set: { store.config.switcherEnabled = $0 })).toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(tx("Window switcher (Option + Tab)", "Selector de ventanas (Opción + Tab)"))
                 }
                 if store.config.switcherEnabled {
                     RowDivider()
-                    SettingRow(title: "Usar también Cmd + Tab", caption: "Reemplaza el cambiador de apps de macOS por este. Necesita el permiso de Accesibilidad.") {
+                    SettingRow(title: tx("Also use Cmd + Tab", "Usar también Cmd + Tab"), caption: tx("Replaces the macOS app switcher with this one. Needs the Accessibility permission.", "Reemplaza el cambiador de apps de macOS por este. Necesita el permiso de Accesibilidad.")) {
                         Toggle("", isOn: Binding(get: { store.config.switcherReplaceCmdTab }, set: { store.config.switcherReplaceCmdTab = $0 })).toggleStyle(.switch).labelsHidden()
+                            .accessibilityLabel(tx("Also use Cmd + Tab", "Usar también Cmd + Tab"))
                     }
                 }
             }
             .animation(.easeOut(duration: 0.2), value: store.config.switcherEnabled)
-            SectionTitle(text: "Previews")
+            SectionTitle(text: tx("Previews", "Vistas previas"))
             Card {
-                SettingRow(title: "Retardo del preview", caption: "Tiempo antes de mostrar las ventanas al pasar el mouse por un icono.") {
+                SettingRow(title: tx("Preview delay", "Retardo de la vista previa"), caption: tx("Time before the windows show when you hover over an icon.", "Tiempo antes de mostrar las ventanas al pasar el mouse por un icono.")) {
                     SliderControl(value: Binding(get: { store.config.previewDelay }, set: { store.config.previewDelay = $0 }),
-                                  range: 0...0.6, step: 0.01) { $0 < 0.01 ? "Ninguno" : "\(Int($0 * 1000)) ms" }
+                                  range: 0...0.6, step: 0.01) { $0 < 0.01 ? tx("None", "Ninguno") : "\(Int($0 * 1000)) ms" }
                 }
             }
         }
@@ -440,7 +448,7 @@ struct AppearancePane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
             BarPreview(store: store)
-            SectionTitle(text: "Tema")
+            SectionTitle(text: tx("Theme", "Tema"))
             Card {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 14) {
                     ForEach(BarTheme.all) { t in
@@ -449,19 +457,19 @@ struct AppearancePane: View {
                 }
                 .padding(16)
             }
-            SectionTitle(text: "Ajustes")
+            SectionTitle(text: tx("Settings", "Ajustes"))
             Card {
-                SettingRow(title: "Transparencia", caption: "Solo afecta al fondo; los iconos y textos se mantienen nítidos.") {
+                SettingRow(title: tx("Transparency", "Transparencia"), caption: tx("Only affects the background; icons and text stay sharp.", "Solo afecta al fondo; los iconos y textos se mantienen nítidos.")) {
                     SliderControl(value: Binding(get: { 1 - store.config.barOpacity }, set: { store.config.barOpacity = 1 - $0 }),
                                   range: 0...0.8, step: 0.02) { "\(Int(($0 * 100).rounded())) %" }
                 }
                 RowDivider()
-                SettingRow(title: "Tamaño de los iconos") {
+                SettingRow(title: tx("Icon size", "Tamaño de los iconos")) {
                     SliderControl(value: Binding(get: { store.config.iconSize }, set: { store.config.iconSize = $0 }),
                                   range: 20...44, step: 2) { "\(Int($0)) pt" }
                 }
                 RowDivider()
-                SettingRow(title: "Tamaño del preview", caption: "Ancho de cada ventana en la vista previa.") {
+                SettingRow(title: tx("Preview size", "Tamaño de la vista previa"), caption: tx("Width of each window in the preview.", "Ancho de cada ventana en la vista previa.")) {
                     SliderControl(value: Binding(get: { store.config.previewWidth }, set: { store.config.previewWidth = $0 }),
                                   range: 300...560, step: 20) { "\(Int($0)) pt" }
                 }
@@ -525,7 +533,7 @@ struct ScreensPane: View {
                         }
                         Spacer()
                         if i == 0 {
-                            Text("Principal").font(.system(size: 11, weight: .medium)).foregroundStyle(Color.accentColor)
+                            Text(tx("Main", "Principal")).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.accentColor)
                                 .padding(.horizontal, 8).padding(.vertical, 3)
                                 .background(Capsule().fill(Color.accentColor.opacity(0.14)))
                         }
@@ -533,17 +541,17 @@ struct ScreensPane: View {
                     .padding(16)
                     RowDivider()
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Alineación de los iconos").font(.system(size: 13, weight: .medium))
+                        Text(tx("Icon alignment", "Alineación de los iconos")).font(.system(size: 13, weight: .medium))
                         HStack(spacing: 18) {
-                            AlignOption(label: "Izquierda", center: false, selected: cur == "left") { store.config.alignments[key] = "left" }
-                            AlignOption(label: "Centro", center: true, selected: cur == "center") { store.config.alignments[key] = "center" }
+                            AlignOption(label: tx("Left", "Izquierda"), center: false, selected: cur == "left") { store.config.alignments[key] = "left" }
+                            AlignOption(label: tx("Center", "Centro"), center: true, selected: cur == "center") { store.config.alignments[key] = "center" }
                         }
                     }
                     .padding(16).frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             if screens.count > 1 {
-                Text("Cada pantalla recuerda su propia alineación, aunque la desconectes.")
+                Text(tx("Each screen remembers its own alignment, even if you unplug it.", "Cada pantalla recuerda su propia alineación, aunque la desconectes."))
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).padding(.leading, 4)
             }
         }
@@ -593,45 +601,48 @@ struct AdvancedPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
             Card {
-                SettingRow(title: "Archivo de configuración", caption: "Todos los ajustes en formato JSON.") {
-                    Button("Abrir") { NSWorkspace.shared.open(store.fileURL) }
+                SettingRow(title: tx("Configuration file", "Archivo de configuración"), caption: tx("All settings in JSON format.", "Todos los ajustes en formato JSON.")) {
+                    Button(tx("Open", "Abrir")) { NSWorkspace.shared.open(store.fileURL) }
                 }
                 RowDivider()
-                SettingRow(title: "Registro de depuración", caption: "Útil si algo falla.") {
-                    Button("Mostrar en Finder") {
+                SettingRow(title: tx("Debug log", "Registro de depuración"), caption: tx("Useful if something goes wrong.", "Útil si algo falla.")) {
+                    Button(tx("Show in Finder", "Mostrar en Finder")) {
                         let log = store.fileURL.deletingLastPathComponent().appendingPathComponent("debug.log")
                         NSWorkspace.shared.activateFileViewerSelecting([log])
                     }
                 }
             }
             Card {
-                SettingRow(title: "Reportar un problema", caption: "Cuéntanos qué falla o qué te gustaría. Verás exactamente qué se envía antes de enviarlo.") {
-                    Button("Reportar…") { FeedbackWindowController.shared.show() }
+                SettingRow(title: tx("Report a problem", "Reportar un problema"), caption: tx("Tell us what is broken or what you would like. You will see exactly what is sent before it goes out.", "Cuéntanos qué falla o qué te gustaría. Verás exactamente qué se envía antes de enviarlo.")) {
+                    Button(tx("Report…", "Reportar…")) { FeedbackWindowController.shared.show() }
                 }
                 RowDivider()
-                SettingRow(title: "Recomendar reiniciar el Mac", caption: "En el panel de CPU y memoria, avisa cuando conviene reiniciar y explica los motivos: actualización pendiente, muchos días encendido, mucho swap o memoria bajo presión.") {
+                SettingRow(title: tx("Suggest restarting the Mac", "Recomendar reiniciar el Mac"), caption: tx("In the CPU and memory panel, tells you when a restart is a good idea and explains why: a pending update, many days powered on, heavy swap or memory under pressure.", "En el panel de CPU y memoria, avisa cuando conviene reiniciar y explica los motivos: actualización pendiente, muchos días encendido, mucho swap o memoria bajo presión.")) {
                     Toggle("", isOn: Binding(get: { store.config.restartAdvice }, set: { store.config.restartAdvice = $0 })).toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(tx("Suggest restarting the Mac", "Recomendar reiniciar el Mac"))
                 }
                 RowDivider()
-                SettingRow(title: "Volver a abrir Cala si se cierra sola", caption: "Si Cala falla, se abre otra vez en unos segundos para que nunca te quedes sin barra. Si falla tres veces seguidas, se detiene para no entrar en un bucle.") {
+                SettingRow(title: tx("Reopen Cala if it quits on its own", "Volver a abrir Cala si se cierra sola"), caption: tx("If Cala crashes, it opens again within a few seconds so you are never left without a bar. If it crashes three times in a row, it stops to avoid a loop.", "Si Cala falla, se abre otra vez en unos segundos para que nunca te quedes sin barra. Si falla tres veces seguidas, se detiene para no entrar en un bucle.")) {
                     Toggle("", isOn: Binding(get: { store.config.relaunchOnCrash }, set: { store.config.relaunchOnCrash = $0; Watchdog.sync(store) })).toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(tx("Reopen Cala if it quits on its own", "Volver a abrir Cala si se cierra sola"))
                 }
                 RowDivider()
-                SettingRow(title: "Si Cala se cierra sola", caption: "Al abrirla de nuevo puede ofrecerte enviar un informe del fallo. No incluye tus archivos, ventanas ni contraseñas.") {
+                SettingRow(title: tx("If Cala quits on its own", "Si Cala se cierra sola"), caption: tx("When you open it again it can offer to send a crash report. It does not include your files, windows or passwords.", "Al abrirla de nuevo puede ofrecerte enviar un informe del fallo. No incluye tus archivos, ventanas ni contraseñas.")) {
                     Picker("", selection: Binding(get: { store.config.crashReports }, set: { store.config.crashReports = $0 })) {
-                        Text("Preguntarme").tag("ask")
-                        Text("Enviar sin preguntar").tag("auto")
-                        Text("No enviar nunca").tag("never")
+                        Text(tx("Ask me", "Preguntarme")).tag("ask")
+                        Text(tx("Send without asking", "Enviar sin preguntar")).tag("auto")
+                        Text(tx("Never send", "No enviar nunca")).tag("never")
                     }.labelsHidden().frame(width: 190)
+                    .accessibilityLabel(tx("If Cala quits on its own", "Si Cala se cierra sola"))
                 }
             }
             Card {
-                SettingRow(title: "Restablecer apariencia", caption: "Vuelve el tema, la transparencia y los tamaños a sus valores originales. No toca tus apps ancladas.") {
-                    Button("Restablecer…", role: .destructive) { confirmReset = true }
+                SettingRow(title: tx("Reset appearance", "Restablecer apariencia"), caption: tx("Returns the theme, transparency and sizes to their original values. Your pinned apps are not touched.", "Vuelve el tema, la transparencia y los tamaños a sus valores originales. No toca tus apps ancladas.")) {
+                    Button(tx("Reset…", "Restablecer…"), role: .destructive) { confirmReset = true }
                 }
             }
-            .confirmationDialog("¿Restablecer la apariencia?", isPresented: $confirmReset) {
-                Button("Restablecer", role: .destructive) {
+            .confirmationDialog(tx("Reset the appearance?", "¿Restablecer la apariencia?"), isPresented: $confirmReset) {
+                Button(tx("Reset", "Restablecer"), role: .destructive) {
                     let d = Config()
                     store.config.theme = d.theme; store.config.barOpacity = d.barOpacity
                     store.config.iconSize = d.iconSize; store.config.previewWidth = d.previewWidth
@@ -639,13 +650,13 @@ struct AdvancedPane: View {
                 }
             }
             Card {
-                SettingRow(title: "Salir de Cala", caption: "Para volver a abrirla, busca \u{201C}Cala\u{201D} en Launchpad o Spotlight.") {
-                    Button("Salir…", role: .destructive) { confirmQuit = true }
+                SettingRow(title: tx("Quit Cala", "Salir de Cala"), caption: tx("To open it again, search for \u{201C}Cala\u{201D} in Launchpad or Spotlight.", "Para volver a abrirla, busca \u{201C}Cala\u{201D} en Launchpad o Spotlight.")) {
+                    Button(tx("Quit…", "Salir…"), role: .destructive) { confirmQuit = true }
                 }
             }
-            .confirmationDialog("¿Salir de Cala?", isPresented: $confirmQuit) {
-                Button("Salir", role: .destructive) { NSApp.terminate(nil) }
-            } message: { Text("La barra desaparecerá hasta que vuelvas a abrir la app.") }
+            .confirmationDialog(tx("Quit Cala?", "¿Salir de Cala?"), isPresented: $confirmQuit) {
+                Button(tx("Quit", "Salir"), role: .destructive) { NSApp.terminate(nil) }
+            } message: { Text(tx("The bar will disappear until you open the app again.", "La barra desaparecerá hasta que vuelvas a abrir la app.")) }
             Card {
                 SettingRow(title: tx("Uninstall Cala", "Desinstalar Cala"),
                            caption: tx("Puts the Dock and menu bar back, stops opening at login, deletes Cala's settings and moves the app to the Trash.",
@@ -671,13 +682,13 @@ struct UsageSettingsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
             Card {
-                SettingRow(title: "Usage", caption: "Show remaining AI plan usage to the left of the battery.") {
-                    Toggle("Usage", isOn: $store.config.usageEnabled).labelsHidden().toggleStyle(.switch)
+                SettingRow(title: tx("Usage", "Uso"), caption: tx("Show remaining AI plan usage to the left of the battery.", "Muestra lo que te queda de tus planes de IA a la izquierda de la batería.")) {
+                    Toggle(tx("Usage", "Uso"), isOn: $store.config.usageEnabled).labelsHidden().toggleStyle(.switch)
                 }
             }
             Card {
                 SettingRow(title: calendarText("Quota alerts", "Alertas de cuota"), caption: calendarText("Notify when a quota is low or, at the current pace, will run out before it resets.", "Avisa cuando una cuota está baja o, al ritmo actual, se agotará antes del reinicio.")) {
-                    Toggle("Quota alerts", isOn: Binding(get: { store.config.usageAlertsEnabled }, set: { on in
+                    Toggle(calendarText("Quota alerts", "Alertas de cuota"), isOn: Binding(get: { store.config.usageAlertsEnabled }, set: { on in
                         store.config.usageAlertsEnabled = on
                         if on { UsagePace.shared.requestAuthorization() }
                     })).labelsHidden().toggleStyle(.switch)
@@ -688,6 +699,7 @@ struct UsageSettingsPane: View {
                         Picker("", selection: $store.config.usageAlertThreshold) {
                             ForEach([10, 15, 20, 30], id: \.self) { Text("\($0)%").tag($0) }
                         }.labelsHidden().frame(width: 90)
+                        .accessibilityLabel(calendarText("Alert when left is", "Avisar cuando quede"))
                     }
                 }
             }
@@ -703,17 +715,17 @@ struct UsageSettingsPane: View {
             }
             Card {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Custom folders (optional)").font(.system(size: 13, weight: .medium))
-                    Text("Leave blank to use your login shell configuration, then ~/.claude or ~/.codex.").font(.system(size: 11)).foregroundStyle(.secondary)
-                    TextField("Claude config dir", text: $claudeFolder).textFieldStyle(.roundedBorder)
+                    Text(tx("Custom folders (optional)", "Carpetas personalizadas (opcional)")).font(.system(size: 13, weight: .medium))
+                    Text(tx("Leave blank to use your login shell configuration, then ~/.claude or ~/.codex.", "Déjalo vacío para usar la configuración de tu shell de inicio de sesión y luego ~/.claude o ~/.codex.")).font(.system(size: 11)).foregroundStyle(.secondary)
+                    TextField(tx("Claude config dir", "Carpeta de configuración de Claude"), text: $claudeFolder).textFieldStyle(.roundedBorder)
                         .focused($focusedFolder, equals: .claude).onSubmit { applyFolder(.claude) }
-                    TextField("Codex home", text: $codexFolder).textFieldStyle(.roundedBorder)
+                    TextField(tx("Codex home", "Carpeta de Codex"), text: $codexFolder).textFieldStyle(.roundedBorder)
                         .focused($focusedFolder, equals: .codex).onSubmit { applyFolder(.codex) }
                 }.padding(16)
             }
             Card {
-                SettingRow(title: "Claude Code live updates (statusLine)", caption: "Opt in to local updates. Backs up settings.json and preserves existing statusLine commands.") {
-                    Toggle("Claude Code live updates", isOn: $store.config.usageClaudeStatusLine).labelsHidden().toggleStyle(.switch)
+                SettingRow(title: tx("Claude Code live updates (statusLine)", "Actualizaciones en vivo de Claude Code (statusLine)"), caption: tx("Opt in to local updates. Backs up settings.json and preserves existing statusLine commands.", "Actívalo para recibir datos locales. Hace una copia de settings.json y conserva los comandos statusLine que ya tengas.")) {
+                    Toggle(tx("Claude Code live updates", "Actualizaciones en vivo de Claude Code"), isOn: $store.config.usageClaudeStatusLine).labelsHidden().toggleStyle(.switch)
                 }
                 if !usage.statusLineMessage.isEmpty {
                     Text(usage.statusLineMessage).font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled).padding(16)
@@ -746,8 +758,8 @@ struct TrayPane: View {
         VStack(alignment: .leading, spacing: 20) {
             Card {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Elige dónde va cada cosa").font(.system(size: 13, weight: .semibold))
-                    Text("**En la barra**: siempre visible. **En ^**: aparece al pulsar la flecha ^ al inicio de la bandeja. **Oculto**: no se muestra. De arriba hacia abajo es el orden de izquierda a derecha en la barra.")
+                    Text(tx("Choose where each thing goes", "Elige dónde va cada cosa")).font(.system(size: 13, weight: .semibold))
+                    Text(LocalizedStringKey(tx("**On the bar**: always visible. **In ^**: shows when you click the ^ arrow at the start of the tray. **Hidden**: not shown. Top to bottom is the order from left to right on the bar.", "**En la barra**: siempre visible. **En ^**: aparece al pulsar la flecha ^ al inicio de la bandeja. **Oculto**: no se muestra. De arriba hacia abajo es el orden de izquierda a derecha en la barra.")))
                         .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -763,6 +775,7 @@ struct TrayPane: View {
                                 Picker("", selection: place(id)) {
                                     ForEach(TrayPlace.allCases) { Text($0.title).tag($0) }
                                 }.pickerStyle(.segmented).labelsHidden().frame(width: 250)
+                                    .accessibilityLabel(info.title)
                             }
                             .frame(height: 46)
                             .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
@@ -779,9 +792,9 @@ struct TrayPane: View {
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
-                Text("Arrastra una fila para cambiar el orden.").font(.system(size: 11)).foregroundStyle(.secondary).padding(.leading, 4)
+                Text(tx("Drag a row to change the order.", "Arrastra una fila para cambiar el orden.")).font(.system(size: 11)).foregroundStyle(.secondary).padding(.leading, 4)
             }
-            Button("Restablecer valores") { store.config.trayLayout = [:]; store.config.trayOrder = [] }
+            Button(tx("Reset values", "Restablecer valores")) { store.config.trayLayout = [:]; store.config.trayOrder = [] }
         }
     }
 }
@@ -795,11 +808,11 @@ struct OtherMenuBarIcons: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Otros iconos que siguen ahí").font(.system(size: 13, weight: .medium))
+            Text(tx("Other icons that are still there", "Otros iconos que siguen ahí")).font(.system(size: 13, weight: .medium))
             if !loaded {
-                Text("Buscando…").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(tx("Searching…", "Buscando…")).font(.system(size: 11.5)).foregroundStyle(.secondary)
             } else if items.isEmpty {
-                Text("No hay iconos de otras apps.").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(tx("There are no icons from other apps.", "No hay iconos de otras apps.")).font(.system(size: 11.5)).foregroundStyle(.secondary)
             } else {
                 ForEach(items) { item in
                     HStack(spacing: 8) {
@@ -809,13 +822,13 @@ struct OtherMenuBarIcons: View {
                     }
                 }
             }
-            Text("Cada app decide su icono: apágalo en los ajustes de esa app, o desde Ajustes del Sistema → Barra de menús, donde macOS deja elegir cuáles se permiten.")
+            Text(tx("Each app decides its own icon: turn it off in that app's settings, or from System Settings → Menu Bar, where macOS lets you choose which are allowed.", "Cada app decide su icono: apágalo en los ajustes de esa app, o desde Ajustes del Sistema → Barra de menús, donde macOS deja elegir cuáles se permiten."))
                 .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("Abrir Ajustes → Barra de menús") {
+                Button(tx("Open Settings → Menu Bar", "Abrir Ajustes → Barra de menús")) {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.ControlCenter-Settings.extension")!)
                 }
-                Button("Volver a buscar") { reload() }
+                Button(tx("Search again", "Volver a buscar")) { reload() }
             }
         }
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)

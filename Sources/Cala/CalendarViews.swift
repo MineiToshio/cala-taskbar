@@ -148,23 +148,23 @@ struct CalendarSettingsPane: View {
     init(store: ConfigStore, agenda: CalendarService = .shared) { self.store = store; self.agenda = agenda }
     private var sources: [(id: String, title: String, choices: [CalendarChoice])] {
         Dictionary(grouping: agenda.calendars, by: \.sourceID).map { id, choices in
-            (id, choices.first?.sourceTitle ?? "Calendars", choices)
+            (id, choices.first?.sourceTitle ?? tx("Calendars", "Calendarios"), choices)
         }.sorted { ($0.title, $0.id) < ($1.title, $1.id) }
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Card {
-                SettingRow(title: "Show upcoming events", caption: "Read events from the accounts configured on this Mac.") {
-                    Toggle("Show upcoming events", isOn: $store.config.calendarEnabled).labelsHidden().toggleStyle(FlyoutSwitchStyle())
+                SettingRow(title: tx("Show upcoming events", "Mostrar próximos eventos"), caption: tx("Read events from the accounts configured on this Mac.", "Lee los eventos de las cuentas configuradas en este Mac.")) {
+                    Toggle(tx("Show upcoming events", "Mostrar próximos eventos"), isOn: $store.config.calendarEnabled).labelsHidden().toggleStyle(FlyoutSwitchStyle())
                 }
                 RowDivider()
-                SettingRow(title: "Join button", caption: "Show a Join button in the bar for meetings with a Meet, Zoom, Teams or Webex link, from 5 minutes before they start.") {
-                    Toggle("Join button", isOn: $store.config.calendarJoinEnabled).labelsHidden().toggleStyle(FlyoutSwitchStyle()).disabled(!store.config.calendarEnabled)
+                SettingRow(title: tx("Join button", "Botón Unirse"), caption: tx("Show a Join button in the bar for meetings with a Meet, Zoom, Teams or Webex link, from 5 minutes before they start.", "Muestra un botón Unirse en la barra para las reuniones con enlace de Meet, Zoom, Teams o Webex, desde 5 minutos antes de que empiecen.")) {
+                    Toggle(tx("Join button", "Botón Unirse"), isOn: $store.config.calendarJoinEnabled).labelsHidden().toggleStyle(FlyoutSwitchStyle()).disabled(!store.config.calendarEnabled)
                 }
                 RowDivider()
-                SettingRow(title: "Upcoming range", caption: "Ongoing events are included.") {
-                    Picker("Upcoming range", selection: $store.config.calendarDays) {
-                        ForEach([1, 3, 7, 14], id: \.self) { Text("\($0) \($0 == 1 ? "day" : "days")").tag($0) }
+                SettingRow(title: tx("Upcoming range", "Rango de próximos eventos"), caption: tx("Ongoing events are included.", "Se incluyen los eventos en curso.")) {
+                    Picker(tx("Upcoming range", "Rango de próximos eventos"), selection: $store.config.calendarDays) {
+                        ForEach([1, 3, 7, 14], id: \.self) { Text("\($0) " + ($0 == 1 ? tx("day", "día") : tx("days", "días"))).tag($0) }
                     }.labelsHidden().frame(width: 125).disabled(!store.config.calendarEnabled)
                 }
             }
@@ -172,12 +172,12 @@ struct CalendarSettingsPane: View {
                 if store.config.calendarEnabled {
                     CalendarPermissionView(agenda: agenda) { agenda.open(config: store.config) }
                 } else {
-                    Text("Upcoming events are disabled.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(tx("Upcoming events are disabled.", "Los próximos eventos están desactivados.")).font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }.padding(.horizontal, 4)
             if store.config.calendarEnabled && agenda.permission == .granted {
                 if sources.isEmpty {
-                    Text("No calendars found. Add an account or enable Calendars in Internet Accounts.")
+                    Text(tx("No calendars found. Add an account or enable Calendars in Internet Accounts.", "No se encontraron calendarios. Añade una cuenta o activa Calendarios en Cuentas de Internet."))
                         .font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 4)
                 }
                 ForEach(sources, id: \.id) { source in
@@ -199,8 +199,8 @@ struct CalendarSettingsPane: View {
                 }
             }
             VStack(alignment: .leading, spacing: 8) {
-                Button("Add account… (Google, iCloud, Exchange)", action: CalendarNavigation.addAccount)
-                Text("Add your Google accounts there and enable Calendars; they appear here automatically.")
+                Button(tx("Add account… (Google, iCloud, Exchange)", "Añadir cuenta… (Google, iCloud, Exchange)"), action: CalendarNavigation.addAccount)
+                Text(tx("Add your Google accounts there and enable Calendars; they appear here automatically.", "Añade ahí tus cuentas de Google y activa Calendarios; aparecerán aquí automáticamente."))
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }.padding(.horizontal, 4)
         }

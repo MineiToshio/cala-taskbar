@@ -18,9 +18,9 @@ struct PreviewView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !AXIsProcessTrusted() {
-                note("Falta el permiso de Accesibilidad")
+                note(tx("Accessibility permission is missing", "Falta el permiso de Accesibilidad"))
             } else if !CGPreflightScreenCaptureAccess() {
-                note("Falta el permiso de Grabación de pantalla")
+                note(tx("Screen Recording permission is missing", "Falta el permiso de Grabación de pantalla"))
             }
             if pm.windows.isEmpty {
                 HStack(spacing: 8) {
@@ -61,7 +61,7 @@ struct WindowCard: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Image(nsImage: icon).resizable().frame(width: 20, height: 20)
-                Text(w.title.isEmpty ? "Sin título" : w.title)
+                Text(w.title.isEmpty ? tx("Untitled", "Sin título") : w.title)
                     .font(.system(size: 14, weight: .medium)).lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Image(systemName: "xmark")

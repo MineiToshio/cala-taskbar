@@ -8,9 +8,9 @@ enum TrayPlace: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .bar: return "En la barra"
-        case .more: return "En  ^"
-        case .hidden: return "Oculto"
+        case .bar: return tx("In the bar", "En la barra")
+        case .more: return tx("In  ^", "En  ^")
+        case .hidden: return tx("Hidden", "Oculto")
         }
     }
 }
@@ -25,18 +25,18 @@ struct TrayItemInfo {
 enum TrayItems {
     /// Default left-to-right order.
     static let all: [TrayItemInfo] = [
-        TrayItemInfo(id: trayKB, title: "Teclado", symbol: "keyboard", defaultPlace: .more),
+        TrayItemInfo(id: trayKB, title: tx("Keyboard", "Teclado"), symbol: "keyboard", defaultPlace: .more),
         TrayItemInfo(id: trayWifi, title: "Wi-Fi", symbol: "wifi", defaultPlace: .bar),
         TrayItemInfo(id: trayBT, title: "Bluetooth", symbol: "dot.radiowaves.right", defaultPlace: .more),
-        TrayItemInfo(id: trayBright, title: "Brillo", symbol: "sun.max.fill", defaultPlace: .more),
-        TrayItemInfo(id: trayVol, title: "Volumen", symbol: "speaker.wave.2.fill", defaultPlace: .bar),
-        TrayItemInfo(id: trayUsage, title: "Claude y Codex", symbol: "chart.bar.fill", defaultPlace: .bar),
-        TrayItemInfo(id: traySystem, title: "CPU y memoria", symbol: "cpu", defaultPlace: .bar),
-        TrayItemInfo(id: trayDisk, title: "Disco", symbol: "internaldrive", defaultPlace: .bar),
-        TrayItemInfo(id: trayBatt, title: "Batería", symbol: "battery.75", defaultPlace: .bar),
-        TrayItemInfo(id: trayUser, title: "Usuario", symbol: "person.crop.circle", defaultPlace: .more),
-        TrayItemInfo(id: trayDownloads, title: "Descargas", symbol: "arrow.down.circle", defaultPlace: .more),
-        TrayItemInfo(id: trayTrash, title: "Papelera", symbol: "trash", defaultPlace: .more),
+        TrayItemInfo(id: trayBright, title: tx("Brightness", "Brillo"), symbol: "sun.max.fill", defaultPlace: .more),
+        TrayItemInfo(id: trayVol, title: tx("Volume", "Volumen"), symbol: "speaker.wave.2.fill", defaultPlace: .bar),
+        TrayItemInfo(id: trayUsage, title: tx("Claude and Codex", "Claude y Codex"), symbol: "chart.bar.fill", defaultPlace: .bar),
+        TrayItemInfo(id: traySystem, title: tx("CPU and memory", "CPU y memoria"), symbol: "cpu", defaultPlace: .bar),
+        TrayItemInfo(id: trayDisk, title: tx("Disk", "Disco"), symbol: "internaldrive", defaultPlace: .bar),
+        TrayItemInfo(id: trayBatt, title: tx("Battery", "Batería"), symbol: "battery.75", defaultPlace: .bar),
+        TrayItemInfo(id: trayUser, title: tx("User", "Usuario"), symbol: "person.crop.circle", defaultPlace: .more),
+        TrayItemInfo(id: trayDownloads, title: tx("Downloads", "Descargas"), symbol: "arrow.down.circle", defaultPlace: .more),
+        TrayItemInfo(id: trayTrash, title: tx("Trash", "Papelera"), symbol: "trash", defaultPlace: .more),
     ]
     static func info(_ id: String) -> TrayItemInfo? { all.first { $0.id == id } }
 }

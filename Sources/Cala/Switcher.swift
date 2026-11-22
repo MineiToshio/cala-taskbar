@@ -22,7 +22,7 @@ struct SwitcherCard: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 if let icon { Image(nsImage: icon).resizable().frame(width: 18, height: 18) }
-                Text(w.title.isEmpty ? "Sin título" : w.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                Text(w.title.isEmpty ? tx("Untitled", "Sin título") : w.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
                 Spacer(minLength: 0)
             }
             .frame(width: 196)

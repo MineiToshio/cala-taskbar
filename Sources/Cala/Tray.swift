@@ -128,7 +128,7 @@ enum Bluetooth {
     }
     static func devices() -> [(name: String, addr: String, connected: Bool)] {
         let d = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
-        return d.map { ($0.name ?? $0.addressString ?? "Dispositivo", $0.addressString ?? "", $0.isConnected()) }
+        return d.map { ($0.name ?? $0.addressString ?? tx("Device", "Dispositivo"), $0.addressString ?? "", $0.isConnected()) }
     }
     static func toggle(addr: String) {
         DispatchQueue.main.async {

@@ -203,7 +203,7 @@ enum Cleanup {
         for path in g.children + [g.path] {
             let r = Git.run(["-C", g.repoRoot, "worktree", "remove", path], timeout: 600)
             if r.status != 0 {
-                let line = r.err.split(separator: "\n").first.map(String.init) ?? "git worktree remove failed"
+                let line = r.err.split(separator: "\n").first.map(String.init) ?? tx("git worktree remove failed", "falló git worktree remove")
                 return (path as NSString).lastPathComponent + ": " + line
             }
         }

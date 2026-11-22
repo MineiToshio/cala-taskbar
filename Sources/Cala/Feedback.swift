@@ -197,10 +197,10 @@ enum CrashReporter {
             default:
                 let alert = NSAlert()
                 alert.alertStyle = .informational
-                alert.messageText = "Cala se cerró inesperadamente la última vez"
-                alert.informativeText = "¿Quieres ayudar a arreglarlo enviando un informe? Antes verás exactamente qué se envía y podrás cancelar. No incluye tus archivos, ventanas ni contraseñas."
-                alert.addButton(withTitle: "Ver y enviar…")
-                alert.addButton(withTitle: "No enviar")
+                alert.messageText = tx("Cala closed unexpectedly last time", "Cala se cerró inesperadamente la última vez")
+                alert.informativeText = tx("Want to help fix it by sending a report? You will see exactly what is sent first and can cancel. It does not include your files, windows or passwords.", "¿Quieres ayudar a arreglarlo enviando un informe? Antes verás exactamente qué se envía y podrás cancelar. No incluye tus archivos, ventanas ni contraseñas.")
+                alert.addButton(withTitle: tx("Review and send…", "Ver y enviar…"))
+                alert.addButton(withTitle: tx("Don't send", "No enviar"))
                 NSApp.activate(ignoringOtherApps: true)
                 if alert.runModal() == .alertFirstButtonReturn { FeedbackWindowController.shared.show(crash: crash) }
             }
@@ -224,7 +224,7 @@ final class FeedbackWindowController {
         let w = NSWindow(contentViewController: controller)
         w.styleMask = [.titled, .closable]
         w.isReleasedWhenClosed = false
-        w.title = "Cala · Reportar un problema"
+        w.title = tx("Cala · Report a problem", "Cala · Reportar un problema")
         w.center()
         window = w
         NSApp.activate(ignoringOtherApps: true)
@@ -266,14 +266,14 @@ struct FeedbackView: View {
     private var fields: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(crash != nil ? "¿Qué estabas haciendo? (opcional)" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12.5, weight: .medium))
+                Text(crash != nil ? tx("What were you doing? (optional)", "¿Qué estabas haciendo? (opcional)") : tx("What happened? What did you expect to happen?", "¿Qué pasó? ¿Qué esperabas que pasara?")).font(.system(size: 12.5, weight: .medium))
                 TextEditor(text: $message)
                     .font(.system(size: 13)).scrollContentBackground(.hidden)
                     .padding(6).frame(height: crash != nil ? 56 : 110).fieldBox()
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text("Tu correo (opcional, solo para poder responderte)").font(.system(size: 12.5, weight: .medium))
-                TextField("nombre@correo.com", text: $email)
+                Text(tx("Your email (optional, only so we can reply)", "Tu correo (opcional, solo para poder responderte)")).font(.system(size: 12.5, weight: .medium))
+                TextField(tx("name@email.com", "nombre@correo.com"), text: $email)
                     .textFieldStyle(.plain).font(.system(size: 13))
                     .padding(.horizontal, 10).padding(.vertical, 8).fieldBox()
             }
@@ -283,30 +283,30 @@ struct FeedbackView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(crash != nil ? "Cala se cerró inesperadamente" : "Reportar un problema").font(.system(size: 20, weight: .semibold))
+                Text(crash != nil ? tx("Cala closed unexpectedly", "Cala se cerró inesperadamente") : tx("Report a problem", "Reportar un problema")).font(.system(size: 20, weight: .semibold))
                 Text(Telemetry.isConfigured
-                     ? (crash != nil ? "No tienes que escribir nada: el informe ya incluye el fallo y lo que Cala estaba haciendo justo antes. Antes de enviar puedes ver exactamente qué se incluye."
-                                     : "Lo que escribas llega a quien desarrolla Cala. Antes de enviar puedes ver exactamente qué se incluye.")
-                     : "El envío de informes no está activado en esta versión de Cala.")
+                     ? (crash != nil ? tx("You don't have to write anything: the report already includes the crash and what Cala was doing right before it. Before sending you can see exactly what is included.", "No tienes que escribir nada: el informe ya incluye el fallo y lo que Cala estaba haciendo justo antes. Antes de enviar puedes ver exactamente qué se incluye.")
+                                     : tx("What you write goes to whoever develops Cala. Before sending you can see exactly what is included.", "Lo que escribas llega a quien desarrolla Cala. Antes de enviar puedes ver exactamente qué se incluye."))
+                     : tx("Sending reports is not enabled in this version of Cala.", "El envío de informes no está activado en esta versión de Cala."))
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if crash == nil {
                 Picker("", selection: $kind) {
-                    Text("Algo falla").tag(Telemetry.Kind.problem)
-                    Text("Sugerencia").tag(Telemetry.Kind.suggestion)
-                    Text("Otro").tag(Telemetry.Kind.other)
+                    Text(tx("Something is wrong", "Algo falla")).tag(Telemetry.Kind.problem)
+                    Text(tx("Suggestion", "Sugerencia")).tag(Telemetry.Kind.suggestion)
+                    Text(tx("Other", "Otro")).tag(Telemetry.Kind.other)
                 }.pickerStyle(.segmented).labelsHidden()
             }
             if crash != nil {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Opcional: ayúdanos con más contexto").font(.system(size: 13, weight: .semibold))
-                    Text("Puedes dejar todo en blanco y pulsar Enviar: el informe ya está completo.")
+                    Text(tx("Optional: help us with more context", "Opcional: ayúdanos con más contexto")).font(.system(size: 13, weight: .semibold))
+                    Text(tx("You can leave everything blank and press Send: the report is already complete.", "Puedes dejar todo en blanco y pulsar Enviar: el informe ya está completo."))
                         .font(.system(size: 11.5)).foregroundStyle(.secondary)
                 }
             }
             fields
             if crash == nil {
-                Toggle("Incluir información técnica (recomendado)", isOn: $includeDiagnostics).font(.system(size: 12.5))
+                Toggle(tx("Include technical information (recommended)", "Incluir información técnica (recomendado)"), isOn: $includeDiagnostics).font(.system(size: 12.5))
             }
             DisclosureGroup(isExpanded: $showPreview) {
                 ScrollView {
@@ -315,16 +315,16 @@ struct FeedbackView: View {
                 }
                 .frame(height: 170).background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
             } label: {
-                Text("Ver exactamente qué se envía").font(.system(size: 12, weight: .medium))
+                Text(tx("See exactly what is sent", "Ver exactamente qué se envía")).font(.system(size: 12, weight: .medium))
             }
-            Text("Se quitan tu carpeta personal, tu nombre de usuario, el nombre del Mac y las direcciones de correo del texto técnico. No se envían los títulos de tus ventanas, tus archivos ni tus credenciales.")
+            Text(tx("Your home folder, user name, Mac name and email addresses are removed from the technical text. Your window titles, files and credentials are not sent.", "Se quitan tu carpeta personal, tu nombre de usuario, el nombre del Mac y las direcciones de correo del texto técnico. No se envían los títulos de tus ventanas, tus archivos ni tus credenciales."))
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if !status.isEmpty { Text(status).font(.system(size: 12)).foregroundStyle(sent ? Color.green : Color.orange).fixedSize(horizontal: false, vertical: true) }
             HStack {
                 Spacer()
-                Button(sent ? "Cerrar" : "Cancelar") { close() }.keyboardShortcut(.cancelAction)
+                Button(sent ? tx("Close", "Cerrar") : tx("Cancel", "Cancelar")) { close() }.keyboardShortcut(.cancelAction)
                 if !sent {
-                    Button(sending ? "Enviando…" : "Enviar") { send() }
+                    Button(sending ? tx("Sending…", "Enviando…") : tx("Send", "Enviar")) { send() }
                         .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                         .disabled(!canSend || !Telemetry.isConfigured)
                 }
@@ -346,7 +346,7 @@ struct FeedbackView: View {
                        extras: crash.map { CrashSummary.payload($0.text) } ?? [:]) { out in
             sending = false
             sent = out.ok
-            status = out.ok ? "Enviado. ¡Gracias! Esto ayuda a mejorar Cala." : "No se pudo enviar (\(out.detail)). Revisa tu conexión e inténtalo de nuevo."
+            status = out.ok ? tx("Sent. Thank you! This helps improve Cala.", "Enviado. ¡Gracias! Esto ayuda a mejorar Cala.") : tx("Could not send (\(out.detail)). Check your connection and try again.", "No se pudo enviar (\(out.detail)). Revisa tu conexión e inténtalo de nuevo.")
             log("feedback: sent kind=\(effectiveKind.rawValue) ok=\(out.ok)")
         }
     }

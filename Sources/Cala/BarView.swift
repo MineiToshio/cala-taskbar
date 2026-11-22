@@ -152,6 +152,7 @@ struct StartButton: View {
             .frame(width: 40)
             .frame(maxHeight: .infinity)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(hovering ? 0.08 : 0)).padding(.vertical, 3))
+            .accessibilityLabel(tx("All apps", "Todas las apps"))
     }
 }
 
@@ -271,6 +272,7 @@ struct TrayView: View {
         .padding(.horizontal, 8)
         .frame(maxHeight: .infinity)
         .background(TrayHighlight(hovering: model.trayHover == id))
+        .accessibilityLabel(id == trayMore ? tx("More", "Más") : (TrayItems.info(id)?.title ?? ""))
         .reportFrame(id)
     }
 }
@@ -290,7 +292,7 @@ struct UsageTrayView: View {
                         let remaining = state.remaining(context.date)
                         VStack(spacing: 3) {
                             ProviderMark(provider: state.provider).frame(width: 14, height: 14)
-                            Text(remaining.map { "\($0)%" } ?? "n/a")
+                            Text(remaining.map { "\($0)%" } ?? tx("n/a", "n/d"))
                                 .font(.system(size: 9.5, weight: .medium)).monospacedDigit().lineLimit(1)
                         }
                         .foregroundStyle(usageColor(remaining, dark: scheme == .dark))
@@ -300,9 +302,9 @@ struct UsageTrayView: View {
                 .padding(.horizontal, 9).frame(maxHeight: .infinity)
                 .background(TrayHighlight(hovering: model.trayHover == trayUsage))
                 .contentShape(Rectangle())
-                .help("Claude and Codex · remaining plan usage")
+                .help(tx("Claude and Codex · remaining plan usage", "Claude y Codex · uso restante del plan"))
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(states.map { $0.provider.title + " " + ($0.remaining(context.date).map { "\($0)% left" } ?? "unavailable") }.joined(separator: ", "))
+                .accessibilityLabel(states.map { $0.provider.title + " " + ($0.remaining(context.date).map { tx("\($0)% left", "\($0)% restante") } ?? tx("unavailable", "no disponible")) }.joined(separator: ", "))
                 .accessibilityAddTraits(.isButton)
                 .reportFrame(trayUsage)
             }
