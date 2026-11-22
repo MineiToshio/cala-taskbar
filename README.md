@@ -43,7 +43,7 @@ Gratis · Sin cuentas · Nada sale de tu Mac · macOS 14 o más nuevo · Apple s
 
 ## Instalar
 
-### La forma más rápida (sin avisos de macOS)
+### Opción 1: con un comando (recomendada, sin avisos de macOS)
 
 Abre **Terminal** (búscala con Spotlight: ⌘ + Espacio, "Terminal"), pega esta línea y pulsa Enter:
 
@@ -51,9 +51,9 @@ Abre **Terminal** (búscala con Spotlight: ⌘ + Espacio, "Terminal"), pega esta
 curl -fsSL https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh | bash
 ```
 
-Descarga la última versión, comprueba que el archivo es el publicado aquí (SHA-256), instala Cala en Aplicaciones y la abre. Como no pasa por el navegador, macOS no la bloquea. Sirve también para **actualizar**, y tus ajustes se conservan. Puedes [leer el script](scripts/get-cala.sh) antes de usarlo.
+Descarga la última versión, comprueba que el archivo es el publicado aquí (SHA-256), instala Cala en Aplicaciones y la abre. Como no pasa por el navegador, macOS no la bloquea. Sirve también para **actualizar**, y tus ajustes se conservan. Puedes [leer el script](scripts/get-cala.sh) antes de usarlo. Luego sigue la bienvenida de Cala.
 
-### Descargando el archivo
+### Opción 2: descargando el archivo
 
 1. **Descarga** `Cala-x.y.z.dmg` desde [Releases](https://github.com/MineiToshio/cala-taskbar/releases/latest).
 2. **Ábrelo** y arrastra **Cala** a la carpeta **Aplicaciones**.
