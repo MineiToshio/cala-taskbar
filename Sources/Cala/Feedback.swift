@@ -150,7 +150,8 @@ enum CrashReporter {
                 guard Telemetry.isConfigured else { return }
                 let ctx = DiagnosticReport.context(store.config)
                 Telemetry.send(kind: .crash, message: "Cala closed unexpectedly", email: nil, tags: [:], contexts: ctx,
-                               attachments: [.init(filename: "crash.ips", text: crash.text), .init(filename: "diagnostics.txt", text: DiagnosticReport.text(config: store.config))]) { out in
+                               attachments: [.init(filename: "crash.ips", text: crash.text), .init(filename: "diagnostics.txt", text: DiagnosticReport.text(config: store.config))],
+                               extras: CrashSummary.payload(crash.text)) { out in
                     log("feedback: crash report auto-sent ok=\(out.ok)")
                 }
             default:
@@ -286,7 +287,8 @@ struct FeedbackView: View {
         let note = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = note.isEmpty ? "(sin descripción)" : Redactor.clean(note)
         Telemetry.send(kind: effectiveKind, message: text, email: email.trimmingCharacters(in: .whitespaces), tags: [:],
-                       contexts: DiagnosticReport.context(config), attachments: attachments) { out in
+                       contexts: DiagnosticReport.context(config), attachments: attachments,
+                       extras: crash.map { CrashSummary.payload($0.text) } ?? [:]) { out in
             sending = false
             sent = out.ok
             status = out.ok ? "Enviado. ¡Gracias! Esto ayuda a mejorar Cala." : "No se pudo enviar (\(out.detail)). Revisa tu conexión e inténtalo de nuevo."

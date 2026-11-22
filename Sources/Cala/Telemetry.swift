@@ -46,7 +46,7 @@ enum Telemetry {
 
     /// Builds the envelope: a header line, then each item as a header line plus its payload.
     static func envelope(dsn: String, kind: Kind, message: String, email: String?, tags: [String: String],
-                         contexts: [String: Any], attachments: [Attachment], now: Date = Date(), eventID: String = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()) -> Data {
+                         contexts: [String: Any], attachments: [Attachment], extras: [String: Any] = [:], now: Date = Date(), eventID: String = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()) -> Data {
         var body = Data()
         func line(_ d: Data) { body.append(d); body.append(10) }
         let stamp = ISO8601DateFormatter().string(from: now)
@@ -59,6 +59,7 @@ enum Telemetry {
             payload["level"] = "fatal"
             payload["message"] = message
             payload["contexts"] = ctx
+            for (k, v) in extras { payload[k] = v }       // exception + fingerprint from the parsed crash report
             let item = json(payload)
             line(json(["type": "event", "length": item.count])); line(item)
         } else {
@@ -81,7 +82,7 @@ enum Telemetry {
 
     /// Calls back on the main thread.
     static func send(kind: Kind, message: String, email: String?, tags: [String: String], contexts: [String: Any],
-                     attachments: [Attachment], done: @escaping (Outcome) -> Void) {
+                     attachments: [Attachment], extras: [String: Any] = [:], done: @escaping (Outcome) -> Void) {
         guard let dsn, let url = endpoint(for: dsn) else {
             DispatchQueue.main.async { done(Outcome(ok: false, detail: "not configured")) }
             return
@@ -91,7 +92,7 @@ enum Telemetry {
         request.setValue("application/x-sentry-envelope", forHTTPHeaderField: "Content-Type")
         request.setValue("Sentry sentry_version=7, sentry_client=cala/\(appVersion()), sentry_key=\(key(of: dsn))", forHTTPHeaderField: "X-Sentry-Auth")
         request.setValue("Cala/\(appVersion())", forHTTPHeaderField: "User-Agent")
-        request.httpBody = envelope(dsn: dsn, kind: kind, message: message, email: email, tags: tags, contexts: contexts, attachments: attachments)
+        request.httpBody = envelope(dsn: dsn, kind: kind, message: message, email: email, tags: tags, contexts: contexts, attachments: attachments, extras: extras)
         URLSession.shared.dataTask(with: request) { _, response, error in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             DispatchQueue.main.async {

@@ -16,6 +16,7 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `TrayLayout.swift` | Tray item catalog, defaults, and the bar / ^ / hidden placement and ordering stored in `Config` |
 | `Overflow.swift` | "^" panel, Downloads panel, Trash (through Finder AppleScript) and the `flyoutRefit` notification |
 | `Telemetry.swift` | Sentry envelope transport (no SDK): DSN from Info.plist, feedback and crash events with attachments |
+| `CrashSummary.swift` | Parses a macOS `.ips` crash report into a Sentry exception, stack frames and a grouping fingerprint |
 | `Feedback.swift` | Redaction, diagnostics text, crash-report detection at launch and the "Reportar un problema" window |
 | `Cleanup.swift` | "Limpiar espacio" window: git worktree discovery and safety checks (`/usr/bin/git`, `lsof`), cache emptying, confirmation and removal |
 | `Disk.swift` | Free-space reading (`DiskInfo`), background folder sizing (`DiskService`), tray storage panel |
