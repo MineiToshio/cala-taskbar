@@ -12,6 +12,9 @@ final class FlyoutModel: ObservableObject {
     @Published var availableHeight: CGFloat = 700
     /// The pane was opened from the "^" overflow panel, so it shows a back button.
     @Published var fromMore = false
+    /// Tallest height this pane has had since it was opened. The panel keeps it, so switching to a shorter page does
+    /// not pull the panel out from under the pointer (that made the bar auto-hide and the panel vanish).
+    @Published var minHeight: CGFloat = 0
 }
 
 struct Row: View {
@@ -117,6 +120,7 @@ struct FlyoutView: View {
         .id(fm.token)
         .padding(18)
         .frame(width: fm.kind.hasPrefix("__t_usage_") || fm.kind == trayClock || fm.kind == trayDisk || fm.kind == traySystem ? 380 : 316)
+        .frame(minHeight: fm.minHeight, alignment: .top)
         .flyoutControls()
         .themedPanel()
         .fixedSize()
@@ -305,6 +309,7 @@ final class FlyoutController {
         }
         observers.append(NotificationCenter.default.addObserver(forName: .flyoutHide, object: nil, queue: .main) { [weak self] _ in self?.hide() })
         kindObserver = fm.$kind.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] _ in
+            self?.fm.minHeight = 0
             DispatchQueue.main.async { if self?.panel.isVisible == true { self?.refit() } }
         }
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -322,6 +327,7 @@ final class FlyoutController {
         fm.availableHeight = max(300, screen.visibleFrame.height - 90)
         if kind == trayDisk { DiskService.shared.refresh(extra: ConfigStore.shared.config.diskFolders) }
         fm.fromMore = false
+        fm.minHeight = 0
         fm.kind = kind; fm.token += 1
         refit()
         panel.makeKeyAndOrderFront(nil)
@@ -330,6 +336,7 @@ final class FlyoutController {
     func refit() {
         host.layoutSubtreeIfNeeded()
         let s = host.fittingSize
+        if s.height > fm.minHeight { fm.minHeight = s.height }
         var x = centerX - s.width / 2
         x = max(screenFrame.minX + 8, min(x, screenFrame.maxX - s.width - 8))
         let r = NSRect(x: x, y: barTop + 6, width: s.width, height: s.height)

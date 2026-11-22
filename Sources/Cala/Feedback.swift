@@ -214,7 +214,8 @@ final class FeedbackWindowController {
     func show(crash: CrashReporter.Crash? = nil) {
         log("feedback: opening window (crash=\(crash != nil))")
         window?.close()
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+        let height: CGFloat = crash != nil ? 500 : 640
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: height),
                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
         w.title = "Cala · Reportar un problema"
@@ -223,8 +224,8 @@ final class FeedbackWindowController {
             .frame(maxWidth: .infinity, maxHeight: .infinity))
         host.sizingOptions = []
         w.contentView = host
-        w.contentMinSize = NSSize(width: 520, height: 560)
-        w.setContentSize(NSSize(width: 560, height: 640))
+        w.contentMinSize = NSSize(width: 520, height: crash != nil ? 460 : 560)
+        w.setContentSize(NSSize(width: 560, height: height))
         w.center()
         window = w
         NSApp.activate(ignoringOtherApps: true)
@@ -267,7 +268,7 @@ struct FeedbackView: View {
                 Text(crash != nil ? "¿Qué estabas haciendo? (opcional)" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12.5, weight: .medium))
                 TextEditor(text: $message)
                     .font(.system(size: 13)).scrollContentBackground(.hidden)
-                    .padding(6).frame(minHeight: crash != nil ? 48 : 90).fieldBox()
+                    .padding(6).frame(height: crash != nil ? 56 : 110).fieldBox()
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Tu correo (opcional, solo para poder responderte)").font(.system(size: 12.5, weight: .medium))
