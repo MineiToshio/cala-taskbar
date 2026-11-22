@@ -167,11 +167,34 @@ struct LoadDetailLayout {
     }
 }
 
+enum ProcessReadingAvailability: Equatable {
+    case fresh, remembered, missing
+
+    init(capturedAt: TimeInterval, observedAt: TimeInterval, openedAt: TimeInterval) {
+        let age = observedAt - capturedAt
+        if !(0...ProcessReading.cacheAge).contains(age) {
+            self = .missing
+        } else if capturedAt >= openedAt && age < ProcessReading.maxAge {
+            self = .fresh
+        } else {
+            self = .remembered
+        }
+    }
+}
+
+/// Memory footprints are available from a single process scan.
+struct ProcessInventory {
+    let capturedAt: TimeInterval
+    let loads: [AppLoad]
+    let processes: [MeasuredProcess]
+}
+
 /// A complete process window. Small sampling skew is handled by the CPU breakdown;
 /// larger discrepancies are rejected before any of these values reach the panel.
 struct ProcessReading {
     static let samplingInterval: TimeInterval = 2
     static let maxAge: TimeInterval = 2 * samplingInterval
+    static let cacheAge: TimeInterval = 30
 
     let capturedAt: TimeInterval
     let cpuWindow: Double
@@ -197,6 +220,10 @@ struct ProcessReading {
 
     var expiresAt: TimeInterval { capturedAt + Self.maxAge }
 
+    var inventory: ProcessInventory {
+        ProcessInventory(capturedAt: capturedAt, loads: loads, processes: processes)
+    }
+
     func isFresh(at now: TimeInterval) -> Bool {
         now >= capturedAt && now < expiresAt
     }
@@ -217,10 +244,33 @@ struct LoadSnapshot {
     var thermal: ProcessInfo.ThermalState
     var criticalThermalMinutes = 0.0
     var lowPower: Bool
+    var lastInventory: ProcessInventory? = nil
+    var processSessionStartedAt: TimeInterval = -.infinity
+
+    func processAvailability(capturedAt: TimeInterval) -> ProcessReadingAvailability {
+        ProcessReadingAvailability(capturedAt: capturedAt, observedAt: observedAt, openedAt: processSessionStartedAt)
+    }
+
+    var cpuAvailability: ProcessReadingAvailability {
+        lastReading.map { processAvailability(capturedAt: $0.capturedAt) } ?? .missing
+    }
 
     var reading: ProcessReading? {
-        guard let lastReading, lastReading.isFresh(at: observedAt) else { return nil }
-        return lastReading
+        cpuAvailability == .fresh ? lastReading : nil
+    }
+
+    func canUseProcessActions(capturedAt: TimeInterval) -> Bool {
+        reading?.capturedAt == capturedAt
+    }
+
+    var displayedReading: ProcessReading? {
+        cpuAvailability == .missing ? nil : lastReading
+    }
+
+    var displayedInventory: ProcessInventory? {
+        guard let inventory = lastInventory ?? lastReading?.inventory,
+              processAvailability(capturedAt: inventory.capturedAt) != .missing else { return nil }
+        return inventory
     }
 
     var cpuWindow: Double? { reading?.cpuWindow }
@@ -417,7 +467,7 @@ enum SystemRules {
             detail = nil
         case .measuring(let min):
             title = tr("Busy for \(min) min", "Lleva \(min) min muy ocupado")
-            detail = nil
+            detail = tr("A new reading will show which apps are using the processor.", "La próxima lectura mostrará qué apps usan el procesador.")
         case .systemLoad:
             title = tr("Cala can’t identify some of the load", "Hay carga que Cala no puede identificar")
             detail = tr("It may be macOS or another account. Wait a few minutes. If it lasts, open Activity Monitor.",
@@ -670,14 +720,14 @@ enum SystemRules {
     }
 
     static func toolDetails(_ row: Breakdown.Row, loads: [AppLoad], metric: LoadMetric, lang: String?,
-                            capacity: Int = LoadDetailLayout.maxDetailRows) -> [LoadDetail] {
+                            capacity: Int = LoadDetailLayout.maxDetailRows, allowActions: Bool = true) -> [LoadDetail] {
         let keys = Set(row.loadKeys)
         var groups: [String: DetailGroup] = [:]
         for load in loads where keys.contains(load.key) {
             guard case .tool(_, let launcher, let pid) = load.kind else { continue }
             let id = pid.map { "launcher|\($0)" } ?? "unlaunched"
             let name = launcher ?? calendarText("No launcher", "Sin lanzador", preferredLanguage: lang)
-            let action = launcher.flatMap { name in pid.map { SystemAction.activate(name: name, pid: $0) } }
+            let action = allowActions ? launcher.flatMap { name in pid.map { SystemAction.activate(name: name, pid: $0) } } : nil
             var group = groups[id] ?? DetailGroup(id: id, name: name, count: 0, action: action)
             group.count = (group.count ?? 0) + load.count
             group.weight += metric.weight(load)

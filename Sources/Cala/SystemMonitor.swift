@@ -31,11 +31,12 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var cpuHistory: [Double] = []
     @Published private(set) var memoryHistory: [Double] = []
     @Published private var lastReading: ProcessReading?
+    @Published private var lastInventory: ProcessInventory?
+    @Published private var processSessionStartedAt: TimeInterval = .infinity
     @Published private(set) var restProbe: RestProbe?
 
     var processReading: ProcessReading? {
-        guard let lastReading, lastReading.isFresh(at: samplingTime) else { return nil }
-        return lastReading
+        snapshot().reading
     }
 
     var heaviestClosableLoad: AppLoad? {
@@ -178,7 +179,8 @@ final class SystemMonitor: ObservableObject {
                      busyMinutes: busyMinutes, hotMinutes: hotMinutes, pressure: pressure, pressureMinutes: pressureMinutes,
                      criticalPressureMinutes: criticalPressure.minutes(at: now), memoryUsed: memoryUsed, memoryTotal: memoryTotal,
                      thermal: thermal, criticalThermalMinutes: criticalThermal.minutes(at: now),
-                     lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+                     lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
+                     lastInventory: lastInventory, processSessionStartedAt: processSessionStartedAt)
     }
 
     // MARK: Per-app sampling (panel open)
@@ -186,13 +188,13 @@ final class SystemMonitor: ObservableObject {
     private struct ProcessSample {
         let date: TimeInterval
         let capturedAt: TimeInterval
-        let ticks: CPUTicks
+        let ticks: CPUTicks?
         let cpuNs: [pid_t: (start: UInt64, time: UInt64)]
     }
 
     func sampleProcesses() {
         refreshRest()
-        guard !sampling else { return }
+        guard processSessionStartedAt.isFinite, !sampling else { return }
         sampling = true
         let lastSample = lastProcessSample
         let generation = processGeneration
@@ -206,8 +208,9 @@ final class SystemMonitor: ObservableObject {
         processQueue.async {
             let capturedAt = self.samplingTime
             let now = ProcessInfo.processInfo.systemUptime
-            guard let ticks = Self.readTicks(), let table = Self.processTable() else {
-                DispatchQueue.main.async { self.sampling = false }
+            let ticks = Self.readTicks()
+            guard let table = Self.processTable() else {
+                DispatchQueue.main.async { _ = self.finishProcessScan(generation: generation) }
                 return
             }
 
@@ -216,7 +219,7 @@ final class SystemMonitor: ObservableObject {
                 (0...ProcessReading.maxAge).contains(capturedAt - $0.capturedAt) ? $0 : nil
             }
             let elapsed = previous.map { now - $0.date } ?? 0
-            let delta = previous.map { ticks.since($0.ticks) }
+            let delta = previous?.ticks.flatMap { ticks?.since($0) }
             let cpuWindow = delta.flatMap { ticks in
                 ticks.total > 0 && elapsed > 0 ? Double(ticks.busy) / Double(ticks.total) * 100 : nil
             }
@@ -247,7 +250,7 @@ final class SystemMonitor: ObservableObject {
                 let ns = time / denominator * numerator + time % denominator * numerator / denominator
                 cpuNs[pid] = (start, ns)
                 var cpu = 0.0
-                if let before = previous?.cpuNs[pid], before.start == start, ns >= before.time, elapsed > 0 {
+                if cpuWindow != nil, let before = previous?.cpuNs[pid], before.start == start, ns >= before.time {
                     cpu = Double(ns - before.time) / (elapsed * 1_000_000_000) * 100 / cores
                 }
                 if otherAccount {
@@ -278,9 +281,9 @@ final class SystemMonitor: ObservableObject {
             let sample = ProcessSample(date: now, capturedAt: capturedAt, ticks: ticks, cpuNs: cpuNs)
             let details = (unreadable: unreadable, otherAccounts: otherAccounts, executableNames: executableNames, measured: measured)
             DispatchQueue.main.async {
-                self.sampling = false
-                guard self.processGeneration == generation else { return }
+                guard self.finishProcessScan(generation: generation) else { return }
                 self.lastProcessSample = sample
+                self.lastInventory = ProcessInventory(capturedAt: capturedAt, loads: orderedLoads, processes: details.measured)
                 guard let cpuWindow else { return }
                 let loads = orderedLoads.map { load in
                     var load = load
@@ -297,6 +300,15 @@ final class SystemMonitor: ObservableObject {
                 }
             }
         }
+    }
+
+    private func finishProcessScan(generation: Int) -> Bool {
+        sampling = false
+        guard processGeneration == generation else {
+            sampleProcesses()
+            return false
+        }
+        return true
     }
 
     func setRestExpanded(_ expanded: Bool) {
@@ -359,15 +371,16 @@ final class SystemMonitor: ObservableObject {
 
         let capturedAt = reading.capturedAt
         DispatchQueue.main.asyncAfter(deadline: .now() + (reading.expiresAt - now)) { [weak self] in
-            guard let self, self.lastReading?.capturedAt == capturedAt else { return }
-            self.lastReading = nil
+            guard let self, self.processSessionStartedAt <= capturedAt,
+                  self.lastReading?.capturedAt == capturedAt else { return }
+            self.objectWillChange.send()
         }
     }
 
-    func resetProcessSample() {
+    func setProcessPanelOpen(_ open: Bool) {
         processGeneration += 1
         lastProcessSample = nil
-        lastReading = nil
+        processSessionStartedAt = open ? samplingTime : .infinity
     }
 
     private static func processTable() -> [pid_t: (parent: pid_t, uid: uid_t)]? {
@@ -451,7 +464,9 @@ struct SystemPanelModel {
     var reservation = PanelReservation()
 
     var message: SystemMessage? { SystemRules.message(snapshot) }
-    var isLoading: Bool { snapshot.reading == nil }
+    var showsCPUMeterSkeleton: Bool { cpuHistory.isEmpty && snapshot.displayedReading == nil }
+    var showsMemoryMeterSkeleton: Bool { memoryHistory.isEmpty }
+    var showsCPUSkeleton: Bool { metric == .cpu && snapshot.cpuAvailability == .missing }
 
     var slots: PanelReservation {
         let currentHeight = switch message?.style {
@@ -470,32 +485,45 @@ struct SystemPanelModel {
 
     var metric: LoadMetric { tab == 1 ? .memory : .cpu }
 
-    var cpuValue: Int { Int((snapshot.cpuWindow ?? snapshot.cpuNow).rounded()) }
+    // The number and rows always refer to the same CPU window, even while a previous one is displayed.
+    var cpuValue: Int { Int((snapshot.displayedReading?.cpuWindow ?? snapshot.cpuNow).rounded()) }
 
     var cpuBreakdown: Breakdown? {
-        guard let reading = snapshot.reading else { return nil }
+        guard let reading = snapshot.displayedReading else { return nil }
         return SystemRules.cpuBreakdown(reading.loads, total: reading.cpuWindow, lang: Locale.preferredLanguages.first,
                                         rowLimit: layout.rowLimit)
     }
 
     var breakdown: Breakdown? {
         guard tab == 1 else { return cpuBreakdown }
-        guard let reading = snapshot.reading else { return nil }
-        return SystemRules.memoryBreakdown(reading.loads, used: snapshot.memoryUsed,
+        guard let inventory = snapshot.displayedInventory else { return nil }
+        return SystemRules.memoryBreakdown(inventory.loads, used: snapshot.memoryUsed,
                                            lang: Locale.preferredLanguages.first, locale: .current, rowLimit: layout.rowLimit)
     }
+
+    private var inventory: ProcessInventory? {
+        metric == .cpu ? snapshot.displayedReading?.inventory : snapshot.displayedInventory
+    }
+
+    var listAvailability: ProcessReadingAvailability {
+        inventory.map { snapshot.processAvailability(capturedAt: $0.capturedAt) } ?? .missing
+    }
+
+    private var usableRestProbe: RestProbe? { listAvailability == .fresh ? restProbe : nil }
 
     func detailRows(for row: Breakdown.Row, in breakdown: Breakdown) -> [LoadDetail] {
         let lang = Locale.preferredLanguages.first
         let layout = detailLayout(for: row, in: breakdown)
+        guard let inventory else { return [] }
         if row.isRest {
             let ps: [ProcessUsage]?
-            if case .available(let samples) = restProbe { ps = samples } else { ps = nil }
-            return SystemRules.restDetails(row, breakdown: breakdown, loads: snapshot.loads,
-                                           measured: snapshot.reading?.processes ?? [], ps: ps, metric: metric,
+            if case .available(let samples) = usableRestProbe { ps = samples } else { ps = nil }
+            return SystemRules.restDetails(row, breakdown: breakdown, loads: inventory.loads,
+                                           measured: inventory.processes, ps: ps, metric: metric,
                                            currentUID: currentUID, cores: cores, lang: lang, capacity: layout.capacity)
         }
-        return SystemRules.toolDetails(row, loads: snapshot.loads, metric: metric, lang: lang, capacity: layout.capacity)
+        return SystemRules.toolDetails(row, loads: inventory.loads, metric: metric, lang: lang, capacity: layout.capacity,
+                                       allowActions: snapshot.canUseProcessActions(capturedAt: inventory.capturedAt))
     }
 
     func detailLayout(for row: Breakdown.Row, in breakdown: Breakdown) -> LoadDetailLayout {
@@ -503,7 +531,7 @@ struct SystemPanelModel {
     }
 
     var restNote: String {
-        if case .available(let samples) = restProbe,
+        if case .available(let samples) = usableRestProbe,
            samples.contains(where: { $0.uid < 500 && (metric == .cpu ? $0.cpu != nil : $0.memory != nil) }) {
             return calendarText("Estimated breakdown", "Reparto aproximado")
         }
@@ -546,7 +574,7 @@ struct SystemPane: View {
         let snapshot = m.snapshot()
         let model = panelModel(snapshot)
         let message = model.message
-        let restIsExpanded = page == .main && expandedKey == "rest"
+        let restIsExpanded = page == .main && expandedKey == "rest" && model.listAvailability == .fresh
             && model.breakdown?.rows.contains(where: \.isRest) == true
         let signature = LayoutSignature(page: page, kind: message?.kind, style: message?.style,
                                         maintenance: model.maintenance != nil, expanded: reservesExpandedHeight,
@@ -573,9 +601,12 @@ struct SystemPane: View {
         }
         .onChange(of: model.slots, initial: true) { _, slots in reservation = slots }
         .onChange(of: restIsExpanded) { _, expanded in m.setRestExpanded(expanded) }
-        .onDisappear { m.setRestExpanded(false) }
+        .onDisappear {
+            m.setRestExpanded(false)
+            m.setProcessPanelOpen(false)
+        }
         .onAppear {
-            m.resetProcessSample()
+            m.setProcessPanelOpen(true)
             m.tick()
             tab = SystemPanelModel.initialTab(m.snapshot())
             m.sampleProcesses()
@@ -601,7 +632,6 @@ struct SystemPane: View {
     private func toggleExpansion(_ row: Breakdown.Row) {
         expandedKey = expandedKey == row.key ? nil : row.key
         reservesExpandedHeight = true
-        m.setRestExpanded(expandedKey == "rest")
     }
 
     private func performDetail(_ action: SystemAction, from displayed: LoadSnapshot) {
@@ -651,21 +681,14 @@ struct SystemPanelView: View {
         let layout = model.layout
         let retainedHeight = CGFloat(layout.expandedListHeight)
         let foldedHeight = CGFloat(SystemPanelLayout.height(forRows: max(1, rows.count)))
-        let loadingExpanded = model.isLoading && model.expandedKey != nil && model.reservesExpandedHeight
+        let loadingExpanded = model.expandedKey != nil && model.reservesExpandedHeight && expanded == nil
         let retainedAfterFold = model.reservesExpandedHeight && expanded == nil && !loadingExpanded
-        let contentHeight = model.isLoading ? CGFloat(layout.listHeight) : foldedHeight
+        let contentHeight = breakdown == nil ? CGFloat(layout.listHeight) : foldedHeight
         let listHeight = expanded != nil || loadingExpanded ? retainedHeight
             : (retainedAfterFold ? contentHeight : CGFloat(layout.listHeight))
         VStack(alignment: .leading, spacing: 10) {
             header(SystemRules.level(s))
-            if model.isLoading {
-                SystemLoadingPulse {
-                    meters(s)
-                }
-                .accessibilityHidden(true)
-            } else {
-                meters(s)
-            }
+            meters(s)
             if slots.messageHeight > 0 {
                 messageSlot(message, height: CGFloat(slots.messageHeight))
             }
@@ -723,29 +746,18 @@ struct SystemPanelView: View {
         let gigabytes = Int((Double(s.memoryTotal) / 1_073_741_824).rounded())
         return HStack(alignment: .top, spacing: 12) {
             MeterTile(label: calendarText("Processor", "Procesador"), status: cpuText, state: cpu,
-                      strained: cpu == .busy, value: "\(model.cpuValue)%", history: model.cpuHistory, loading: model.isLoading)
+                      strained: cpu == .busy, value: "\(model.cpuValue)%", history: model.cpuHistory,
+                      loading: model.showsCPUMeterSkeleton)
             MeterTile(label: calendarText("Memory", "Memoria"), status: memoryTextLabel, state: memory,
                       strained: s.pressure != .normal, value: memoryText(s.memoryUsed),
                       unit: calendarText("of \(gigabytes) GB", "de \(gigabytes) GB"), history: model.memoryHistory,
-                      loading: model.isLoading)
+                      loading: model.showsMemoryMeterSkeleton)
         }
     }
 
     private func messageSlot(_ message: SystemMessage?, height: CGFloat) -> some View {
         Group {
-            if let message, case .measuring = message.kind {
-                SystemLoadingPulse {
-                    VStack(alignment: .leading, spacing: 7) {
-                        SystemSkeletonMark().frame(width: 180, height: 12)
-                        SystemSkeletonMark().frame(height: 9)
-                        SystemSkeletonMark().frame(width: 240, height: 9)
-                        SystemSkeletonMark().frame(width: 94, height: 15)
-                    }
-                    .padding(10)
-                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
-                }
-                .accessibilityHidden(true)
-            } else if let message, message.style == .card {
+            if let message, message.style == .card {
                 StatusCard(message: message, text: SystemRules.text(message), onAction: onAction)
             } else if height > CGFloat(SystemPanelLayout.noteHeight) {
                 StatusNote(title: calendarText("Better now. Nothing to do.", "Ya está mejor. No hace falta hacer nada."), recovered: true)
@@ -763,8 +775,12 @@ struct SystemPanelView: View {
                            height: CGFloat) -> some View {
         let layout = breakdown.flatMap { data in expanded.map { model.detailLayout(for: $0, in: data) } }
         return VStack(spacing: 6) {
-            HStack {
+            HStack(spacing: 6) {
                 Text(calendarText("What uses the most", "Lo que más usa")).font(.system(size: 12.5, weight: .semibold))
+                if model.listAvailability == .remembered {
+                    Text(calendarText("Previous sample", "Lectura anterior"))
+                        .font(.system(size: 10)).flyoutSecondary().lineLimit(1)
+                }
                 Spacer(minLength: 4)
                 Picker(calendarText("What uses the most", "Lo que más usa"),
                        selection: Binding(get: { model.tab }, set: onTab)) {
@@ -772,11 +788,11 @@ struct SystemPanelView: View {
                     Text(calendarText("Memory", "Memoria")).tag(1)
                 }
                 .pickerStyle(.segmented).labelsHidden().controlSize(.small)
-                .frame(width: 170)
+                .frame(width: 150)
             }
             .frame(height: 22)
             Group {
-                if model.isLoading {
+                if model.showsCPUSkeleton {
                     SystemLoadingPulse {
                         VStack(spacing: CGFloat(SystemPanelLayout.rowSpacing)) {
                             ForEach(0..<model.layout.rowLimit, id: \.self) { index in
@@ -789,7 +805,9 @@ struct SystemPanelView: View {
                 } else {
                     VStack(alignment: .leading, spacing: CGFloat(layout?.spacing ?? SystemPanelLayout.rowSpacing)) {
                         if rows.isEmpty {
-                            Text(calendarText("Nothing noticeable now.", "Nada destacable ahora."))
+                            Text(breakdown == nil
+                                 ? calendarText("Waiting for the first memory reading.", "Aún no hay una lectura de memoria.")
+                                 : calendarText("Nothing noticeable now.", "Nada destacable ahora."))
                                 .font(.system(size: 12.5)).flyoutSecondary().frame(height: CGFloat(SystemPanelLayout.rowHeight))
                         }
                         ForEach(rows, id: \.key) { row in
@@ -974,17 +992,20 @@ struct MeterTile: View {
         }
         Group {
             if loading {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        SystemSkeletonMark().frame(width: 68, height: 10)
-                        Spacer()
-                        SystemSkeletonMark().frame(width: 42, height: 9)
+                SystemLoadingPulse {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            SystemSkeletonMark().frame(width: 68, height: 10)
+                            Spacer()
+                            SystemSkeletonMark().frame(width: 42, height: 9)
+                        }
+                        .frame(height: 14)
+                        SystemSkeletonMark().frame(width: unit == nil ? 59 : 97, height: 21)
+                            .frame(height: 24, alignment: .leading)
+                        SystemSkeletonMark().frame(height: 22)
                     }
-                    .frame(height: 14)
-                    SystemSkeletonMark().frame(width: unit == nil ? 59 : 97, height: 21)
-                        .frame(height: 24, alignment: .leading)
-                    SystemSkeletonMark().frame(height: 22)
                 }
+                .accessibilityHidden(true)
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 4) {

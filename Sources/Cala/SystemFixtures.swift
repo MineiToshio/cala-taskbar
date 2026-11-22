@@ -49,7 +49,7 @@ enum SystemFixtures {
 
     private static func model(_ snapshot: LoadSnapshot, tab: Int? = nil,
                               maintenance: (text: String, strong: Bool, more: Int)? = nil) -> SystemPanelModel {
-        let cpu = snapshot.cpuWindow ?? snapshot.cpuNow
+        let cpu = snapshot.cpuNow
         let memory = Double(snapshot.memoryUsed) / Double(snapshot.memoryTotal) * 100
         let history = (0..<60).map { i -> Double in
             let variation = Double((i * 13) % 7)
@@ -66,7 +66,7 @@ enum SystemFixtures {
             "Slack": "/Applications/Slack.app/Contents/Resources/electron.icns"
         ]
         var icons: [String: NSImage] = [:]
-        for load in snapshot.loads {
+        for load in snapshot.displayedInventory?.loads ?? [] {
             if let path = resources[load.key] {
                 icons[load.key] = NSImage(contentsOfFile: path)
             }
@@ -148,7 +148,23 @@ enum SystemFixtures {
         quietExpansion.expandedKey = "rest"
         quietExpansion.reservesExpandedHeight = true
         var expiredExpansion = quietExpansion
-        expiredExpansion.snapshot.observedAt += ProcessReading.maxAge
+        expiredExpansion.snapshot.observedAt += ProcessReading.cacheAge + 1
+        var startup = model(measuring)
+        startup.cpuHistory = []
+        startup.memoryHistory = []
+        var recent = terminal
+        recent.cpuNow = 97
+        recent.observedAt = 105
+        recent.processSessionStartedAt = 105
+        var late = recent
+        late.observedAt = 160
+        late.processSessionStartedAt = 160
+        var recentExpanded = model(recent)
+        recentExpanded.expandedKey = expandedNode.expandedKey
+        recentExpanded.reservesExpandedHeight = true
+        var firstMemory = memory
+        firstMemory.lastInventory = memory.reading?.inventory
+        firstMemory.lastReading = nil
         return [
             ("todo-bien", model(fine)),
             ("pico-corto", model(spike)),
@@ -165,7 +181,12 @@ enum SystemFixtures {
             ("expandido-sin-avisos", quietExpansion),
             ("expandido-caducado", expiredExpansion),
             ("midiendo", model(measuring)),
+            ("midiendo-arranque", startup),
             ("midiendo-carga", model(measuringBusy)),
+            ("reapertura-reciente", model(recent)),
+            ("reapertura-reciente-desplegada", recentExpanded),
+            ("reapertura-tardia", model(late)),
+            ("memoria-primera-pasada", model(firstMemory, tab: 1)),
             ("lista-memoria", model(memory, tab: 1))
         ]
     }()
@@ -198,6 +219,7 @@ enum SystemRender {
         case bitmapUnavailable
         case invalidLayout(name: String, size: CGSize, meters: [String: CGRect])
         case invalidBreakdown(name: String, total: Int, values: [String])
+        case staleAction(name: String)
         case footerMoved
     }
 
@@ -211,12 +233,12 @@ enum SystemRender {
                 let model = fixture.model
                 let view = SystemPanelView(model: model, onTab: { _ in }, onAction: { _ in }, openRestart: {}, openDetails: {})
                 let visibleRows = model.breakdown?.rows.count ?? 0
-                let loadingRows = model.isLoading ? model.layout.rowLimit : 0
+                let loadingRows = model.showsCPUSkeleton ? model.layout.rowLimit : 0
                 print("\(fixture.name) → \(visibleRows) filas, \(loadingRows) marcadores, límite \(model.layout.rowLimit)")
-                if !model.isLoading {
-                    let cpu = model.cpuBreakdown?.rows.map(\.value) ?? []
+                if let cpuBreakdown = model.cpuBreakdown {
+                    let cpu = cpuBreakdown.rows.map(\.value)
                     let numbers = cpu.compactMap { Int($0.dropLast()) }
-                    guard model.snapshot.reading != nil, numbers.count == cpu.count, numbers.reduce(0, +) == model.cpuValue else {
+                    guard numbers.count == cpu.count, numbers.reduce(0, +) == model.cpuValue else {
                         throw RenderError.invalidBreakdown(name: fixture.name, total: model.cpuValue, values: cpu)
                     }
                     let label = model.tab == 0 ? "CPU" : "CPU (muestra de la pestaña Memoria)"
@@ -235,6 +257,9 @@ enum SystemRender {
                 if let breakdown = model.breakdown,
                    let parent = breakdown.rows.first(where: { $0.key == model.expandedKey }) {
                     let children = model.detailRows(for: parent, in: breakdown)
+                    if model.listAvailability == .remembered && children.contains(where: { $0.action != nil }) {
+                        throw RenderError.staleAction(name: fixture.name)
+                    }
                     let layout = model.detailLayout(for: parent, in: breakdown)
                     guard children.count <= layout.capacity, children.reduce(0, { $0 + $1.amount }) == parent.amount else {
                         throw RenderError.invalidBreakdown(name: fixture.name, total: parent.amount,
@@ -262,6 +287,8 @@ enum SystemRender {
                   let expiredFooter = footerPositions["expandido-caducado-light"],
                   abs(expandedFooter - expiredFooter) < 0.01 else { throw RenderError.footerMoved }
             print("Pie al desplegar y caducar → \(expandedFooter) pt en ambos")
+            try checkStableFooter(["todo-bien", "midiendo", "midiendo-arranque", "memoria-primera-pasada"])
+            try checkStableFooter(["sostenida-node", "midiendo-carga", "reapertura-reciente", "reapertura-tardia"])
 
             let detail = SystemDetailsView(model: SystemFixtures.detail, back: {}, openActivityMonitor: {})
             let detailRowCount = SystemFixtures.detail.sections.reduce(0) { $0 + $1.rows.count }
@@ -287,6 +314,13 @@ enum SystemRender {
             fputs("System render failed: \(error)\n", stderr)
             exit(1)
         }
+    }
+
+    private static func checkStableFooter(_ names: [String]) throws {
+        let positions = names.compactMap { footerPositions["\($0)-light"] }
+        guard positions.count == names.count, let first = positions.first,
+              positions.allSatisfy({ abs($0 - first) < 0.01 }) else { throw RenderError.footerMoved }
+        print("Pie estable en \(names.joined(separator: ", ")) → \(first) pt")
     }
 
     private static func withMore<V: View>(_ view: V) -> some View {

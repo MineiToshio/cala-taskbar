@@ -282,6 +282,49 @@ checkMessage("M26b una lectura válida nueva recupera la acción con su propio P
              level: .attention, primary: .activate(name: "Terminal", pid: 702), secondary: .openActivityMonitor,
              extra: expiredTool.reading?.capturedAt == 104.1)
 
+var reopenedApp = sustained
+reopenedApp.observedAt = 105
+reopenedApp.processSessionStartedAt = 105
+reopenedApp.cpuNow = 92
+let recalled = reopenedApp.displayedReading
+let recalledTotal = recalled.map { reading in
+    SystemRules.cpuBreakdown(reading.loads, total: reading.cpuWindow, lang: lang).rows.reduce(0) { $0 + $1.amount }
+}
+expect("C1 reapertura a 5 s muestra la lista de inmediato y conserva su total",
+       reopenedApp.cpuAvailability == .remembered && recalled?.capturedAt == 100
+           && recalledTotal == 80 && recalled?.cpuWindow == 80 && reopenedApp.cpuNow == 92)
+expect("C2 una lista recordada no ofrece Cerrar",
+       reopenedApp.reading == nil && SystemRules.message(reopenedApp)?.primary == nil)
+reopenedApp.observedAt = 130
+expect("C3 la caché incluye el límite exacto de 30 s", reopenedApp.displayedReading != nil)
+reopenedApp.observedAt = 160
+expect("C4 reapertura a 60 s deja el procesador sin lista utilizable",
+       reopenedApp.cpuAvailability == .missing && reopenedApp.displayedReading == nil)
+
+var reopenedTool = terminal
+reopenedTool.processSessionStartedAt = 101
+reopenedTool.observedAt = 101
+let rememberedTool = reopenedTool.displayedReading!
+let rememberedRow = SystemRules.cpuBreakdown(rememberedTool.loads, total: rememberedTool.cpuWindow, lang: lang)
+    .rows.first(where: \.isTool)!
+let rememberedDetails = SystemRules.toolDetails(rememberedRow, loads: rememberedTool.loads, metric: .cpu, lang: lang,
+                                               allowActions: reopenedTool.canUseProcessActions(capturedAt: 100))
+expect("C5 ni siquiera una muestra del panel anterior de 1 s habilita Ir a Terminal",
+       reopenedTool.cpuAvailability == .remembered && SystemRules.message(reopenedTool)?.primary == nil
+           && rememberedDetails.count == 1 && rememberedDetails.allSatisfy { $0.action == nil })
+setLoads(&reopenedTool, [node(60, pid: 702)])
+expect("C6 la primera ventana válida de la nueva sesión habilita el lanzador correcto",
+       reopenedTool.cpuAvailability == .fresh && reopenedTool.canUseProcessActions(capturedAt: 101)
+           && SystemRules.message(reopenedTool)?.primary == .activate(name: "Terminal", pid: 702))
+
+var firstMemoryScan = reopenedApp
+firstMemoryScan.lastReading = nil
+firstMemoryScan.processSessionStartedAt = 160
+firstMemoryScan.lastInventory = ProcessInventory(capturedAt: 160, loads: [app("Safari", 0, memory: 2)], processes: [])
+expect("C7 la primera pasada da memoria atribuida sin una ventana de CPU ni acciones",
+       firstMemoryScan.displayedInventory?.loads.first?.memory == gib(2)
+           && firstMemoryScan.cpuAvailability == .missing && !firstMemoryScan.canUseProcessActions(capturedAt: 160))
+
 var expiredMemory = criticalMemory
 expiredMemory.observedAt = 104.1
 checkMessage("M27 presión crítica vigente sin señalar una app de una lectura caducada", expiredMemory,
