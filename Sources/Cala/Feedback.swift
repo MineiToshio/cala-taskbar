@@ -59,8 +59,8 @@ enum DiagnosticReport {
             "os": ["name": "macOS", "version": os],
             "device": ["model": sysctl("hw.model"), "arch": sysctl("hw.machine"),
                        "memory_gb": Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824)],
-            "locale": Locale.current.identifier,
-            "displays": NSScreen.screens.count,
+            "locale": ["identifier": Locale.current.identifier],
+            "displays": ["count": NSScreen.screens.count],
             "permissions": ["accessibility": AXIsProcessTrusted(), "screen_recording": CGPreflightScreenCaptureAccess(), "calendar": calendarStatus],
             "settings": [
                 "autoHide": config.autoHide, "theme": config.theme, "hideNativeDock": config.hideNativeDock,
@@ -116,7 +116,7 @@ enum DiagnosticReport {
         Cala \(app["version"] ?? "?") (build \(app["build"] ?? "?"))
         macOS \(os["version"] ?? "?")
         Mac: \(device["model"] ?? "?") \(device["arch"] ?? "?"), \(device["memory_gb"] ?? "?") GB RAM
-        Locale: \(c["locale"] ?? "?") · Displays: \(c["displays"] ?? "?")
+        Locale: \(part("locale")["identifier"] ?? "?") · Displays: \(part("displays")["count"] ?? "?")
         Permissions: \(list(perms))
         Settings: \(list(settings))
         Tray bar: \(config.barTrayIDs.map { $0.replacingOccurrences(of: "__t_", with: "") }.joined(separator: ", "))
@@ -230,7 +230,6 @@ struct FeedbackView: View {
     @State private var includeDiagnostics = true
     @State private var preview = ""
     @State private var showPreview = false
-    @State private var showComment = false
     @State private var status = ""
     @State private var sending = false
     @State private var sent = false
@@ -253,7 +252,7 @@ struct FeedbackView: View {
     private var fields: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(crash != nil ? "¿Qué estabas haciendo?" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12.5, weight: .medium))
+                Text(crash != nil ? "¿Qué estabas haciendo? (opcional)" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12.5, weight: .medium))
                 TextEditor(text: $message)
                     .font(.system(size: 13)).scrollContentBackground(.hidden)
                     .padding(6).frame(minHeight: 90).fieldBox()
@@ -284,14 +283,14 @@ struct FeedbackView: View {
                     Text("Otro").tag(Telemetry.Kind.other)
                 }.pickerStyle(.segmented).labelsHidden()
             }
-            if crash == nil {
-                fields
-            } else {
-                // A crash report is complete on its own: nobody has to write anything. A comment stays possible.
-                DisclosureGroup(isExpanded: $showComment) { fields.padding(.top, 8) } label: {
-                    Text("Añadir un comentario o tu correo (opcional)").font(.system(size: 12.5, weight: .medium))
+            if crash != nil {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Opcional: ayúdanos con más contexto").font(.system(size: 13, weight: .semibold))
+                    Text("Puedes dejar todo en blanco y pulsar Enviar: el informe ya está completo.")
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
                 }
             }
+            fields
             if crash == nil {
                 Toggle("Incluir información técnica (recomendado)", isOn: $includeDiagnostics).font(.system(size: 12.5))
             }
@@ -325,7 +324,7 @@ struct FeedbackView: View {
     private func send() {
         sending = true; status = ""
         let note = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        let text = note.isEmpty ? "(sin descripción)" : Redactor.clean(note)
+        let text = note.isEmpty ? (crash != nil ? "Cala closed unexpectedly" : "(sin descripción)") : Redactor.clean(note)
         var ctx = DiagnosticReport.context(config)
         if let crash { ctx["activity_before_crash"] = ["log": DiagnosticReport.activity(before: crash.date)] }
         Telemetry.send(kind: effectiveKind, message: text, email: email.trimmingCharacters(in: .whitespaces), tags: [:],
