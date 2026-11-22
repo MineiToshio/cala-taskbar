@@ -151,7 +151,9 @@ enum CrashReporter {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         let candidates = names.filter { $0.hasPrefix("Cala") && ($0.hasSuffix(".ips") || $0.hasSuffix(".crash")) }.compactMap { name -> (URL, Date)? in
             let url = directory.appendingPathComponent(name)
-            guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate, date > seen else { return nil }
+            // Half a second of tolerance: the saved date goes through a Double and comes back a hair different, and a plain
+            // ">" then offered the very same report again at every launch.
+            guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate, date.timeIntervalSince(seen) > 0.5 else { return nil }
             return (url, date)
         }
         guard let newest = candidates.max(by: { $0.1 < $1.1 }), let raw = try? String(contentsOf: newest.0, encoding: .utf8) else { return nil }
@@ -179,6 +181,7 @@ enum CrashReporter {
 
     private static func handle(_ crash: Crash, store: ConfigStore) {
         markSeen(crash)
+        log("crash: offering the report \(crash.file.lastPathComponent) (mode \(store.config.crashReports))")
         do {
             switch store.config.crashReports {
             case "never": return
