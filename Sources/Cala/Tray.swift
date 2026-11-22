@@ -108,6 +108,7 @@ final class WifiInfo {
 // MARK: - Bluetooth / brillo / teclado / usuarios
 
 import IOBluetooth
+import CoreBluetooth
 import Carbon
 
 enum Bluetooth {
@@ -118,19 +119,42 @@ enum Bluetooth {
     private typealias GetFn = @convention(c) () -> Int32
     private typealias SetFn = @convention(c) (Int32) -> Void
     private static let h = dlopen("/System/Library/Frameworks/IOBluetooth.framework/IOBluetooth", RTLD_LAZY)
-    static var on: Bool {
-        guard let h, let f = dlsym(h, "IOBluetoothPreferenceGetControllerPowerState") else { return false }
-        return unsafeBitCast(f, to: GetFn.self)() != 0
+    /// IOBluetooth can block the calling thread for as long as macOS has no answer for the Bluetooth permission (a fresh
+    /// install, or right after the permission was reset). Called on the main thread, that froze the whole app at launch.
+    /// So it is only used on its own serial queue, results are cached, and nothing runs before the permission is granted.
+    static var allowed: Bool { CBManager.authorization == .allowedAlways }
+    private static let queue = DispatchQueue(label: "Cala.bluetooth", qos: .utility)
+    private static var inFlight = false                      // main thread only
+    private static var cachedOn = false                      // main thread only
+    private static var cachedDevices: [(name: String, addr: String, connected: Bool)] = []
+
+    /// Last known power state; asks for a fresh one in the background.
+    static var on: Bool { refresh(); return cachedOn }
+    /// Last known paired devices; asks for a fresh list in the background.
+    static func devices() -> [(name: String, addr: String, connected: Bool)] { refresh(); return cachedDevices }
+
+    private static func refresh() {
+        guard allowed else { cachedOn = false; cachedDevices = []; return }
+        guard !inFlight else { return }
+        inFlight = true
+        queue.async {
+            var power = false
+            if let h, let f = dlsym(h, "IOBluetoothPreferenceGetControllerPowerState") { power = unsafeBitCast(f, to: GetFn.self)() != 0 }
+            let d = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
+            let list = d.map { ($0.name ?? $0.addressString ?? tx("Device", "Dispositivo"), $0.addressString ?? "", $0.isConnected()) }
+            DispatchQueue.main.async { cachedOn = power; cachedDevices = list; inFlight = false }
+        }
     }
     static func set(_ v: Bool) {
-        guard let h, let f = dlsym(h, "IOBluetoothPreferenceSetControllerPowerState") else { return }
-        unsafeBitCast(f, to: SetFn.self)(v ? 1 : 0)
-    }
-    static func devices() -> [(name: String, addr: String, connected: Bool)] {
-        let d = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
-        return d.map { ($0.name ?? $0.addressString ?? tx("Device", "Dispositivo"), $0.addressString ?? "", $0.isConnected()) }
+        guard allowed else { return }
+        cachedOn = v
+        queue.async {
+            guard let h, let f = dlsym(h, "IOBluetoothPreferenceSetControllerPowerState") else { return }
+            unsafeBitCast(f, to: SetFn.self)(v ? 1 : 0)
+        }
     }
     static func toggle(addr: String) {
+        guard allowed else { return }
         DispatchQueue.main.async {
             guard let d = IOBluetoothDevice(addressString: addr) else { return }
             // closeConnection() is synchronous: keep it off the main thread. Opening is async, with its callback on main.
