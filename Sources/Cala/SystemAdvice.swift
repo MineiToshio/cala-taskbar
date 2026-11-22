@@ -29,58 +29,45 @@ enum SystemAdvice {
     static func cpu(smoothed: Double, busyMinutes: Double, top: ProcessGroup?, sampled: Bool, cores: Int,
                     closable: (String) -> Bool = { quittable($0) != nil }) -> LoadAdvice? {
         guard smoothed >= 75 else { return nil }
-        let long = busyMinutes >= 2
-        var culprit: String?
-        var quit: String?
-        if let top {
-            let used = max(1, Int((top.cpu / 100).rounded()))
-            culprit = calendarText("It is mostly \(top.name) (about \(used) of your \(cores) cores).",
-                                   "Lo está usando sobre todo \(top.name) (unos \(used) de tus \(cores) núcleos).")
-            if closable(top.name) { quit = top.name }
-        } else if !sampled {
-            culprit = calendarText("Checking what is using it…", "Midiendo qué lo está usando…")
-        } else {
-            culprit = calendarText("No single app stands out: it is the sum of several.", "Ninguna app destaca sola: es la suma de varias.")
-        }
-        if long {
+        let quit = top.flatMap { closable($0.name) ? $0.name : nil }
+        if busyMinutes >= 2 {
+            let who = top.map { calendarText(" because of \($0.name)", " por \($0.name)") } ?? ""
             let help = quit != nil
-                ? calendarText("If you do not need that app right now, closing it lets the Mac breathe.", "Si no necesitas esa app ahora, ciérrala para que el Mac respire.")
-                : calendarText("It may be a long task (compiling, exporting, indexing). If you do not recognize it, open Activity Monitor.", "Puede ser una tarea larga (compilar, exportar, indexar). Si no la reconoces, abre el Monitor de Actividad.")
+                ? calendarText("If you do not need it, close it.", "Si no la necesitas, ciérrala.")
+                : (top != nil ? calendarText("It may be a long task. If you do not recognize it, open Activity Monitor.", "Puede ser una tarea larga. Si no la reconoces, abre el Monitor de Actividad.") : "")
             return LoadAdvice(tone: .warn,
-                              text: calendarText("The processor has been busy for \(minutes(busyMinutes)). \(help)", "El procesador lleva \(minutes(busyMinutes)) muy ocupado. \(help)"),
-                              culprit: culprit, quitName: quit, quitDetail: nil)
+                              text: calendarText("Busy for \(minutes(busyMinutes))\(who). \(help)", "Lleva \(minutes(busyMinutes)) muy ocupado\(who). \(help)"),
+                              culprit: nil, quitName: quit, quitDetail: nil)
         }
+        let who = top.map { calendarText(" Mostly \($0.name).", " Sobre todo \($0.name).") } ?? (sampled ? "" : calendarText(" Checking what it is…", " Viendo qué es…"))
         return LoadAdvice(tone: .info,
-                          text: calendarText("Working hard right now. This is normal in short bursts and usually settles in a minute or two. Nothing to do.",
-                                             "Trabajando a tope en este momento. Es normal en picos cortos y suele bajar solo en uno o dos minutos. No hace falta hacer nada."),
-                          culprit: culprit, quitName: nil, quitDetail: nil)
+                          text: calendarText("Working hard right now. This is normal and usually settles on its own.\(who)", "Trabajando mucho ahora. Es normal y suele bajar solo.\(who)"),
+                          culprit: nil, quitName: nil, quitDetail: nil)
     }
 
     static func memory(pressure: MemoryPressure, top: ProcessGroup?,
                        closable: (String) -> Bool = { quittable($0) != nil }) -> LoadAdvice? {
         guard pressure != .normal else { return nil }
-        var culprit: String?
         var quit: String?
         var detail: String?
+        var who = ""
         if let top {
-            culprit = calendarText("The app using the most is \(top.name) (\(diskBytes(Int64(top.memory)))).", "La app que más usa es \(top.name) (\(diskBytes(Int64(top.memory)))).")
+            who = calendarText(" The one using the most: \(top.name) (\(diskBytes(Int64(top.memory)))).", " La que más usa: \(top.name) (\(diskBytes(Int64(top.memory)))).")
             if closable(top.name) { quit = top.name; detail = diskBytes(Int64(top.memory)) }
         }
         return LoadAdvice(tone: pressure == .critical ? .critical : .warn,
-                          text: calendarText("Your Mac is running low on free memory and is leaning on the disk, which makes it slower. Closing apps you are not using helps.",
-                                             "A tu Mac le queda poca memoria libre y está apoyándose en el disco, por eso puede ir más lento. Cerrar apps que no usas ayuda."),
-                          culprit: culprit, quitName: quit, quitDetail: detail)
+                          text: calendarText("Little free memory: the Mac is slower. Close apps you do not use.\(who)", "Poca memoria libre: el Mac va más lento. Cierra las apps que no uses.\(who)"),
+                          culprit: nil, quitName: quit, quitDetail: detail)
     }
 
     /// Thermal and Low Power Mode notes, shown under the CPU section.
     static func note(thermal: ProcessInfo.ThermalState, lowPower: Bool) -> LoadAdvice? {
         if thermal == .serious || thermal == .critical {
             return LoadAdvice(tone: thermal == .critical ? .critical : .warn,
-                              text: calendarText("The Mac is hot and slows itself down to cool off. Keep its vents uncovered and close heavy apps.",
-                                                 "El Mac está caliente y se frena solo para enfriarse. Deja libres las rejillas y cierra las apps pesadas."))
+                              text: calendarText("The Mac is hot and is slowing itself down. Keep its vents clear.", "El Mac está caliente y se frena solo. Deja libres las rejillas."))
         }
         if lowPower {
-            return LoadAdvice(tone: .info, text: calendarText("Low Power Mode is on: the Mac will feel a bit slower on purpose.", "El modo de bajo consumo está activo: el Mac irá algo más lento a propósito."))
+            return LoadAdvice(tone: .info, text: calendarText("Low Power Mode is on: the Mac is a bit slower on purpose.", "Modo de bajo consumo: el Mac va algo más lento a propósito."))
         }
         return nil
     }
@@ -101,7 +88,6 @@ enum SystemAdvice {
 
 struct AdviceCard: View {
     let advice: LoadAdvice
-    var seeAction: (() -> Void)?
     private var color: Color {
         switch advice.tone { case .info: return .secondary; case .warn: return .orange; case .critical: return .red }
     }
@@ -117,16 +103,9 @@ struct AdviceCard: View {
                     if let culprit = advice.culprit { Text(culprit).font(.system(size: 11.5, weight: .medium)).fixedSize(horizontal: false, vertical: true) }
                 }
             }
-            if advice.quitName != nil || seeAction != nil {
-                HStack(spacing: 8) {
-                    if let name = advice.quitName {
-                        Button(calendarText("Close \(name)", "Cerrar \(name)")) { SystemAdvice.confirmQuit(name, detail: advice.quitDetail) }
-                            .buttonStyle(.borderedProminent).controlSize(.small)
-                    }
-                    if let seeAction {
-                        Button(calendarText("See what is using it", "Ver qué lo usa"), action: seeAction).buttonStyle(.bordered).controlSize(.small)
-                    }
-                }
+            if let name = advice.quitName {
+                Button(calendarText("Close \(name)", "Cerrar \(name)")) { SystemAdvice.confirmQuit(name, detail: advice.quitDetail) }
+                    .buttonStyle(.borderedProminent).controlSize(.small)
             }
         }
         .padding(10).frame(maxWidth: .infinity, alignment: .leading)

@@ -125,6 +125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarControl.applyOnLaunch(store)
         MenuBarIcons.apply(store)
         MenuBarDiagnostics.install()
+        // `notifyutil -p local.cala.openSystemPanel` opens the CPU panel (handy to check it without clicking).
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), Unmanaged.passUnretained(self).toOpaque(), { _, observer, _, _, _ in
+            guard let observer else { return }
+            let me = Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue()
+            DispatchQueue.main.async { if let bar = me.bars.first { me.trayClick(traySystem, bar: bar) } }
+        }, "local.cala.openSystemPanel" as CFString, nil, .deliverImmediately)
         Watchdog.start(store: store)
         CrashReporter.checkAtLaunch(store: store)
         WindowSwitcher.shared.ensureTap()

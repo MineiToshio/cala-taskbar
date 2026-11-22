@@ -173,3 +173,12 @@ The old red "El procesador está ocupado" line is gone. Each section now explain
 - **"Mantenimiento"** is a separate block at the bottom that holds "Recomendamos reiniciar", so a busy processor no longer reads as a reason to restart.
 - The CPU icon in the bar only changes color for load that lasts (orange after 2 minutes above 75%, red after 5 minutes above 90%) or for memory pressure.
 Closing never touches Finder, Dock or Cala itself.
+
+## System panel, compact version
+The panel was too tall for the screen, so it is now built for people who will not read much (about 530 px instead of 790):
+- **CPU and memory side by side**, each with a big number, a small graph and one word ("Normal", "Ocupado", "Poca libre").
+- **One message at a time**, the most important first, in one or two short sentences (e.g. *"Lleva 3 min muy ocupado por Xcode. Si no la necesitas, ciérrala."* with a **Cerrar Xcode** button). Spikes only say it is normal and settles by itself.
+- **"Lo que más usa":** the top 3 for Processor or Memory, with percentages of the whole processor (they match the big CPU number) instead of "% of one core".
+- **"Recomendamos reiniciar"** is a single strip, only when there is a reason.
+- The technical breakdown (user/system, apps/system/compressed, swap, cores) is behind a collapsed **"Detalles técnicos"**.
+- `notifyutil -p local.cala.openSystemPanel` opens the panel without clicking.

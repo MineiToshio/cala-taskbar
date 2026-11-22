@@ -196,6 +196,7 @@ func monitorTint(_ m: SystemMonitor) -> Color {
 struct Spark: View {
     let values: [Double]
     let color: Color
+    var height: CGFloat = 34
     var body: some View {
         GeometryReader { g in
             let pts = values.suffix(60)
@@ -212,86 +213,90 @@ struct Spark: View {
                 }
             }
         }
-        .frame(height: 34)
+        .frame(height: height)
     }
 }
 
 struct SystemPane: View {
     @ObservedObject private var m = SystemMonitor.shared
     @Environment(\.themeAccent) private var accent
-    private let rows = 5
+    private let rows = 3
+    @State private var showDetails = false
     @State private var tab = 0   // 0 = processor, 1 = memory
     @State private var showRestart = false
     @ObservedObject private var advisor = RestartAdvisor.shared
 
     private func pressureColor(_ p: MemoryPressure) -> Color { p == .normal ? .green : (p == .warning ? .orange : .red) }
 
+    private func dotColor(_ high: Bool, _ critical: Bool = false) -> Color { critical ? .red : (high ? .orange : .green) }
+
     @ViewBuilder private var mainPage: some View {
-        let cpuAdvice = SystemAdvice.cpu(smoothed: m.smoothedCPU, busyMinutes: m.busyMinutes, top: m.topCPU.first, sampled: m.sampledProcesses,
-                                         cores: ProcessInfo.processInfo.activeProcessorCount)
+        let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let cpuAdvice = SystemAdvice.cpu(smoothed: m.smoothedCPU, busyMinutes: m.busyMinutes, top: m.topCPU.first, sampled: m.sampledProcesses, cores: cores)
         let memAdvice = SystemAdvice.memory(pressure: m.pressure, top: m.topMemory.first { SystemAdvice.quittable($0.name) != nil } ?? m.topMemory.first)
         let note = SystemAdvice.note(thermal: m.thermal, lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
-        VStack(alignment: .leading, spacing: 14) {
+        // One message at a time, the most important first: nobody reads a wall of text.
+        let rank: (LoadAdvice) -> Int = { $0.tone == .critical ? 3 : ($0.tone == .warn ? 2 : 1) }
+        let shown = [memAdvice, cpuAdvice, note].compactMap { $0 }.max { rank($0) < rank($1) }
+        VStack(alignment: .leading, spacing: 12) {
             Header(title: calendarText("System", "Sistema"))
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("CPU").font(.system(size: 12, weight: .semibold)).flyoutSecondary()
-                    Spacer()
-                    Text("\(Int(m.cpu.rounded()))%").font(.system(size: 22, weight: .semibold)).monospacedDigit()
-                }
-                Spark(values: m.cpuHistory, color: m.busyMinutes >= 2 ? .orange : accent)
-                Text(calendarText("user \(Int(m.cpuUser.rounded()))% · system \(Int(m.cpuSystem.rounded()))%", "usuario \(Int(m.cpuUser.rounded()))% · sistema \(Int(m.cpuSystem.rounded()))%"))
-                    .font(.system(size: 10.5)).flyoutSecondary()
-                if let cpuAdvice { AdviceCard(advice: cpuAdvice) { tab = 0 }.padding(.top, 2) }
-                if let note { AdviceCard(advice: note).padding(.top, 2) }
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("CPU").font(.system(size: 11.5, weight: .semibold)).flyoutSecondary()
+                    Text("\(Int(m.cpu.rounded()))%").font(.system(size: 24, weight: .semibold)).monospacedDigit()
+                    Spark(values: m.cpuHistory, color: m.busyMinutes >= 2 ? .orange : accent, height: 26)
+                    HStack(spacing: 5) {
+                        Circle().fill(dotColor(m.busyMinutes >= 2, m.hotMinutes >= 5)).frame(width: 7, height: 7)
+                        Text(m.smoothedCPU >= 75 ? calendarText("Busy", "Ocupado") : calendarText("Normal", "Normal")).font(.system(size: 11.5))
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(calendarText("Memory", "Memoria")).font(.system(size: 11.5, weight: .semibold)).flyoutSecondary()
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(diskBytes(Int64(m.memoryUsed))).font(.system(size: 24, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+                    }
+                    Spark(values: m.memoryHistory, color: pressureColor(m.pressure) == .green ? accent : pressureColor(m.pressure), height: 26)
+                    HStack(spacing: 5) {
+                        Circle().fill(pressureColor(m.pressure)).frame(width: 7, height: 7)
+                        Text(m.pressure == .normal ? calendarText("Normal", "Normal") : (m.pressure == .warning ? calendarText("Low free memory", "Poca libre") : calendarText("Very low", "Muy poca"))).font(.system(size: 11.5))
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(calendarText("Memory", "Memoria")).font(.system(size: 12, weight: .semibold)).flyoutSecondary()
-                    Spacer()
-                    Text(calendarText("Pressure ", "Presión ") + m.pressure.title).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(pressureColor(m.pressure))
-                        .padding(.horizontal, 7).padding(.vertical, 3).background(Capsule().fill(pressureColor(m.pressure).opacity(0.15)))
-                }
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(diskBytes(Int64(m.memoryUsed))).font(.system(size: 22, weight: .semibold)).monospacedDigit()
-                    Text(calendarText("of \(diskBytes(Int64(m.memoryTotal)))", "de \(diskBytes(Int64(m.memoryTotal)))")).font(.system(size: 12)).flyoutSecondary()
-                }
-                Spark(values: m.memoryHistory, color: pressureColor(m.pressure) == .green ? accent : pressureColor(m.pressure))
-                Text(calendarText("apps \(diskBytes(Int64(m.memoryApps))) · system \(diskBytes(Int64(m.memoryWired))) · compressed \(diskBytes(Int64(m.memoryCompressed))) · swap \(diskBytes(Int64(m.swapUsed)))",
-                                  "apps \(diskBytes(Int64(m.memoryApps))) · sistema \(diskBytes(Int64(m.memoryWired))) · comprimida \(diskBytes(Int64(m.memoryCompressed))) · swap \(diskBytes(Int64(m.swapUsed)))"))
-                    .font(.system(size: 10.5)).flyoutSecondary().fixedSize(horizontal: false, vertical: true)
-                if let memAdvice { AdviceCard(advice: memAdvice) { tab = 1 }.padding(.top, 2) }
-            }
+            if let shown { AdviceCard(advice: shown) }
             Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                Text(calendarText("What is using the most", "Qué está usando más")).font(.system(size: 13, weight: .semibold))
+            VStack(alignment: .leading, spacing: 8) {
+                Text(calendarText("What uses the most", "Lo que más usa")).font(.system(size: 12.5, weight: .semibold))
                 Picker("", selection: $tab) {
                     Text(calendarText("Processor", "Procesador")).tag(0)
                     Text(calendarText("Memory", "Memoria")).tag(1)
                 }.pickerStyle(.segmented).labelsHidden()
                 if tab == 0 {
-                    list(m.topCPU, value: { "\(Int($0.cpu.rounded()))%" }, fraction: { min(1, $0.cpu / max(100, m.topCPU.first?.cpu ?? 100)) })
+                    list(m.topCPU, value: { g in let p = g.cpu / Double(cores); return p < 1 ? "<1%" : "\(Int(p.rounded()))%" }, fraction: { min(1, $0.cpu / Double(cores) / 100 * 2) })
                 } else {
                     list(m.topMemory, value: { diskBytes(Int64($0.memory)) }, fraction: { Double($0.memory) / Double(max(1, m.memoryTotal)) * 4 })
                 }
-                Text(tab == 0 ? calendarText("100% = one full processor core.", "100% = un núcleo del procesador completo.")
-                              : calendarText("Bar: share of your total memory (zoomed ×4).", "Barra: parte de tu memoria total (ampliada ×4)."))
-                    .font(.system(size: 10)).flyoutSecondary()
             }
             // Maintenance is separate from load: restarting is not a fix for "the processor is busy".
-            if advisor.visible {
-                Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(calendarText("Maintenance", "Mantenimiento")).font(.system(size: 12, weight: .semibold)).flyoutSecondary()
-                    RestartBanner { showRestart = true }
-                }
-            }
+            if advisor.visible { RestartBanner { showRestart = true } }
             Divider()
-            Row(icon: "gauge.with.dots.needle.67percent", title: calendarText("Open Activity Monitor", "Abrir Monitor de Actividad")) {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
+            HStack {
+                Button(action: { NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")) }) {
+                    Label(calendarText("Activity Monitor", "Monitor de Actividad"), systemImage: "gauge.with.dots.needle.67percent").font(.system(size: 11.5))
+                }.buttonStyle(.plain)
+                Spacer()
+                Text(calendarText("On for \(RestartRules.uptimeText(advisor.uptime))", "Encendido hace \(RestartRules.uptimeText(advisor.uptime))")).font(.system(size: 10.5)).flyoutSecondary()
             }
-            Text(calendarText("On for \(RestartRules.uptimeText(advisor.uptime))", "Encendido hace \(RestartRules.uptimeText(advisor.uptime))"))
-                .font(.system(size: 10.5)).flyoutSecondary()
+            DisclosureGroup(isExpanded: $showDetails) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(calendarText("CPU: user \(Int(m.cpuUser.rounded()))% · system \(Int(m.cpuSystem.rounded()))%", "CPU: usuario \(Int(m.cpuUser.rounded()))% · sistema \(Int(m.cpuSystem.rounded()))%"))
+                    Text(calendarText("Memory: apps \(diskBytes(Int64(m.memoryApps))) · system \(diskBytes(Int64(m.memoryWired))) · compressed \(diskBytes(Int64(m.memoryCompressed))) of \(diskBytes(Int64(m.memoryTotal)))",
+                                      "Memoria: apps \(diskBytes(Int64(m.memoryApps))) · sistema \(diskBytes(Int64(m.memoryWired))) · comprimida \(diskBytes(Int64(m.memoryCompressed))) de \(diskBytes(Int64(m.memoryTotal)))"))
+                    Text(calendarText("Swap on disk: \(diskBytes(Int64(m.swapUsed))) in use of \(diskBytes(Int64(m.swapTotal)))", "Swap en disco: \(diskBytes(Int64(m.swapUsed))) en uso de \(diskBytes(Int64(m.swapTotal)))"))
+                    Text(calendarText("Process shares are of the whole processor (\(cores) cores).", "Los porcentajes de la lista son del procesador completo (\(cores) núcleos)."))
+                }.font(.system(size: 10.5)).flyoutSecondary().frame(maxWidth: .infinity, alignment: .leading).padding(.top, 4)
+            } label: {
+                Text(calendarText("Technical details", "Detalles técnicos")).font(.system(size: 11)).flyoutSecondary()
+            }
         }
     }
 
@@ -300,7 +305,7 @@ struct SystemPane: View {
             if showRestart { RestartPane { showRestart = false } } else { mainPage }
         }
         .onChange(of: showRestart) { _, _ in DispatchQueue.main.async { NotificationCenter.default.post(name: .flyoutRefit, object: nil) } }
-        .onAppear { showRestart = false; tab = (m.pressure != .normal || m.memoryUsed * 10 > m.memoryTotal * 8) && m.smoothedCPU < 75 ? 1 : 0; m.resetProcessSample(); m.tick(); m.sampleProcesses(); advisor.refresh(disk: ConfigStore.shared.config.place(trayDisk) == .hidden ? DiskInfo.read() : DiskInfo.read()) }
+        .onAppear { showRestart = false; tab = (m.pressure != .normal) && m.smoothedCPU < 75 ? 1 : 0; m.resetProcessSample(); m.tick(); m.sampleProcesses(); advisor.refresh(disk: ConfigStore.shared.config.place(trayDisk) == .hidden ? DiskInfo.read() : DiskInfo.read()) }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             m.tick(); m.sampleProcesses(); advisor.refresh(disk: DiskInfo.read())
             if advisor.visible == false && showRestart { showRestart = false }
@@ -324,13 +329,13 @@ struct SystemPane: View {
                                 }
                         }.frame(height: 4)
                     }
-                    .frame(height: 30)
+                    .frame(height: 28)
                 } else {
                     HStack {
                         Text(i == 0 ? (m.sampledProcesses ? calendarText("Nothing noticeable.", "Nada destacable.") : calendarText("Measuring…", "Midiendo…")) : " ")
                             .font(.system(size: 12.5)).flyoutSecondary()
                         Spacer()
-                    }.frame(height: 30)
+                    }.frame(height: 28)
                 }
             }
         }
