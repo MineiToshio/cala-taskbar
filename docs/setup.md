@@ -4,7 +4,7 @@ End users install from the disk image: see the [README](../README.md). Release s
 
 ## Build and install
 ```bash
-cd /Users/Shared/Proyectos/mac-launcher
+cd mac-launcher         
 ./install.sh          # build.sh, then install into ~/Applications and launch
 ```
 `./install.sh` runs `./build.sh` (swift build -c release, bundle, ad-hoc sign), quits the running app, replaces `~/Applications/Cala.app` with `ditto`, strips group/other write (`chmod -R go-w`), checks `codesign --verify` and opens the app. Open-at-login is handled by the app itself (SMAppService).

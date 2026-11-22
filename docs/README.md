@@ -25,7 +25,7 @@ The original goal was a Windows-like experience on a Mac. The Dock plus DockDoor
 ## Quick start
 
 ```bash
-cd /Users/Shared/Proyectos/mac-launcher
+cd mac-launcher         
 ./install.sh                     # builds, installs to ~/Applications, launches
 # restart only: pkill -x Cala; open ~/Applications/Cala.app
 ```
