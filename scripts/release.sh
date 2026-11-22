@@ -9,6 +9,22 @@
 # CALA_SKIP_NOTARIZE=1 signs with Developer ID but skips notarization.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# A release is built from the last commit only, never from uncommitted work in progress: if the working tree has
+# changes, build in a temporary clean checkout of HEAD and copy the results back into build/.
+if [[ -z "${CALA_IN_CLEAN_TREE:-}" && -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  echo "› uncommitted changes here: building $(git rev-parse --short HEAD) in a clean checkout"
+  clean=$(mktemp -d)/cala
+  git worktree add --detach --quiet "$clean" HEAD
+  trap 'git worktree remove --force "$clean" 2>/dev/null' EXIT
+  CALA_IN_CLEAN_TREE=1 CALA_BUILD_NUMBER=${CALA_BUILD_NUMBER:-$(git rev-list --count HEAD)} "$clean/scripts/release.sh"
+  mkdir -p build
+  rm -rf build/Cala.app
+  ditto "$clean/build/Cala.app" build/Cala.app
+  cp "$clean"/build/Cala-*.dmg "$clean"/build/Cala-*.dmg.sha256 build/
+  echo "Release lista en build/ (desde el commit $(git rev-parse --short HEAD), sin cambios sin commitear)"
+  exit 0
+fi
 CALA_SIGN_IDENTITY=${CALA_SIGN_IDENTITY:--}
 export CALA_SIGN_IDENTITY
 [[ "$CALA_SIGN_IDENTITY" == "-" ]] && { echo "› free release: ad-hoc signed, not notarized (users unblock it once)"; CALA_SKIP_NOTARIZE=1; }
