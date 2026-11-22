@@ -214,22 +214,20 @@ final class FeedbackWindowController {
     func show(crash: CrashReporter.Crash? = nil) {
         log("feedback: opening window (crash=\(crash != nil))")
         window?.close()
-        let height: CGFloat = crash != nil ? 500 : 640
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: height),
-                         styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        // The window takes the size of its content (fixed-height fields, 560 wide): no empty gap before the buttons,
+        // and it grows by itself when "Ver exactamente qué se envía" is opened.
+        let controller = NSHostingController(rootView: FeedbackView(crash: crash) { [weak self] in self?.window?.close() })
+        controller.sizingOptions = [.preferredContentSize]
+        let w = NSWindow(contentViewController: controller)
+        w.styleMask = [.titled, .closable]
         w.isReleasedWhenClosed = false
         w.title = "Cala · Reportar un problema"
-        // The SwiftUI content must not decide the window's size (a text editor and a scroll view have no natural height).
-        let host = NSHostingView(rootView: FeedbackView(crash: crash) { [weak self] in self?.window?.close() }
-            .frame(maxWidth: .infinity, maxHeight: .infinity))
-        host.sizingOptions = []
-        w.contentView = host
-        w.contentMinSize = NSSize(width: 520, height: crash != nil ? 460 : 560)
-        w.setContentSize(NSSize(width: 560, height: height))
         w.center()
         window = w
         NSApp.activate(ignoringOtherApps: true)
         w.makeKeyAndOrderFront(nil)
+        // The content size is only known after the first layout, so center once it is.
+        DispatchQueue.main.async { w.center() }
         log("feedback: window shown frame=\(NSStringFromRect(w.frame)) visible=\(w.isVisible)")
     }
 }
@@ -318,7 +316,6 @@ struct FeedbackView: View {
             }
             Text("Se quitan tu carpeta personal, tu nombre de usuario, el nombre del Mac y las direcciones de correo del texto técnico. No se envían los títulos de tus ventanas, tus archivos ni tus credenciales.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
             if !status.isEmpty { Text(status).font(.system(size: 12)).foregroundStyle(sent ? Color.green : Color.orange).fixedSize(horizontal: false, vertical: true) }
             HStack {
                 Spacer()
@@ -331,6 +328,7 @@ struct FeedbackView: View {
             }
         }
         .padding(22)
+        .frame(width: 560)
         .onAppear { preview = DiagnosticReport.text(config: config, before: crash?.date) }
     }
 
