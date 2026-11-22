@@ -19,6 +19,7 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `CrashSummary.swift` | Parses a macOS `.ips` crash report into a Sentry exception, stack frames and a grouping fingerprint |
 | `Watchdog.swift` | Detached watcher script that reopens Cala after a crash; clean-exit marker, loop guard, `running.lock` |
 | `Feedback.swift` | Redaction, diagnostics text, crash-report detection at launch and the "Reportar un problema" window |
+| `SystemAdvice.swift` | Plain-language CPU / memory / heat guidance (pure rules) and the card with its "Cerrar X" action |
 | `RestartAdvisor.swift` | "Recomendamos reiniciar": pure rules, uptime and pending-update reading, banner, reasons page and the restart action |
 | `Cleanup.swift` | "Limpiar espacio" window: git worktree discovery and safety checks (`/usr/bin/git`, `lsof`), cache emptying, confirmation and removal |
 | `Disk.swift` | Free-space reading (`DiskInfo`), background folder sizing (`DiskService`), tray storage panel |

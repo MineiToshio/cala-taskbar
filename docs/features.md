@@ -164,3 +164,12 @@ The reasons and when they apply (`RestartAdvisor.swift`, pure rules):
 - **Memory pressure above normal for 10+ minutes** (strong).
 - **Disk under 15% free with 4+ GB of swap files.**
 Not offered because they cannot be measured honestly: flaky Bluetooth/Wi-Fi, and WindowServer's own memory (a system process Cala cannot read).
+
+## Guidance in the system panel (calm, with a way out)
+The old red "El procesador está ocupado" line is gone. Each section now explains itself where the data is:
+- **Under the CPU graph:** nothing while the load is normal. A **short spike** (above 75% for less than 2 minutes) shows a neutral note: *"Trabajando a tope en este momento. Es normal en picos cortos… No hace falta hacer nada."* and which app is behind it ("unos 4 de tus 10 núcleos"). Only **sustained** load (2+ minutes) turns amber: *"El procesador lleva 3 min muy ocupado…"*, with the culprit and, when it is a normal app, a **"Cerrar X"** button (asks first; the app still offers to save) plus **"Ver qué lo usa"**. If the culprit is not an app (node, postgres…) it says it may be a long task and points to Activity Monitor. While the heaviest app is still being measured it says "Midiendo qué lo está usando…" instead of guessing.
+- **Under the memory graph:** nothing while the pressure is normal; with memory pressure it explains that the Mac is leaning on the disk and offers to close the app that uses the most ("Cerrar Chrome", with how much it frees).
+- **Heat and Low Power Mode** appear as small notes under the CPU section.
+- **"Mantenimiento"** is a separate block at the bottom that holds "Recomendamos reiniciar", so a busy processor no longer reads as a reason to restart.
+- The CPU icon in the bar only changes color for load that lasts (orange after 2 minutes above 75%, red after 5 minutes above 90%) or for memory pressure.
+Closing never touches Finder, Dock or Cala itself.

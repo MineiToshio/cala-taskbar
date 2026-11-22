@@ -50,6 +50,8 @@ final class SystemMonitor: ObservableObject {
 
     private var lastTicks: (user: UInt32, system: UInt32, idle: UInt32, nice: UInt32)?
     private var recentCPU: [Double] = []
+    private var busySince: Date?
+    private var hotSince: Date?
     private var lastProcessSample: (date: Date, cpuNs: [pid_t: UInt64])?
     private let processQueue = DispatchQueue(label: "local.cala.monitor", qos: .utility)
     private var sampling = false
@@ -81,6 +83,9 @@ final class SystemMonitor: ObservableObject {
         cpuUser = du / total * 100; cpuSystem = ds / total * 100; cpu = cpuUser + cpuSystem
         cpuHistory.append(cpu); if cpuHistory.count > 60 { cpuHistory.removeFirst() }
         recentCPU.append(cpu); if recentCPU.count > 3 { recentCPU.removeFirst() }
+        let smooth = smoothedCPU
+        if smooth >= 75 { if busySince == nil { busySince = Date() } } else { busySince = nil }
+        if smooth >= 90 { if hotSince == nil { hotSince = Date() } } else { hotSince = nil }
     }
 
     private func sampleMemory() {
@@ -105,6 +110,10 @@ final class SystemMonitor: ObservableObject {
         var swap = xsw_usage(), swapSize = MemoryLayout<xsw_usage>.size
         if sysctlbyname("vm.swapusage", &swap, &swapSize, nil, 0) == 0 { swapUsed = swap.xsu_used; swapTotal = swap.xsu_total }
     }
+
+    /// How long the (smoothed) load has been continuously above 75% / 90%. Short spikes are normal and do not count.
+    var busyMinutes: Double { busySince.map { Date().timeIntervalSince($0) / 60 } ?? 0 }
+    var hotMinutes: Double { hotSince.map { Date().timeIntervalSince($0) / 60 } ?? 0 }
 
     /// Average of the last ~9 seconds, so the tray does not flicker on short spikes.
     var smoothedCPU: Double { recentCPU.isEmpty ? cpu : recentCPU.reduce(0, +) / Double(recentCPU.count) }
@@ -173,36 +182,12 @@ final class SystemMonitor: ObservableObject {
         let s = String(cString: name)
         return s.isEmpty ? "pid \(pid)" : s
     }
-
-    // MARK: Diagnosis
-
-    enum Level { case ok, warn, bad }
-
-    /// One plain sentence about why the Mac may feel slow.
-    var diagnosis: (text: String, level: Level) {
-        let topMem = topMemory.first, topCpu = topCPU.first
-        if pressure == .critical || pressure == .warning {
-            let who = topMem.map { calendarText(" \($0.name) uses \(diskBytes(Int64($0.memory))).", " \($0.name) usa \(diskBytes(Int64($0.memory))).") } ?? ""
-            return (calendarText("Memory is under pressure; the Mac is swapping to disk.", "La memoria está bajo presión; el Mac está usando el disco como memoria.") + who,
-                    pressure == .critical ? .bad : .warn)
-        }
-        if smoothedCPU >= 75 {
-            let who = topCpu.map { calendarText(" \($0.name) is the heaviest (\(Int($0.cpu.rounded()))% of a core).", " \($0.name) es el que más usa (\(Int($0.cpu.rounded()))% de un núcleo).") } ?? ""
-            return (calendarText("The processor is busy.", "El procesador está ocupado.") + who, smoothedCPU >= 90 ? .bad : .warn)
-        }
-        if thermal == .serious || thermal == .critical {
-            return (calendarText("The Mac is hot and slowing itself down to cool off.", "El Mac está caliente y se frena solo para enfriarse."), thermal == .critical ? .bad : .warn)
-        }
-        if ProcessInfo.processInfo.isLowPowerModeEnabled {
-            return (calendarText("Low Power Mode is on, which makes the Mac slower.", "El modo de bajo consumo está activo y hace el Mac más lento."), .warn)
-        }
-        return (calendarText("Everything looks normal.", "Todo se ve normal."), .ok)
-    }
 }
 
+/// The CPU icon only changes color for load that lasts (short spikes are normal) or for memory trouble.
 func monitorTint(_ m: SystemMonitor) -> Color {
-    if m.pressure == .critical || m.smoothedCPU >= 90 { return .red }
-    if m.pressure == .warning || m.smoothedCPU >= 75 { return .orange }
+    if m.pressure == .critical || m.hotMinutes >= 5 { return .red }
+    if m.pressure == .warning || m.busyMinutes >= 2 { return .orange }
     return Color.primary.opacity(0.85)
 }
 
@@ -242,25 +227,23 @@ struct SystemPane: View {
     private func pressureColor(_ p: MemoryPressure) -> Color { p == .normal ? .green : (p == .warning ? .orange : .red) }
 
     @ViewBuilder private var mainPage: some View {
-        let d = m.diagnosis
+        let cpuAdvice = SystemAdvice.cpu(smoothed: m.smoothedCPU, busyMinutes: m.busyMinutes, top: m.topCPU.first, sampled: m.sampledProcesses,
+                                         cores: ProcessInfo.processInfo.activeProcessorCount)
+        let memAdvice = SystemAdvice.memory(pressure: m.pressure, top: m.topMemory.first { SystemAdvice.quittable($0.name) != nil } ?? m.topMemory.first)
+        let note = SystemAdvice.note(thermal: m.thermal, lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
         VStack(alignment: .leading, spacing: 14) {
             Header(title: calendarText("System", "Sistema"))
-            Label(d.text, systemImage: d.level == .ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(d.level == .ok ? Color.green : (d.level == .warn ? Color.orange : Color.red))
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(minHeight: 34, alignment: .topLeading)
-            RestartBanner { showRestart = true }
-            Divider()
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("CPU").font(.system(size: 12, weight: .semibold)).flyoutSecondary()
                     Spacer()
                     Text("\(Int(m.cpu.rounded()))%").font(.system(size: 22, weight: .semibold)).monospacedDigit()
                 }
-                Spark(values: m.cpuHistory, color: m.smoothedCPU >= 75 ? .orange : accent)
+                Spark(values: m.cpuHistory, color: m.busyMinutes >= 2 ? .orange : accent)
                 Text(calendarText("user \(Int(m.cpuUser.rounded()))% · system \(Int(m.cpuSystem.rounded()))%", "usuario \(Int(m.cpuUser.rounded()))% · sistema \(Int(m.cpuSystem.rounded()))%"))
                     .font(.system(size: 10.5)).flyoutSecondary()
+                if let cpuAdvice { AdviceCard(advice: cpuAdvice) { tab = 0 }.padding(.top, 2) }
+                if let note { AdviceCard(advice: note).padding(.top, 2) }
             }
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
@@ -277,6 +260,7 @@ struct SystemPane: View {
                 Text(calendarText("apps \(diskBytes(Int64(m.memoryApps))) · system \(diskBytes(Int64(m.memoryWired))) · compressed \(diskBytes(Int64(m.memoryCompressed))) · swap \(diskBytes(Int64(m.swapUsed)))",
                                   "apps \(diskBytes(Int64(m.memoryApps))) · sistema \(diskBytes(Int64(m.memoryWired))) · comprimida \(diskBytes(Int64(m.memoryCompressed))) · swap \(diskBytes(Int64(m.swapUsed)))"))
                     .font(.system(size: 10.5)).flyoutSecondary().fixedSize(horizontal: false, vertical: true)
+                if let memAdvice { AdviceCard(advice: memAdvice) { tab = 1 }.padding(.top, 2) }
             }
             Divider()
             VStack(alignment: .leading, spacing: 10) {
@@ -293,6 +277,14 @@ struct SystemPane: View {
                 Text(tab == 0 ? calendarText("100% = one full processor core.", "100% = un núcleo del procesador completo.")
                               : calendarText("Bar: share of your total memory (zoomed ×4).", "Barra: parte de tu memoria total (ampliada ×4)."))
                     .font(.system(size: 10)).flyoutSecondary()
+            }
+            // Maintenance is separate from load: restarting is not a fix for "the processor is busy".
+            if advisor.visible {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(calendarText("Maintenance", "Mantenimiento")).font(.system(size: 12, weight: .semibold)).flyoutSecondary()
+                    RestartBanner { showRestart = true }
+                }
             }
             Divider()
             Row(icon: "gauge.with.dots.needle.67percent", title: calendarText("Open Activity Monitor", "Abrir Monitor de Actividad")) {
