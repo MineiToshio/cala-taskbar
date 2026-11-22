@@ -111,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.shared.show(); return true
     }
 
-    func applicationWillTerminate(_ n: Notification) { DockControl.onQuit(store); MenuBarControl.onQuit(store); MenuBarIcons.onQuit(store) }
+    func applicationWillTerminate(_ n: Notification) { DockControl.onQuit(store); MenuBarControl.onQuit(store); MenuBarIcons.onQuit(store); Watchdog.cleanExit() }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
@@ -125,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarControl.applyOnLaunch(store)
         MenuBarIcons.apply(store)
         MenuBarDiagnostics.install()
+        Watchdog.start(store: store)
         CrashReporter.checkAtLaunch(store: store)
         WindowSwitcher.shared.ensureTap()
         MinimizeWatcher.shared.start()

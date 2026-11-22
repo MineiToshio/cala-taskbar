@@ -165,9 +165,21 @@ enum CrashReporter {
 
     /// At launch: depending on the user's setting, ask, send silently, or do nothing.
     static func checkAtLaunch(store: ConfigStore) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-            guard let crash = pending() else { return }
-            markSeen(crash)
+        // After an automatic relaunch the crash report may not exist yet (macOS writes it a few seconds after the crash),
+        // so when the previous run ended abnormally keep looking for up to 90 s.
+        let attempts = Watchdog.previousRunEnded ? 30 : 1
+        func attempt(_ n: Int) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (n == 0 ? 6 : 3)) {
+                guard let crash = pending() else { if n + 1 < attempts { attempt(n + 1) }; return }
+                handle(crash, store: store)
+            }
+        }
+        attempt(0)
+    }
+
+    private static func handle(_ crash: Crash, store: ConfigStore) {
+        markSeen(crash)
+        do {
             switch store.config.crashReports {
             case "never": return
             case "auto":
@@ -255,7 +267,7 @@ struct FeedbackView: View {
                 Text(crash != nil ? "¿Qué estabas haciendo? (opcional)" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12.5, weight: .medium))
                 TextEditor(text: $message)
                     .font(.system(size: 13)).scrollContentBackground(.hidden)
-                    .padding(6).frame(minHeight: 90).fieldBox()
+                    .padding(6).frame(minHeight: crash != nil ? 48 : 90).fieldBox()
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Tu correo (opcional, solo para poder responderte)").font(.system(size: 12.5, weight: .medium))

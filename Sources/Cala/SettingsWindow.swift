@@ -653,6 +653,10 @@ struct AdvancedPane: View {
                     Button("Reportar…") { FeedbackWindowController.shared.show() }
                 }
                 RowDivider()
+                SettingRow(title: "Volver a abrir Cala si se cierra sola", caption: "Si Cala falla, se abre otra vez en unos segundos para que nunca te quedes sin barra. Si falla tres veces seguidas, se detiene para no entrar en un bucle.") {
+                    Toggle("", isOn: Binding(get: { store.config.relaunchOnCrash }, set: { store.config.relaunchOnCrash = $0; Watchdog.sync(store) })).toggleStyle(.switch).labelsHidden()
+                }
+                RowDivider()
                 SettingRow(title: "Si Cala se cierra sola", caption: "Al abrirla de nuevo puede ofrecerte enviar un informe del fallo. No incluye tus archivos, ventanas ni contraseñas.") {
                     Picker("", selection: Binding(get: { store.config.crashReports }, set: { store.config.crashReports = $0 })) {
                         Text("Preguntarme").tag("ask")
