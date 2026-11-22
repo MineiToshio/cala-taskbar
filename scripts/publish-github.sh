@@ -14,6 +14,14 @@ notes=$(mktemp); trap 'rm -f "$notes"' EXIT
 cat > "$notes" <<NOTES
 ## Instalar
 
+**Lo más rápido:** abre Terminal y pega
+
+\`\`\`
+curl -fsSL https://raw.githubusercontent.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/main/scripts/get-cala.sh | bash
+\`\`\`
+
+**O a mano:**
+
 1. Descarga **Cala-$VERSION.dmg** (abajo, en *Assets*), ábrelo y arrastra **Cala** a **Aplicaciones**.
 2. La primera vez macOS la bloquea porque Cala es gratis y no está firmada por Apple:
    - **macOS 15 o más nuevo:** abre Cala → **Listo** → *Ajustes del Sistema → Privacidad y seguridad* → **Abrir igualmente** → vuelve a abrir Cala → **Abrir igualmente**.

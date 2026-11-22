@@ -43,6 +43,18 @@ Gratis · Sin cuentas · Nada sale de tu Mac · macOS 14 o más nuevo · Apple s
 
 ## Instalar
 
+### La forma más rápida (sin avisos de macOS)
+
+Abre **Terminal** (búscala con Spotlight: ⌘ + Espacio, "Terminal"), pega esta línea y pulsa Enter:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh | bash
+```
+
+Descarga la última versión, comprueba que el archivo es el publicado aquí (SHA-256), instala Cala en Aplicaciones y la abre. Como no pasa por el navegador, macOS no la bloquea. Sirve también para **actualizar**, y tus ajustes se conservan. Puedes [leer el script](scripts/get-cala.sh) antes de usarlo.
+
+### Descargando el archivo
+
 1. **Descarga** `Cala-x.y.z.dmg` desde [Releases](https://github.com/MineiToshio/cala-taskbar/releases/latest).
 2. **Ábrelo** y arrastra **Cala** a la carpeta **Aplicaciones**.
 3. **Ábrela la primera vez.** Cala es gratis y no está firmada por Apple (eso cuesta 99 USD al año), así que macOS la bloquea **una sola vez**:
@@ -55,7 +67,7 @@ Gratis · Sin cuentas · Nada sale de tu Mac · macOS 14 o más nuevo · Apple s
 
    **macOS 14 (Sonoma)**: en Aplicaciones, haz clic derecho sobre **Cala → Abrir**, y otra vez **Abrir**.
 
-   Después de esto, Cala abre normal para siempre.
+   Después de esto, Cala abre normal para siempre. (Con el comando de arriba te saltas este paso.)
 
 4. **Sigue la bienvenida.** Son cuatro pasos cortos y puedes saltar cualquiera.
 
@@ -114,7 +126,7 @@ Nada sale de tu Mac salvo que tú lo envíes. *Reportar un problema* te muestra 
 
 ## Problemas frecuentes
 
-- **"Cala no se puede abrir" / "Apple no pudo verificar…"**: es el bloqueo de una sola vez; mira el paso 3 de [Instalar](#instalar).
+- **"Cala no se puede abrir" / "Apple no pudo verificar…"**: es el bloqueo de una sola vez; mira el paso 3 de [Instalar](#instalar), o instala con el comando de Terminal, que no lo muestra.
 - **No veo miniaturas**: activa Grabación de pantalla en *Configuración → Permisos*.
 - **El Dock desapareció**: Cala lo oculta solo si lo pediste. Apágalo en *Configuración → General*, o sal de Cala.
 - **Algo falla**: clic derecho en la barra → *Reportar un problema…*, o abre un [issue](https://github.com/MineiToshio/cala-taskbar/issues).
@@ -138,7 +150,15 @@ git clone https://github.com/MineiToshio/cala-taskbar.git && cd cala-taskbar
 
 **Cala is a free taskbar for macOS 14+** (Apple silicon and Intel): your apps at the bottom with window thumbnails, plus Wi‑Fi, sound, battery, disk, calendar and a "why is my Mac slow" panel on the right. No accounts, nothing leaves your Mac.
 
-**Install**
+**Install — quickest (no macOS warnings)**: open Terminal and run
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh | bash
+```
+
+It downloads the latest release, checks its SHA-256, installs Cala in Applications and opens it. Also updates. [Read the script](scripts/get-cala.sh) first if you like.
+
+**Install — from the DMG**
 1. Download `Cala-x.y.z.dmg` from [Releases](https://github.com/MineiToshio/cala-taskbar/releases/latest), open it and drag **Cala** to **Applications**.
 2. Cala is free and not signed by Apple, so macOS blocks it **once**:
    - **macOS 15 or later**: open Cala, press **Done**, then go to **System Settings → Privacy & Security**, click **Open Anyway** next to "Cala was blocked", enter your password, and open Cala again → **Open Anyway**.
