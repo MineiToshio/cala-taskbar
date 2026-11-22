@@ -82,6 +82,15 @@ enum LoadMetric {
         case .memory: return memoryText(UInt64(amount), locale: locale)
         }
     }
+
+    func values(for details: [LoadDetail], parent: Breakdown.Row, locale: Locale) -> [String] {
+        guard let display = parent.memoryDisplay, parent.amount > 0 else {
+            return details.map { value($0.amount, locale: locale) }
+        }
+        let scale = Double(display.count) / Double(parent.amount)
+        let shares = SystemRules.apportion(details.map { Double($0.amount) * scale }, to: display.count)
+        return shares.map { display.unit.text($0, locale: locale) }
+    }
 }
 
 struct ProcessUsage: Equatable {
@@ -105,8 +114,34 @@ struct LoadDetail: Equatable, Identifiable {
     let action: SystemAction?
 }
 
+struct SystemPanelLayout: Equatable {
+    static let maxHeight = 520
+    static let maxRows = 7
+    static let rowHeight = 26
+    static let rowSpacing = 4
+    static let cardHeight = 91
+    static let noteHeight = 30
+
+    let rowLimit: Int
+    let listHeight: Int
+    let expandedListHeight: Int
+
+    init(messageHeight: Int, hasMaintenance: Bool) {
+        // Fixed chrome includes the flyout padding and the “More” navigation row.
+        let chrome = 231 + (messageHeight > 0 ? messageHeight + 10 : 0) + (hasMaintenance ? 34 : 0)
+        let available = Self.maxHeight - chrome
+        let preferred = Self.maxRows - (messageHeight > Self.noteHeight ? 1 : 0) - (hasMaintenance ? 1 : 0)
+        rowLimit = min(preferred, (available + Self.rowSpacing) / (Self.rowHeight + Self.rowSpacing))
+        listHeight = Self.height(forRows: rowLimit)
+        expandedListHeight = min(available, listHeight + 34)
+    }
+
+    static func height(forRows count: Int) -> Int {
+        count * rowHeight + max(0, count - 1) * rowSpacing
+    }
+}
+
 struct LoadDetailLayout {
-    static let listHeight = 150
     static let expandedRowHeight = 22
     static let detailRowHeight = 18
     static let maxDetailRows = 5
@@ -116,13 +151,13 @@ struct LoadDetailLayout {
     let headerHeight: Int
     let capacity: Int
 
-    init(parentCount: Int, showsEstimate: Bool) {
+    init(parentCount: Int, showsEstimate: Bool, listHeight: Int) {
         let header = showsEstimate ? 14 : 0
-        let normalBudget = Self.listHeight - parentCount * (Self.expandedRowHeight + 4) - header
+        let normalBudget = listHeight - parentCount * (Self.expandedRowHeight + 4) - header
         let useCompactSiblings = normalBudget < 2 * Self.detailRowHeight
         let siblingHeight = useCompactSiblings ? 16 : Self.expandedRowHeight
         let spacing = useCompactSiblings ? 3 : 4
-        let budget = Self.listHeight - Self.expandedRowHeight - max(0, parentCount - 1) * siblingHeight
+        let budget = listHeight - Self.expandedRowHeight - max(0, parentCount - 1) * siblingHeight
             - parentCount * spacing - header
         self.siblingHeight = siblingHeight
         self.spacing = spacing
@@ -249,6 +284,7 @@ struct Breakdown: Equatable {
         let amount: Int
         let loadKeys: [String]
         var isTool = false
+        var memoryDisplay: MemoryDisplay?
 
         var expandable: Bool { isRest || isTool }
     }
@@ -259,7 +295,7 @@ struct Breakdown: Equatable {
 enum SystemRules {
     static let busyAt = 75.0, hotAt = 90.0, sustainedMin = 2.0
     static let memWarnMin = 2.0, memCriticalMin = 1.0, heatCriticalMin = 2.0
-    static let rowMin = 1.0, topRows = 3, mismatch = 5.0
+    static let rowMin = 1.0, mismatch = 5.0
     static let culpritShare = 0.25, culpritMin = 10.0, systemShare = 0.5
     static let nameMax = 18
 
@@ -278,6 +314,13 @@ enum SystemRules {
 
     static func memoryState(_ s: LoadSnapshot) -> MeterState {
         memoryState(pressure: s.pressure, minutes: s.pressureMinutes, criticalMinutes: s.criticalPressureMinutes)
+    }
+
+    static func memoryStatus(_ pressure: MemoryPressure, state: MeterState,
+                             lang: String? = Locale.preferredLanguages.first) -> String {
+        if state == .veryTight { return calendarText("Very tight", "Muy justa", preferredLanguage: lang) }
+        return pressure == .normal ? calendarText("Normal", "Normal", preferredLanguage: lang)
+                                   : calendarText("Tight", "Justa", preferredLanguage: lang)
     }
 
     static func level(_ s: LoadSnapshot) -> SystemLevel {
@@ -374,7 +417,7 @@ enum SystemRules {
             detail = nil
         case .measuring(let min):
             title = tr("Busy for \(min) min", "Lleva \(min) min muy ocupado")
-            detail = tr("Checking what is using it…", "Viendo qué lo está usando…")
+            detail = nil
         case .systemLoad:
             title = tr("Cala can’t identify some of the load", "Hay carga que Cala no puede identificar")
             detail = tr("It may be macOS or another account. Wait a few minutes. If it lasts, open Activity Monitor.",
@@ -489,10 +532,11 @@ enum SystemRules {
         return Array(groups.values)
     }
 
-    static func cpuBreakdown(_ loads: [AppLoad], total: Double, lang: String?) -> Breakdown {
+    static func cpuBreakdown(_ loads: [AppLoad], total: Double, lang: String?,
+                             rowLimit: Int = SystemPanelLayout.maxRows) -> Breakdown {
         let top = displayLoads(loads).filter { $0.load.cpu >= rowMin }.sorted {
             $0.load.cpu == $1.load.cpu ? $0.key < $1.key : $0.load.cpu > $1.load.cpu
-        }.prefix(topRows)
+        }.prefix(max(0, rowLimit - 1))
         let sum = top.reduce(0) { $0 + $1.load.cpu }
         let rest = total - sum
         guard rest >= -mismatch else { return Breakdown(rows: [], consistent: false) }
@@ -524,26 +568,50 @@ enum SystemRules {
         return integers
     }
 
-    static func memoryBreakdown(_ loads: [AppLoad], used: UInt64, lang: String?, locale: Locale) -> Breakdown {
-        let top = displayLoads(loads).sorted {
+    static func memoryBreakdown(_ loads: [AppLoad], used: UInt64, lang: String?, locale: Locale,
+                                rowLimit: Int = SystemPanelLayout.maxRows) -> Breakdown {
+        guard used > 0 else { return Breakdown(rows: [], consistent: true) }
+        let groups = displayLoads(loads).filter { $0.load.memory > 0 }.sorted {
             $0.load.memory == $1.load.memory ? $0.key < $1.key : $0.load.memory > $1.load.memory
-        }.prefix(topRows)
-        let denominator = Double(max(1, used))
-        var rows = top.map {
-            row($0, value: memoryText($0.load.memory, locale: locale), amount: Int($0.load.memory),
-                fraction: Double($0.load.memory) / denominator, lang: lang)
         }
-        let measured = top.reduce(0) { $0 + $1.load.memory }
-        if used > measured, used - measured >= 100 * 1_048_576 {
-            let rest = used - measured
-            rows.append(restRow(value: memoryText(rest, locale: locale), amount: Int(rest),
-                                fraction: Double(rest) / denominator, lang: lang))
+        let measured = groups.reduce(0) { $0 + $1.load.memory }
+        let amounts: [Int]
+        if measured > used {
+            // Process footprints can overlap, including groups below the visible cutoff.
+            let scale = Double(used) / Double(measured)
+            amounts = apportion(groups.map { Double($0.load.memory) * scale }, to: Int(used))
+        } else {
+            amounts = groups.map { Int($0.load.memory) }
+        }
+        let unmeasured = Int(used) - amounts.reduce(0, +)
+
+        // Use the meter's precision across the list: different binary units cannot always add up exactly.
+        // Apportion all groups before applying the row limit so resizing never changes an app's label.
+        let unit = MemoryDisplayUnit(total: used)
+        let displayedTotal = unit.roundedCount(forBytes: used)
+        let displayShares = (amounts + [unmeasured]).map { unit.count(forBytes: UInt64($0)) }
+        let displayedAmounts = apportion(displayShares, to: displayedTotal)
+
+        var rows: [Breakdown.Row] = []
+        var remainingBytes = Int(used)
+        var remainingDisplayed = displayedTotal
+        for i in groups.indices.prefix(max(0, rowLimit - 1)) where amounts[i] > 0 {
+            let display = MemoryDisplay(unit: unit, count: displayedAmounts[i])
+            rows.append(row(groups[i], value: display.text(locale: locale), amount: amounts[i],
+                            fraction: Double(amounts[i]) / Double(used), lang: lang, memoryDisplay: display))
+            remainingBytes -= amounts[i]
+            remainingDisplayed -= displayedAmounts[i]
+        }
+        if remainingBytes > 0 {
+            let display = MemoryDisplay(unit: unit, count: remainingDisplayed)
+            rows.append(restRow(value: display.text(locale: locale), amount: remainingBytes,
+                                fraction: Double(remainingBytes) / Double(used), lang: lang, memoryDisplay: display))
         }
         return Breakdown(rows: rows, consistent: true)
     }
 
     private static func row(_ group: DisplayLoad, value: String, amount: Int,
-                            fraction: Double, lang: String?) -> Breakdown.Row {
+                            fraction: Double, lang: String?, memoryDisplay: MemoryDisplay? = nil) -> Breakdown.Row {
         let load = group.load
         let suffix: String?
         switch load.kind {
@@ -560,7 +628,8 @@ enum SystemRules {
         let name: String
         if case .app = load.kind { name = load.name } else { name = displayName(load.name, lang: lang) }
         return Breakdown.Row(key: group.key, name: name, suffix: suffix, value: value, fraction: min(1, fraction),
-                             isRest: false, amount: amount, loadKeys: group.loadKeys, isTool: group.isTool)
+                             isRest: false, amount: amount, loadKeys: group.loadKeys, isTool: group.isTool,
+                             memoryDisplay: memoryDisplay)
     }
 
     private static func displayName(_ name: String, lang: String?) -> String {
@@ -585,9 +654,11 @@ enum SystemRules {
         return friendly(executable: executable)?.what ?? ("macOS services", "servicios de macOS")
     }
 
-    private static func restRow(value: String, amount: Int, fraction: Double, lang: String?) -> Breakdown.Row {
+    private static func restRow(value: String, amount: Int, fraction: Double, lang: String?,
+                                memoryDisplay: MemoryDisplay? = nil) -> Breakdown.Row {
         Breakdown.Row(key: "rest", name: calendarText("System and others", "Sistema y otros", preferredLanguage: lang),
-                      suffix: nil, value: value, fraction: fraction, isRest: true, amount: amount, loadKeys: [])
+                      suffix: nil, value: value, fraction: fraction, isRest: true, amount: amount, loadKeys: [],
+                      memoryDisplay: memoryDisplay)
     }
 
     private struct DetailGroup {

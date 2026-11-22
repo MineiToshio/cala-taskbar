@@ -448,6 +448,25 @@ struct SystemPanelModel {
     var restProbe: RestProbe?
     var currentUID: UInt32 = 0
     var cores = 1
+    var reservation = PanelReservation()
+
+    var message: SystemMessage? { SystemRules.message(snapshot) }
+    var isLoading: Bool { snapshot.reading == nil }
+
+    var slots: PanelReservation {
+        let currentHeight = switch message?.style {
+        case .card: SystemPanelLayout.cardHeight
+        case .note: SystemPanelLayout.noteHeight
+        case nil: 0
+        }
+        return PanelReservation(messageHeight: max(reservation.messageHeight, currentHeight),
+                                hasMaintenance: maintenance != nil || reservation.hasMaintenance)
+    }
+
+    var layout: SystemPanelLayout {
+        let slots = slots
+        return SystemPanelLayout(messageHeight: slots.messageHeight, hasMaintenance: slots.hasMaintenance)
+    }
 
     var metric: LoadMetric { tab == 1 ? .memory : .cpu }
 
@@ -455,19 +474,20 @@ struct SystemPanelModel {
 
     var cpuBreakdown: Breakdown? {
         guard let reading = snapshot.reading else { return nil }
-        return SystemRules.cpuBreakdown(reading.loads, total: reading.cpuWindow, lang: Locale.preferredLanguages.first)
+        return SystemRules.cpuBreakdown(reading.loads, total: reading.cpuWindow, lang: Locale.preferredLanguages.first,
+                                        rowLimit: layout.rowLimit)
     }
 
     var breakdown: Breakdown? {
         guard tab == 1 else { return cpuBreakdown }
         guard let reading = snapshot.reading else { return nil }
         return SystemRules.memoryBreakdown(reading.loads, used: snapshot.memoryUsed,
-                                           lang: Locale.preferredLanguages.first, locale: .current)
+                                           lang: Locale.preferredLanguages.first, locale: .current, rowLimit: layout.rowLimit)
     }
 
     func detailRows(for row: Breakdown.Row, in breakdown: Breakdown) -> [LoadDetail] {
         let lang = Locale.preferredLanguages.first
-        let layout = LoadDetailLayout(parentCount: breakdown.rows.count, showsEstimate: row.isRest)
+        let layout = detailLayout(for: row, in: breakdown)
         if row.isRest {
             let ps: [ProcessUsage]?
             if case .available(let samples) = restProbe { ps = samples } else { ps = nil }
@@ -476,6 +496,10 @@ struct SystemPanelModel {
                                            currentUID: currentUID, cores: cores, lang: lang, capacity: layout.capacity)
         }
         return SystemRules.toolDetails(row, loads: snapshot.loads, metric: metric, lang: lang, capacity: layout.capacity)
+    }
+
+    func detailLayout(for row: Breakdown.Row, in breakdown: Breakdown) -> LoadDetailLayout {
+        LoadDetailLayout(parentCount: breakdown.rows.count, showsEstimate: row.isRest, listHeight: layout.expandedListHeight)
     }
 
     var restNote: String {
@@ -494,18 +518,8 @@ struct SystemPanelModel {
 }
 
 struct PanelReservation: Equatable {
-    var message: CGFloat = 0
-    var maintenance: CGFloat = 0
-}
-
-private struct PanelReservationKey: PreferenceKey {
-    static let defaultValue = PanelReservation()
-
-    static func reduce(value: inout PanelReservation, nextValue: () -> PanelReservation) {
-        let next = nextValue()
-        value.message = max(value.message, next.message)
-        value.maintenance = max(value.maintenance, next.maintenance)
-    }
+    var messageHeight = 0
+    var hasMaintenance = false
 }
 
 struct SystemPane: View {
@@ -517,6 +531,7 @@ struct SystemPane: View {
         let style: SystemMessage.Style?
         let maintenance: Bool
         let expanded: Bool
+        let layout: SystemPanelLayout
     }
 
     @ObservedObject private var m = SystemMonitor.shared
@@ -529,17 +544,17 @@ struct SystemPane: View {
 
     var body: some View {
         let snapshot = m.snapshot()
-        let message = SystemRules.message(snapshot)
-        let maintenance = advisor.visible ? RestartRules.summary(advisor.advice, lang: Locale.preferredLanguages.first) : nil
-        let model = panelModel(snapshot, maintenance: maintenance)
+        let model = panelModel(snapshot)
+        let message = model.message
         let restIsExpanded = page == .main && expandedKey == "rest"
             && model.breakdown?.rows.contains(where: \.isRest) == true
         let signature = LayoutSignature(page: page, kind: message?.kind, style: message?.style,
-                                        maintenance: maintenance != nil, expanded: reservesExpandedHeight)
+                                        maintenance: model.maintenance != nil, expanded: reservesExpandedHeight,
+                                        layout: model.layout)
         VStack(spacing: 0) {
             switch page {
             case .main:
-                SystemPanelView(model: model, reservation: $reservation,
+                SystemPanelView(model: model,
                                 onTab: { tab = $0; expandedKey = nil; m.setRestExpanded(false) },
                                 onExpand: toggleExpansion,
                                 onAction: { perform($0, from: snapshot) },
@@ -556,6 +571,7 @@ struct SystemPane: View {
                 NotificationCenter.default.post(name: .flyoutRefit, object: nil)
             }
         }
+        .onChange(of: model.slots, initial: true) { _, slots in reservation = slots }
         .onChange(of: restIsExpanded) { _, expanded in m.setRestExpanded(expanded) }
         .onDisappear { m.setRestExpanded(false) }
         .onAppear {
@@ -590,7 +606,7 @@ struct SystemPane: View {
 
     private func performDetail(_ action: SystemAction, from displayed: LoadSnapshot) {
         let current = m.snapshot()
-        let model = panelModel(current, maintenance: nil)
+        let model = panelModel(current)
         guard displayed.reading?.isFresh(at: current.observedAt) == true,
               let breakdown = model.breakdown,
               let row = breakdown.rows.first(where: { $0.isTool && $0.key == expandedKey }),
@@ -598,11 +614,13 @@ struct SystemPane: View {
         SystemAdvice.perform(action)
     }
 
-    private func panelModel(_ snapshot: LoadSnapshot, maintenance: (text: String, strong: Bool, more: Int)?) -> SystemPanelModel {
+    private func panelModel(_ snapshot: LoadSnapshot) -> SystemPanelModel {
+        let maintenance = advisor.visible ? RestartRules.summary(advisor.advice, lang: Locale.preferredLanguages.first) : nil
         var model = SystemPanelModel(snapshot: snapshot, cpuHistory: m.cpuHistory, memoryHistory: m.memoryHistory,
                                      maintenance: maintenance, tab: tab, expandedKey: expandedKey,
                                      reservesExpandedHeight: reservesExpandedHeight, restProbe: m.restProbe,
-                                     currentUID: getuid(), cores: ProcessInfo.processInfo.activeProcessorCount)
+                                     currentUID: getuid(), cores: ProcessInfo.processInfo.activeProcessorCount,
+                                     reservation: reservation)
         let visibleKeys = Set(model.breakdown?.rows.flatMap(\.loadKeys) ?? [])
         for load in snapshot.loads where visibleKeys.contains(load.key) {
             if case .app(let pid?) = load.kind {
@@ -616,7 +634,6 @@ struct SystemPane: View {
 struct SystemPanelView: View {
     @Environment(\.colorScheme) private var colorScheme
     let model: SystemPanelModel
-    @Binding var reservation: PanelReservation
     let onTab: (Int) -> Void
     var onExpand: (Breakdown.Row) -> Void = { _ in }
     let onAction: (SystemAction) -> Void
@@ -626,36 +643,43 @@ struct SystemPanelView: View {
 
     var body: some View {
         let s = model.snapshot
-        let message = SystemRules.message(s)
+        let message = model.message
+        let slots = model.slots
         let breakdown = model.breakdown
         let rows = breakdown?.rows ?? []
         let expanded = rows.first { $0.expandable && $0.key == model.expandedKey }
-        let reservedHeight = CGFloat(LoadDetailLayout.listHeight)
-        let foldedHeight = CGFloat(max(26, rows.count * 30 - 4))
-        let retainedAfterFold = model.reservesExpandedHeight && expanded == nil
-        let listHeight = expanded != nil ? reservedHeight : (retainedAfterFold ? foldedHeight : 116)
+        let layout = model.layout
+        let retainedHeight = CGFloat(layout.expandedListHeight)
+        let foldedHeight = CGFloat(SystemPanelLayout.height(forRows: max(1, rows.count)))
+        let loadingExpanded = model.isLoading && model.expandedKey != nil && model.reservesExpandedHeight
+        let retainedAfterFold = model.reservesExpandedHeight && expanded == nil && !loadingExpanded
+        let contentHeight = model.isLoading ? CGFloat(layout.listHeight) : foldedHeight
+        let listHeight = expanded != nil || loadingExpanded ? retainedHeight
+            : (retainedAfterFold ? contentHeight : CGFloat(layout.listHeight))
         VStack(alignment: .leading, spacing: 10) {
             header(SystemRules.level(s))
-            meters(s)
-            if message != nil || reservation.message > 0 {
-                messageSlot(message)
+            if model.isLoading {
+                SystemLoadingPulse {
+                    meters(s)
+                }
+                .accessibilityHidden(true)
+            } else {
+                meters(s)
+            }
+            if slots.messageHeight > 0 {
+                messageSlot(message, height: CGFloat(slots.messageHeight))
             }
             usageList(breakdown, rows: rows, expanded: expanded, height: listHeight)
             VStack(spacing: 8) {
                 Divider().frame(height: 1)
                     .accessibilityHidden(true)
-                if model.maintenance != nil || reservation.maintenance > 0 {
+                if slots.hasMaintenance {
                     maintenanceSlot
                 }
                 footer
             }
         }
-        .padding(.bottom, retainedAfterFold ? reservedHeight - foldedHeight : 0)
-        .onPreferenceChange(PanelReservationKey.self) { next in
-            let measured = PanelReservation(message: max(reservation.message, next.message),
-                                            maintenance: max(reservation.maintenance, next.maintenance))
-            if measured != reservation { reservation = measured }
-        }
+        .padding(.bottom, retainedAfterFold ? retainedHeight - contentHeight : 0)
     }
 
     private func header(_ level: SystemLevel) -> some View {
@@ -695,44 +719,49 @@ struct SystemPanelView: View {
         case .veryBusy: calendarText("Very busy", "Muy ocupado")
         default: calendarText("Normal", "Normal")
         }
-        let memoryTextLabel = switch memory {
-        case .veryTight: calendarText("Very tight", "Muy justa")
-        default: s.pressure == .normal ? calendarText("Normal", "Normal") : calendarText("Tight", "Justa")
-        }
+        let memoryTextLabel = SystemRules.memoryStatus(s.pressure, state: memory)
         let gigabytes = Int((Double(s.memoryTotal) / 1_073_741_824).rounded())
         return HStack(alignment: .top, spacing: 12) {
             MeterTile(label: calendarText("Processor", "Procesador"), status: cpuText, state: cpu,
-                      strained: cpu == .busy, value: "\(model.cpuValue)%", history: model.cpuHistory)
+                      strained: cpu == .busy, value: "\(model.cpuValue)%", history: model.cpuHistory, loading: model.isLoading)
             MeterTile(label: calendarText("Memory", "Memoria"), status: memoryTextLabel, state: memory,
                       strained: s.pressure != .normal, value: memoryText(s.memoryUsed),
-                      unit: calendarText("of \(gigabytes) GB", "de \(gigabytes) GB"), history: model.memoryHistory)
+                      unit: calendarText("of \(gigabytes) GB", "de \(gigabytes) GB"), history: model.memoryHistory,
+                      loading: model.isLoading)
         }
     }
 
-    private func messageSlot(_ message: SystemMessage?) -> some View {
+    private func messageSlot(_ message: SystemMessage?, height: CGFloat) -> some View {
         Group {
-            if let message, message.style == .card {
+            if let message, case .measuring = message.kind {
+                SystemLoadingPulse {
+                    VStack(alignment: .leading, spacing: 7) {
+                        SystemSkeletonMark().frame(width: 180, height: 12)
+                        SystemSkeletonMark().frame(height: 9)
+                        SystemSkeletonMark().frame(width: 240, height: 9)
+                        SystemSkeletonMark().frame(width: 94, height: 15)
+                    }
+                    .padding(10)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
+                }
+                .accessibilityHidden(true)
+            } else if let message, message.style == .card {
                 StatusCard(message: message, text: SystemRules.text(message), onAction: onAction)
-            } else if reservation.message > 30 {
+            } else if height > CGFloat(SystemPanelLayout.noteHeight) {
                 StatusNote(title: calendarText("Better now. Nothing to do.", "Ya está mejor. No hace falta hacer nada."), recovered: true)
             } else if let message {
                 StatusNote(title: SystemRules.text(message).title)
             } else {
-                Color.clear.frame(height: 0)
+                Color.clear
             }
         }
-        .fixedSize(horizontal: false, vertical: true)
-        .background {
-            GeometryReader { geometry in
-                Color.clear.preference(key: PanelReservationKey.self, value: PanelReservation(message: geometry.size.height))
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: reservation.message, alignment: .topLeading)
+        .frame(maxWidth: .infinity)
+        .frame(height: height, alignment: .topLeading)
     }
 
     private func usageList(_ breakdown: Breakdown?, rows: [Breakdown.Row], expanded: Breakdown.Row?,
                            height: CGFloat) -> some View {
-        let layout = expanded.map { LoadDetailLayout(parentCount: rows.count, showsEstimate: $0.isRest) }
+        let layout = breakdown.flatMap { data in expanded.map { model.detailLayout(for: $0, in: data) } }
         return VStack(spacing: 6) {
             HStack {
                 Text(calendarText("What uses the most", "Lo que más usa")).font(.system(size: 12.5, weight: .semibold))
@@ -746,24 +775,51 @@ struct SystemPanelView: View {
                 .frame(width: 170)
             }
             .frame(height: 22)
-            VStack(alignment: .leading, spacing: CGFloat(layout?.spacing ?? 4)) {
-                if rows.isEmpty {
-                    Text(breakdown == nil ? calendarText("Measuring…", "Midiendo…") :
-                            calendarText("Nothing noticeable now.", "Nada destacable ahora."))
-                        .font(.system(size: 12.5)).flyoutSecondary().frame(height: 26)
-                }
-                ForEach(rows, id: \.key) { row in
-                    let isExpanded = expanded?.key == row.key
-                    let rowHeight = layout.map { isExpanded ? LoadDetailLayout.expandedRowHeight : $0.siblingHeight } ?? 26
-                    loadRow(row, isExpanded: isExpanded, height: CGFloat(rowHeight))
-                    if isExpanded, let breakdown, let layout {
-                        loadDetails(row, in: breakdown, layout: layout)
+            Group {
+                if model.isLoading {
+                    SystemLoadingPulse {
+                        VStack(spacing: CGFloat(SystemPanelLayout.rowSpacing)) {
+                            ForEach(0..<model.layout.rowLimit, id: \.self) { index in
+                                loadingRow(index)
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(calendarText("Loading system data", "Cargando datos del sistema"))
+                } else {
+                    VStack(alignment: .leading, spacing: CGFloat(layout?.spacing ?? SystemPanelLayout.rowSpacing)) {
+                        if rows.isEmpty {
+                            Text(calendarText("Nothing noticeable now.", "Nada destacable ahora."))
+                                .font(.system(size: 12.5)).flyoutSecondary().frame(height: CGFloat(SystemPanelLayout.rowHeight))
+                        }
+                        ForEach(rows, id: \.key) { row in
+                            let isExpanded = expanded?.key == row.key
+                            let rowHeight = layout.map { isExpanded ? LoadDetailLayout.expandedRowHeight : $0.siblingHeight }
+                                ?? SystemPanelLayout.rowHeight
+                            loadRow(row, isExpanded: isExpanded, height: CGFloat(rowHeight))
+                            if isExpanded, let breakdown, let layout {
+                                loadDetails(row, in: breakdown, layout: layout)
+                            }
+                        }
                     }
                 }
             }
             .frame(maxWidth: .infinity)
             .frame(height: height, alignment: .topLeading)
         }
+    }
+
+    private func loadingRow(_ index: Int) -> some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 8) {
+                SystemSkeletonMark().frame(width: 16, height: 16)
+                SystemSkeletonMark().frame(width: index.isMultiple(of: 2) ? 103 : 128, height: 10)
+                Spacer()
+                SystemSkeletonMark().frame(width: 28, height: 10)
+            }
+            SystemSkeletonMark().frame(height: 5)
+        }
+        .frame(height: CGFloat(SystemPanelLayout.rowHeight))
     }
 
     @ViewBuilder private func loadRow(_ row: Breakdown.Row, isExpanded: Bool, height: CGFloat) -> some View {
@@ -783,12 +839,13 @@ struct SystemPanelView: View {
 
     private func loadDetails(_ row: Breakdown.Row, in breakdown: Breakdown, layout: LoadDetailLayout) -> some View {
         let details = model.detailRows(for: row, in: breakdown)
+        let labels = model.metric.values(for: details, parent: row, locale: .current)
         return VStack(alignment: .leading, spacing: 0) {
             if row.isRest {
                 Text(model.restNote).font(.system(size: 10)).flyoutSecondary()
                     .frame(height: CGFloat(layout.headerHeight))
             }
-            ForEach(details) { detail in
+            ForEach(Array(zip(details, labels)), id: \.0.id) { detail, label in
                 HStack(spacing: 6) {
                     Text(detail.name).lineLimit(1).layoutPriority(1)
                     if let count = detail.count {
@@ -803,7 +860,7 @@ struct SystemPanelView: View {
                         }
                         .buttonStyle(.plain).foregroundStyle(Color.accentColor).lineLimit(1)
                     }
-                    Text(model.metric.value(detail.amount, locale: .current))
+                    Text(label)
                         .monospacedDigit().frame(minWidth: 42, alignment: .trailing)
                 }
                 .frame(height: CGFloat(LoadDetailLayout.detailRowHeight))
@@ -824,12 +881,7 @@ struct SystemPanelView: View {
             }
         }
         .frame(height: 26, alignment: .leading)
-        .background {
-            GeometryReader { geometry in
-                Color.clear.preference(key: PanelReservationKey.self, value: PanelReservation(maintenance: geometry.size.height))
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: reservation.maintenance, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private var footer: some View {
@@ -845,6 +897,13 @@ struct SystemPanelView: View {
         }
         .font(.system(size: 11.5))
         .frame(height: 18)
+#if DEBUG
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(key: SystemFooterYKey.self, value: geometry.frame(in: .named("system-render")).minY)
+            }
+        }
+#endif
     }
 }
 
@@ -854,6 +913,42 @@ private struct TrailingChevron: LabelStyle {
             configuration.title
             configuration.icon.font(.system(size: 10))
         }
+    }
+}
+
+struct SystemSkeletonMark: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.12))
+    }
+}
+
+struct SystemLoadingPulse<Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        if reduceMotion {
+            content()
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 24)) { context in
+                let phase = context.date.timeIntervalSinceReferenceDate * Double.pi / 1.3
+                content().opacity(0.88 + 0.12 * cos(phase))
+            }
+        }
+    }
+}
+
+struct MeterStatusIndicator: View {
+    let state: MeterState
+    let strained: Bool
+
+    var body: some View {
+        let color: Color = switch state.level {
+        case .normal: strained ? .gray : .green
+        case .attention: .orange
+        case .critical: .red
+        }
+        Circle().fill(color).frame(width: 7, height: 7).accessibilityHidden(true)
     }
 }
 
@@ -869,6 +964,7 @@ struct MeterTile: View {
     let value: String
     var unit: String?
     let history: [Double]
+    var loading = false
 
     var body: some View {
         let graph: Color = switch state.level {
@@ -876,26 +972,41 @@ struct MeterTile: View {
         case .attention: .orange
         case .critical: .red
         }
-        let dot: Color = state.level == .normal ? (strained ? .gray : .green) : graph
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 4) {
-                Text(label).font(.system(size: 11.5, weight: .semibold)).flyoutSecondary()
-                Spacer(minLength: 2)
-                Circle().fill(dot).frame(width: 7, height: 7).accessibilityHidden(true)
-                Text(status).font(.system(size: 11))
+        Group {
+            if loading {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        SystemSkeletonMark().frame(width: 68, height: 10)
+                        Spacer()
+                        SystemSkeletonMark().frame(width: 42, height: 9)
+                    }
+                    .frame(height: 14)
+                    SystemSkeletonMark().frame(width: unit == nil ? 59 : 97, height: 21)
+                        .frame(height: 24, alignment: .leading)
+                    SystemSkeletonMark().frame(height: 22)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 4) {
+                        Text(label).font(.system(size: 11.5, weight: .semibold)).flyoutSecondary()
+                        Spacer(minLength: 2)
+                        MeterStatusIndicator(state: state, strained: strained)
+                        Text(status).font(.system(size: 11))
+                    }
+                    .lineLimit(1)
+                    .frame(height: 14)
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(value).font(.system(size: 22, weight: .semibold)).monospacedDigit().layoutPriority(1)
+                        if let unit { Text(unit).font(.system(size: 11)).flyoutSecondary() }
+                    }
+                    .lineLimit(1)
+                    .frame(height: 26)
+                    .padding(.top, 2)
+                    Spark(values: history, color: graph, height: 22)
+                        .padding(.top, 4)
+                        .accessibilityHidden(true)
+                }
             }
-            .lineLimit(1)
-            .frame(height: 14)
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(value).font(.system(size: 22, weight: .semibold)).monospacedDigit().layoutPriority(1)
-                if let unit { Text(unit).font(.system(size: 11)).flyoutSecondary() }
-            }
-            .lineLimit(1)
-            .frame(height: 26)
-            .padding(.top, 2)
-            Spark(values: history, color: graph, height: 22)
-                .padding(.top, 4)
-                .accessibilityHidden(true)
         }
         .frame(width: Self.width, height: Self.height, alignment: .topLeading)
         .accessibilityElement(children: .combine)
@@ -984,7 +1095,6 @@ struct MaintenanceRow: View {
                     Circle().fill(Color.orange).frame(width: 6, height: 6).accessibilityHidden(true)
                 }
                 Image(systemName: "wrench.and.screwdriver").font(.system(size: 12)).flyoutSecondary()
-                Text(calendarText("Maintenance: ", "Mantenimiento: ")).flyoutSecondary()
                 Text(text).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
                 if more > 0 { Text("+\(more)").flyoutSecondary() }
@@ -995,64 +1105,7 @@ struct MaintenanceRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-struct SystemDetailsPane: View {
-    @ObservedObject var monitor: SystemMonitor
-    let uptime: TimeInterval
-    let back: () -> Void
-
-    var body: some View {
-        let user = Int(monitor.cpuUser.rounded())
-        let system = Int(monitor.cpuSystem.rounded())
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        let apps = memoryText(monitor.memoryApps)
-        let wired = memoryText(monitor.memoryWired)
-        let compressed = memoryText(monitor.memoryCompressed)
-        let total = memoryText(monitor.memoryTotal)
-        let swap = memoryText(monitor.swapUsed)
-        let swapTotal = memoryText(monitor.swapTotal)
-        let pressure = monitor.pressure.title.lowercased()
-        let onFor = RestartRules.uptimeText(uptime)
-        let reading = monitor.processReading
-        let unreadable = reading?.unreadable ?? 0
-        let others = reading?.otherAccounts ?? 0
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Button(action: back) {
-                    Label(calendarText("System", "Sistema"), systemImage: "chevron.left")
-                }.buttonStyle(.plain)
-                Spacer()
-                Text(calendarText("Details", "Detalles")).fontWeight(.semibold)
-            }
-            Text(calendarText("CPU: user \(user)% · system \(system)% · \(cores) cores",
-                              "CPU: usuario \(user)% · sistema \(system)% · \(cores) núcleos"))
-            Text(calendarText("Memory: apps \(apps) · system \(wired) · compressed \(compressed), of \(total)",
-                              "Memoria: apps \(apps) · sistema \(wired) · comprimida \(compressed), de \(total)"))
-            Text(calendarText("Swap: \(swap) of \(swapTotal) · pressure \(pressure)",
-                              "Swap: \(swap) de \(swapTotal) · presión \(pressure)"))
-            Text(calendarText("On for \(onFor)", "Encendido hace \(onFor)"))
-            Divider()
-            Text(calendarText("System and others: unmeasured macOS and other accounts’ processes, apps below 1%, and short-lived processes.",
-                              "Sistema y otros: procesos sin medir de macOS u otras cuentas, apps por debajo del 1% y procesos breves."))
-            Text(calendarText("Processes Cala cannot measure: \(unreadable) (macOS and other accounts)",
-                              "Procesos que Cala no puede medir: \(unreadable) (macOS y otras cuentas)"))
-            Text(calendarText("Processes from other accounts: \(others)", "Procesos de otras cuentas: \(others)"))
-            VStack(spacing: 0) {
-                ForEach(reading?.loads.prefix(8) ?? []) { load in
-                    HStack {
-                        let executable = reading?.executableNames[load.key] ?? load.name
-                        Text("\(executable) ×\(load.count)").lineLimit(1)
-                        Spacer()
-                        Text("\(Int(load.cpu.rounded()))%").monospacedDigit()
-                    }
-                    .frame(height: 14)
-                }
-            }
-        }
-        .font(.system(size: 11.5))
-        .flyoutSecondary()
-        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(calendarText("Maintenance: \(text)", "Mantenimiento: \(text)"))
+        .accessibilityValue(more > 0 ? calendarText("\(more) more", "\(more) más") : "")
     }
 }

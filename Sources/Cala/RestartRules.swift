@@ -135,7 +135,7 @@ extension RestartReason {
     func short(lang: String?) -> String {
         let amount = amount ?? 0
         switch id {
-        case "update": return calendarText("macOS update waiting", "actualización de macOS pendiente", preferredLanguage: lang)
+        case "update": return calendarText("macOS update waiting", "macOS pendiente de actualizar", preferredLanguage: lang)
         case "uptime": return calendarText("on for \(amount) days", "\(amount) días encendido", preferredLanguage: lang)
         case "swap": return calendarText("lots of memory parked on disk", "mucha memoria guardada en disco", preferredLanguage: lang)
         case "compressed": return calendarText("lots of compressed memory", "mucha memoria comprimida", preferredLanguage: lang)

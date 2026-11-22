@@ -12,7 +12,8 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `CalendarViews.swift` | Upcoming event list and Calendar settings section, sharing flyout styles |
 | `CalendarText.swift` | Spanish/English string chooser shared by calendar and permission messages |
 | `UsagePace.swift` | Burn-rate projection per quota window and the low-quota / will-run-out notifications |
-| `SystemMonitor.swift` | CPU, memory and pressure sampling, process grouping via `libproc`, and the SwiftUI system panel and details |
+| `SystemMonitor.swift` | CPU, memory and pressure sampling, process grouping via `libproc`, and the SwiftUI system panel |
+| `SystemDetails.swift` | Live details adapter, section model and SwiftUI view for processor, memory and Mac activity |
 | `SystemRules.swift` | Pure load classification, launcher lookup, severity, message and action selection, and CPU and memory breakdowns |
 | `RestartRules.swift` | Pure restart recommendations, reason text and maintenance summary |
 | `Formatting.swift` | Shared disk byte and binary memory formatting |
@@ -107,9 +108,11 @@ Only when auto-hide is off and only on the primary screen: every 0.6 s, if the f
 - Low Power Mode: a background `Process` runs `/usr/bin/osascript -e` with `do shell script "pmset -a lowpowermode …" with administrator privileges` (password prompt each time). The toggle refreshes the actual system state on completion and every 2 s; no AppleScript executes on the main thread.
 
 ## System panel
-`SystemMonitor` samples process CPU and total CPU over the same window. It publishes a `ProcessReading` only when total CPU is within 0–100%, process values are finite and nonnegative, and their sum is at most five percentage points above the total. When validation fails, the sampling counters advance and the last valid reading stays available until it expires, four seconds after capture. The CPU meter, breakdown and attributed action use that same reading. Without a fresh valid reading, the meter uses the latest overall CPU sample and the list shows **Midiendo…**.
+`SystemMonitor` samples process CPU and total CPU over the same window. It publishes a `ProcessReading` only when total CPU is within 0–100%, process values are finite and nonnegative, and their sum is at most five percentage points above the total. When validation fails, the sampling counters advance and the last valid reading stays available until it expires, four seconds after capture. The CPU meter, breakdown and attributed action use that same reading. Without a fresh valid reading, the meters and list show loading skeletons, as does the guidance card when it is waiting for attribution. `SystemLoadingPulse` uses a static placeholder when Reduce Motion is enabled.
 
 The monitor tracks continuous critical memory pressure and thermal state separately. `SystemRules` uses those durations for red severity and the smoothed CPU duration for sustained-load guidance. App processes are grouped by bundle path, and multiple running instances leave the group without a quit PID.
+
+`SystemPanelLayout` budgets the list within the 520 pt panel height. It starts with seven rows and subtracts one for a guidance card and one for maintenance. CPU and memory breakdowns reserve one slot for the remainder.
 
 `SystemPane` passes live monitor and restart state to `SystemPanelView` as a model and callbacks. `SystemRules` and `RestartRules` work on values with Foundation. The SwiftUI views render their results, and AppKit actions run through `SystemAdvice` and `RestartAdvisor`.
 

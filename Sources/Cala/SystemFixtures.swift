@@ -10,6 +10,14 @@ struct MeterFrameKey: PreferenceKey {
     }
 }
 
+struct SystemFooterYKey: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
+    }
+}
+
 @MainActor
 enum SystemFixtures {
     private static func gib(_ amount: Double) -> UInt64 { UInt64((amount * 1_073_741_824).rounded()) }
@@ -33,7 +41,11 @@ enum SystemFixtures {
     private static let safari = app("Safari", 6, pid: 100, memory: 0.9)
     private static let mail = app("Mail", 2, pid: 101, memory: 0.3)
     private static let xcode = app("Xcode", 52, pid: 501, memory: 2)
-    private static let chrome = app("Google Chrome", 0, pid: 900, memory: 3.2)
+    private static let chrome = app("Google Chrome", 4, pid: 900, memory: 3.2)
+    private static let preview = app("Preview", 3, pid: 103, memory: 0.4)
+    private static let terminalApp = app("Terminal", 2, pid: 700, memory: 0.2)
+    private static let calendar = app("Calendar", 1, pid: 104, memory: 0.25)
+    private static let notes = app("Notes", 1, pid: 105, memory: 0.35)
 
     private static func model(_ snapshot: LoadSnapshot, tab: Int? = nil,
                               maintenance: (text: String, strong: Bool, more: Int)? = nil) -> SystemPanelModel {
@@ -64,13 +76,15 @@ enum SystemFixtures {
     }
 
     static let all: [(name: String, model: SystemPanelModel)] = {
-        let fine = snapshot(cpu: 21, smoothed: 22, loads: [safari, mail])
+        let fine = snapshot(cpu: 21, smoothed: 22, loads: [safari, mail, chrome, preview, terminalApp, calendar, notes])
         let spike = snapshot(cpu: 90, smoothed: 88, busy: 0.5, loads: [])
         var lightSafari = safari
         lightSafari.cpu = 5
-        let sustained = snapshot(cpu: 80, smoothed: 85, busy: 3.2, loads: [xcode, lightSafari])
-        let terminal = snapshot(cpu: 85, smoothed: 90, busy: 4, loads: [node(60, launcher: "Terminal", pid: 700)])
-        var critical = snapshot(cpu: 21, smoothed: 22, loads: [chrome, safari, mail])
+        let sustained = snapshot(cpu: 80, smoothed: 85, busy: 3.2,
+                                 loads: [xcode, lightSafari, chrome, preview, mail, calendar])
+        let terminal = snapshot(cpu: 85, smoothed: 90, busy: 4,
+                                 loads: [node(60, launcher: "Terminal", pid: 700), lightSafari, chrome, preview, mail, notes])
+        var critical = fine
         critical.pressure = .critical
         critical.pressureMinutes = 1.5
         critical.criticalPressureMinutes = 1.5
@@ -83,20 +97,24 @@ enum SystemFixtures {
                                   loads: [node(7, launcher: "Claude", pid: 697), claude, claudeCode])
         var worstCase = background
         lightSafari.cpu = 4
-        worstCase.lastReading = ProcessReading(capturedAt: 100, cpuWindow: 100, loads: background.loads + [lightSafari, mail])
+        worstCase.lastReading = ProcessReading(capturedAt: 100, cpuWindow: 100,
+                                                loads: background.loads + [lightSafari, mail, preview, calendar])
         let maintenance = RestartRules.summary(
             RestartRules.evaluate(RestartInput(uptime: 21 * 86_400, ram: gib(16), pendingUpdate: "macOS")),
             lang: Locale.preferredLanguages.first
         )
         var measuring = fine
         measuring.lastReading = nil
+        var measuringBusy = sustained
+        measuringBusy.lastReading = nil
         var memory = fine
         var lightChrome = chrome
         lightChrome.memory = gib(3.1)
         memory.memoryUsed = gib(12.6)
         var idleXcode = xcode
         idleXcode.cpu = 0
-        memory.lastReading = ProcessReading(capturedAt: 100, cpuWindow: 21, loads: [lightChrome, idleXcode, app("Slack", 0, pid: 102, memory: 0.9), mail])
+        memory.lastReading = ProcessReading(capturedAt: 100, cpuWindow: 21, loads: [lightChrome, idleXcode, app("Slack", 0, pid: 102, memory: 0.9),
+                                                               mail, preview, terminalApp, calendar, notes])
 
         let manyLaunchers = snapshot(cpu: 85, smoothed: 90, busy: 4, loads: [
             node(40, launcher: "Terminal", pid: 700, count: 12),
@@ -126,6 +144,11 @@ enum SystemFixtures {
         expandedWorst.restProbe = expandedRest.restProbe
         var foldedRest = expandedRest
         foldedRest.expandedKey = nil
+        var quietExpansion = model(fine)
+        quietExpansion.expandedKey = "rest"
+        quietExpansion.reservesExpandedHeight = true
+        var expiredExpansion = quietExpansion
+        expiredExpansion.snapshot.observedAt += ProcessReading.maxAge
         return [
             ("todo-bien", model(fine)),
             ("pico-corto", model(spike)),
@@ -139,10 +162,19 @@ enum SystemFixtures {
             ("expandido-sistema", expandedRest),
             ("expandido-sistema-desde-mas", expandedWorst),
             ("plegado-sistema", foldedRest),
+            ("expandido-sin-avisos", quietExpansion),
+            ("expandido-caducado", expiredExpansion),
             ("midiendo", model(measuring)),
+            ("midiendo-carga", model(measuringBusy)),
             ("lista-memoria", model(memory, tab: 1))
         ]
     }()
+    static let detail = SystemDetailsModel(cpuUser: 16, cpuSystem: 5, cores: 10, memoryUsed: gib(9),
+                                          memoryTotal: gib(16), memoryApps: gib(5.3), memoryWired: gib(2.5),
+                                          memoryCompressed: gib(1.2), swapUsed: gib(0.45), swapTotal: gib(1),
+                                          pressure: .warning, pressureState: .tight, uptime: 2 * 86_400 + 3 * 3_600,
+                                          unreadable: 196, otherAccounts: 24)
+
     static func restartSample(reasonCount: Int, denied: Bool) -> RestartPanelView {
         let input = RestartInput(uptime: 34 * 86_400, swapUsed: gib(6), swapTotal: gib(7), ram: gib(16),
                                  compressed: gib(6), pressure: .critical, pressureMinutes: 12,
@@ -166,17 +198,22 @@ enum SystemRender {
         case bitmapUnavailable
         case invalidLayout(name: String, size: CGSize, meters: [String: CGRect])
         case invalidBreakdown(name: String, total: Int, values: [String])
+        case footerMoved
     }
+
+    private static var footerPositions: [String: CGFloat] = [:]
 
     static func run(dir: String) -> Never {
         do {
             let output = URL(fileURLWithPath: dir, isDirectory: true)
             try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
             for fixture in SystemFixtures.all {
-                let view = SystemPanelView(model: fixture.model, reservation: .constant(PanelReservation()),
-                                           onTab: { _ in }, onAction: { _ in }, openRestart: {}, openDetails: {})
                 let model = fixture.model
-                if fixture.name != "midiendo" {
+                let view = SystemPanelView(model: model, onTab: { _ in }, onAction: { _ in }, openRestart: {}, openDetails: {})
+                let visibleRows = model.breakdown?.rows.count ?? 0
+                let loadingRows = model.isLoading ? model.layout.rowLimit : 0
+                print("\(fixture.name) → \(visibleRows) filas, \(loadingRows) marcadores, límite \(model.layout.rowLimit)")
+                if !model.isLoading {
                     let cpu = model.cpuBreakdown?.rows.map(\.value) ?? []
                     let numbers = cpu.compactMap { Int($0.dropLast()) }
                     guard model.snapshot.reading != nil, numbers.count == cpu.count, numbers.reduce(0, +) == model.cpuValue else {
@@ -185,10 +222,20 @@ enum SystemRender {
                     let label = model.tab == 0 ? "CPU" : "CPU (muestra de la pestaña Memoria)"
                     print("\(label) \(fixture.name) → \(cpu.joined(separator: " + ")) = \(model.cpuValue)%")
                 }
+                if model.tab == 1, let breakdown = model.breakdown {
+                    let unit = MemoryDisplayUnit(total: model.snapshot.memoryUsed)
+                    let total = unit.roundedCount(forBytes: model.snapshot.memoryUsed)
+                    let displayed = breakdown.rows.compactMap(\.memoryDisplay)
+                    guard displayed.count == breakdown.rows.count, displayed.allSatisfy({ $0.unit == unit }),
+                          displayed.reduce(0, { $0 + $1.count }) == total else {
+                        throw RenderError.invalidBreakdown(name: fixture.name, total: total, values: breakdown.rows.map(\.value))
+                    }
+                    print("Memoria \(fixture.name) → \(breakdown.rows.map(\.value).joined(separator: " + ")) = \(memoryText(model.snapshot.memoryUsed))")
+                }
                 if let breakdown = model.breakdown,
                    let parent = breakdown.rows.first(where: { $0.key == model.expandedKey }) {
                     let children = model.detailRows(for: parent, in: breakdown)
-                    let layout = LoadDetailLayout(parentCount: breakdown.rows.count, showsEstimate: parent.isRest)
+                    let layout = model.detailLayout(for: parent, in: breakdown)
                     guard children.count <= layout.capacity, children.reduce(0, { $0 + $1.amount }) == parent.amount else {
                         throw RenderError.invalidBreakdown(name: fixture.name, total: parent.amount,
                                                            values: children.map { String($0.amount) })
@@ -201,7 +248,7 @@ enum SystemRender {
                     try png(withMore(view), name: fixture.name, dark: true, in: output)
                 } else {
                     let light = try png(view, name: fixture.name, dark: false, in: output)
-                    if fixture.name != "midiendo", fixture.name != "lista-memoria" {
+                    if fixture.name != "lista-memoria" {
                         try light.write(to: output.appendingPathComponent("\(fixture.name).png"), options: .atomic)
                     }
                     try png(view, name: fixture.name, dark: true, in: output)
@@ -211,6 +258,18 @@ enum SystemRender {
                     try png(withMore(view), name: "con-mantenimiento-desde-mas", dark: true, in: output)
                 }
             }
+            guard let expandedFooter = footerPositions["expandido-sin-avisos-light"],
+                  let expiredFooter = footerPositions["expandido-caducado-light"],
+                  abs(expandedFooter - expiredFooter) < 0.01 else { throw RenderError.footerMoved }
+            print("Pie al desplegar y caducar → \(expandedFooter) pt en ambos")
+
+            let detail = SystemDetailsView(model: SystemFixtures.detail, back: {}, openActivityMonitor: {})
+            let detailRowCount = SystemFixtures.detail.sections.reduce(0) { $0 + $1.rows.count }
+            print("detalle → \(detailRowCount) filas en \(SystemFixtures.detail.sections.count) secciones")
+            let detailLight = try png(detail, name: "detalle", dark: false, in: output, hasMeters: false)
+            try detailLight.write(to: output.appendingPathComponent("detalle.png"), options: .atomic)
+            try png(detail, name: "detalle", dark: true, in: output, hasMeters: false)
+            try png(withMore(detail), name: "detalle-desde-mas", dark: false, in: output, hasMeters: false)
             let restartFixtures = [
                 ("reinicio-6-motivos", 6, false),
                 ("reinicio-error-permiso", 6, true),
@@ -244,10 +303,12 @@ enum SystemRender {
     private static func png<V: View>(_ view: V, name: String, dark: Bool, in directory: URL,
                                      hasMeters: Bool = true) throws -> Data {
         var meters: [String: CGRect] = [:]
+        var footerY: CGFloat?
         let root = view.padding(18).frame(width: 380).flyoutControls().themedPanel(theme: .named("system")).fixedSize()
             .environment(\.colorScheme, dark ? .dark : .light)
             .coordinateSpace(name: "system-render")
             .onPreferenceChange(MeterFrameKey.self) { meters = $0 }
+            .onPreferenceChange(SystemFooterYKey.self) { footerY = $0 }
         let host = NSHostingView(rootView: root)
         let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 380, height: 600),
                               styleMask: .borderless, backing: .buffered, defer: false)
@@ -271,6 +332,7 @@ enum SystemRender {
         host.cacheDisplay(in: host.bounds, to: bitmap)
         guard let data = bitmap.representation(using: .png, properties: [:]) else { throw RenderError.bitmapUnavailable }
         let style = dark ? "dark" : "light"
+        if let footerY { footerPositions["\(name)-\(style)"] = footerY }
         try data.write(to: directory.appendingPathComponent("\(name)-\(style).png"), options: .atomic)
         let metersNote = hasMeters ? ", medidores 166×68 pt" : ""
         print("\(name)-\(style) → \(Int(size.width))×\(Int(size.height.rounded(.up))) pt\(metersNote)")

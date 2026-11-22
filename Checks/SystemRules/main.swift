@@ -356,8 +356,8 @@ expect("B8 reparto por resto mayor", SystemRules.apportion([24.3, 8.4, 7.7], to:
 
 let memory = SystemRules.memoryBreakdown([app("Chrome", 0, memory: 3.1), app("Xcode", 0, memory: 2),
                                          app("Slack", 0, memory: 0.9), app("Mail", 0, memory: 0.3)],
-                                        used: gib(12.6), lang: lang, locale: locale)
-expect("R1 unidades binarias y resto", memory.rows.map(\.value) == ["3,1 GB", "2,0 GB", "922 MB", "6,6 GB"]
+                                        used: gib(12.6), lang: lang, locale: locale, rowLimit: 4)
+expect("R1 unidades binarias y resto", memory.rows.map(\.value) == ["3,1 GB", "2,0 GB", "0,9 GB", "6,6 GB"]
        && memory.rows.last?.isRest == true, memory.rows.map(\.value).joined(separator: ", "))
 let shared = SystemRules.memoryBreakdown([app("Chrome", 0, memory: 2.5), app("Xcode", 0, memory: 2)],
                                         used: gib(4), lang: lang, locale: locale)
@@ -398,7 +398,7 @@ expect("P3 límite de 30 ancestros", SystemRules.launcher(of: 2, parents: chain,
 
 let restart = RestartRules.evaluate(RestartInput(uptime: 21 * 86_400, ram: gib(16), pendingUpdate: "macOS"))
 let summary = RestartRules.summary(restart, lang: lang)
-expect("S1 actualización tiene prioridad", summary?.text == "actualización de macOS pendiente" && summary?.strong == true && summary?.more == 1)
+expect("S1 actualización tiene prioridad", summary?.text == "macOS pendiente de actualizar" && summary?.strong == true && summary?.more == 1)
 expect("S2 sin mantenimiento", RestartRules.summary(RestartAdvice(), lang: lang) == nil)
 
 let launcherLoads = [node(40, launcher: "Terminal", pid: 701, memory: 1.5),
@@ -502,14 +502,14 @@ expect("E12 RSS se reparte dentro de los bytes de la fila padre de Memoria",
        memoryRows.first(where: { $0.id == "otherAccount" })?.amount == 1_310_720
            && memoryRows.reduce(0) { $0 + $1.amount } == restMemoryParent.amount)
 
-let fourParents = LoadDetailLayout(parentCount: 4, showsEstimate: true)
+let fourParents = LoadDetailLayout(parentCount: 4, showsEstimate: true, listHeight: 150)
 let occupiedHeight = LoadDetailLayout.expandedRowHeight + 3 * fourParents.siblingHeight + 4 * fourParents.spacing
     + fourParents.headerHeight + fourParents.capacity * LoadDetailLayout.detailRowHeight
 expect("E13 cuatro filas con cabecera admiten tres subfilas completas",
        fourParents.capacity == 3 && fourParents.siblingHeight == 16
-           && occupiedHeight <= LoadDetailLayout.listHeight
-           && occupiedHeight + LoadDetailLayout.detailRowHeight > LoadDetailLayout.listHeight)
-let fullToolParents = LoadDetailLayout(parentCount: 4, showsEstimate: false)
+           && occupiedHeight <= 150
+           && occupiedHeight + LoadDetailLayout.detailRowHeight > 150)
+let fullToolParents = LoadDetailLayout(parentCount: 4, showsEstimate: false, listHeight: 150)
 expect("E14 cuatro filas de lanzadores conservan sus barras cuando caben dos subfilas",
        fullToolParents.capacity == 2 && fullToolParents.siblingHeight == LoadDetailLayout.expandedRowHeight)
 
@@ -573,7 +573,7 @@ let measuredKeys: [Int32: String] = [
 let appSamples = ownPS.compactMap { process in
     measuredKeys[process.pid].map { MeasuredProcess(usage: process, loadKey: $0) }
 } + [MeasuredProcess(usage: ProcessUsage(pid: 109, uid: 501, executable: "Claude", cpu: 0, memory: 0), loadKey: hiddenClaude.key)]
-let appRest = SystemRules.cpuBreakdown(appLoads, total: 100, lang: lang)
+let appRest = SystemRules.cpuBreakdown(appLoads, total: 100, lang: lang, rowLimit: 4)
 let appDetail = SystemRules.restDetails(appRest.rows.last!, breakdown: appRest, loads: appLoads, measured: appSamples,
                                         ps: ownPS, metric: .cpu, currentUID: 501, cores: 1, lang: lang)
 expect("E21 ps une los helpers y CLI verificados bajo su app, y anonimiza los desconocidos",
@@ -607,6 +607,82 @@ let largestOtherPS = SystemRules.parsePS("1 0 20 0 WindowServer\n2 0 10 0 mds\n3
 let largestOther = rankedDetails(3, ps: largestOtherPS)
 expect("E25 un Otros grande conserva su posición entre los primeros grupos",
        largestOther.map(\.id) == ["other", "windows", "more"] && largestOther.map(\.amount) == [60, 20, 20])
+
+let panelCases: [(message: Int, maintenance: Bool, rows: Int)] = [
+    (0, false, 7), (0, true, 6), (SystemPanelLayout.noteHeight, false, 7),
+    (SystemPanelLayout.noteHeight, true, 6), (SystemPanelLayout.cardHeight, false, 6),
+    (SystemPanelLayout.cardHeight, true, 5)
+]
+expect("L1 el presupuesto reserva siete, seis o cinco filas según los avisos", panelCases.allSatisfy { sample in
+    let layout = SystemPanelLayout(messageHeight: sample.message, hasMaintenance: sample.maintenance)
+    let chrome = 231 + (sample.message == 0 ? 0 : sample.message + 10) + (sample.maintenance ? 34 : 0)
+    return layout.rowLimit == sample.rows
+        && layout.listHeight == SystemPanelLayout.height(forRows: sample.rows)
+        && layout.expandedListHeight >= layout.listHeight
+        && chrome + layout.expandedListHeight <= SystemPanelLayout.maxHeight
+})
+expect("L2 cada estado expandido admite subfilas completas en Procesador y Memoria", panelCases.allSatisfy { sample in
+    let panel = SystemPanelLayout(messageHeight: sample.message, hasMaintenance: sample.maintenance)
+    return (1...panel.rowLimit).allSatisfy { count in
+        [true, false].allSatisfy { showsEstimate in
+            let detail = LoadDetailLayout(parentCount: count, showsEstimate: showsEstimate,
+                                          listHeight: panel.expandedListHeight)
+            let parentHeight = LoadDetailLayout.expandedRowHeight + (count - 1) * detail.siblingHeight + count * detail.spacing
+            let used = parentHeight + detail.headerHeight + detail.capacity * LoadDetailLayout.detailRowHeight
+            return detail.capacity >= 2 && used <= panel.expandedListHeight
+        }
+    }
+})
+
+let enoughLoads = (1...8).map { app("App \($0)", Double(10 - $0), memory: Double(10 - $0) / 2) }
+expect("L3 las filas de Procesador suman el total y reservan el último hueco para Sistema y otros", (5...7).allSatisfy { limit in
+    let data = SystemRules.cpuBreakdown(enoughLoads, total: 70, lang: lang, rowLimit: limit)
+    return data.rows.count == limit && data.rows.first?.name == "App 1" && data.rows.last?.isRest == true
+        && data.rows.reduce(0) { $0 + $1.amount } == 70
+})
+expect("L4 Memoria aplica el mismo límite y sus bytes suman el total", (5...7).allSatisfy { limit in
+    let data = SystemRules.memoryBreakdown(enoughLoads, used: gib(30), lang: lang, locale: locale, rowLimit: limit)
+    return data.rows.count == limit && data.rows.first?.name == "App 1" && data.rows.last?.isRest == true
+        && data.rows.reduce(0) { $0 + $1.amount } == Int(gib(30))
+})
+expect("L5 Memoria normaliza las huellas superpuestas al valor del medidor",
+       shared.rows.reduce(0) { $0 + $1.amount } == Int(gib(4)))
+let smallRestMemory = SystemRules.memoryBreakdown([app("A", 0, memory: 1)], used: gib(1) + 1_048_576,
+                                                 lang: lang, locale: locale)
+expect("L6 un resto pequeño de Memoria conserva la igualdad con el total",
+       smallRestMemory.rows.last?.isRest == true && smallRestMemory.rows.last?.amount == 1_048_576)
+
+let overlappingApps = (1...6).map { app("App \($0)", 0, memory: 2) }
+let wideMemory = SystemRules.memoryBreakdown(overlappingApps, used: gib(8), lang: lang, locale: locale, rowLimit: 7)
+let narrowMemory = SystemRules.memoryBreakdown(overlappingApps, used: gib(8), lang: lang, locale: locale, rowLimit: 5)
+let retainedAppRows = Array(wideMemory.rows.prefix(4))
+let omittedAppRows = wideMemory.rows.suffix(2)
+expect("L7 cambiar el límite de filas conserva bytes y etiquetas de cada app",
+       narrowMemory.rows.count == 5 && Array(narrowMemory.rows.prefix(4)) == retainedAppRows
+           && narrowMemory.rows.last?.isRest == true
+           && narrowMemory.rows.last?.amount == omittedAppRows.reduce(0) { $0 + $1.amount }
+           && narrowMemory.rows.last?.value == "2,6 GB")
+
+let fractionalApps = (1...4).map { app("App \($0)", 0, memory: 1.24) }
+let roundedGB = SystemRules.memoryBreakdown(fractionalApps, used: gib(5), lang: lang, locale: locale)
+let totalGBLabel = memoryText(gib(5), locale: locale)
+expect("L8 las etiquetas de 1,24 GB se reparten en décimas y suman 5,0 GB",
+       roundedGB.rows.map(\.value) == ["1,3 GB", "1,3 GB", "1,2 GB", "1,2 GB", "0,0 GB"]
+           && roundedGB.rows.compactMap(\.memoryDisplay).reduce(0) { $0 + $1.count } == 50
+           && totalGBLabel == "5,0 GB")
+
+var smallApps = (1...3).map { app("App \($0)", 0) }
+for index in smallApps.indices { smallApps[index].memory = 1_258_291 }
+let roundedMB = SystemRules.memoryBreakdown(smallApps, used: 4_194_304, lang: lang, locale: locale)
+expect("L9 con un medidor en MB todas las etiquetas suman su valor entero",
+       roundedMB.rows.map(\.value) == ["1 MB", "1 MB", "1 MB", "1 MB"]
+           && memoryText(4_194_304, locale: locale) == "4 MB"
+           && roundedMB.rows.compactMap(\.memoryDisplay).reduce(0) { $0 + $1.count } == 4)
+
+let memoryChildren = SystemRules.toolDetails(nodeMemory, loads: launcherLoads, metric: .memory, lang: lang)
+expect("L10 las etiquetas de las subfilas de Memoria suman su fila padre",
+       LoadMetric.memory.values(for: memoryChildren, parent: nodeMemory, locale: locale) == ["1,5 GB", "1,0 GB"]
+           && nodeMemory.value == "2,5 GB")
 
 print("\(passes) PASS, \(failures) FAIL")
 exit(failures == 0 ? 0 : 1)
