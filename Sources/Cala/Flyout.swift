@@ -141,6 +141,7 @@ struct WifiPane: View {
             }))
             if model.wifiOn {
                 Divider().padding(.vertical, 2)
+                PermissionHint(kind: .location, text: tx("To show network names, macOS requires Location for Cala.", "Para mostrar los nombres de las redes, macOS exige Ubicación para Cala."))
                 if let cur { Row(icon: "wifi", title: cur, subtitle: "Conectado", checked: true, level: model.wifiSignal) {} }
                 else { Text(model.wifiConnected ? "Conectado" : "Sin conexión").font(.system(size: 12)).flyoutSecondary() }
                 let near = w.nearby.filter { $0.ssid != cur }
@@ -157,7 +158,7 @@ struct WifiPane: View {
                     }
                 }
                 if near.isEmpty && cur != nil { EmptyView() }
-                else if near.isEmpty { Text("Buscando redes…").font(.system(size: 12)).flyoutSecondary() }
+                else if near.isEmpty && PermissionCenter.shared.granted(.location) { Text(tx("Looking for networks…", "Buscando redes…")).font(.system(size: 12)).flyoutSecondary() }
             }
             Divider().padding(.vertical, 2)
             LinkRow(title: "Ajustes de Wi-Fi…", pane: "com.apple.wifi-settings-extension")
@@ -190,7 +191,8 @@ struct BluetoothPane: View {
             Header(title: "Bluetooth", isOn: Binding(get: { on }, set: { Bluetooth.set($0); on = $0; model.refreshTray() }))
             if on {
                 Divider().padding(.vertical, 2)
-                if devices.isEmpty { Text("Sin dispositivos vinculados").font(.system(size: 12)).flyoutSecondary() }
+                PermissionHint(kind: .bluetooth, text: tx("Cala needs Bluetooth permission to list your devices.", "Cala necesita el permiso de Bluetooth para listar tus dispositivos."))
+                if devices.isEmpty && PermissionCenter.shared.granted(.bluetooth) { Text(tx("No paired devices", "Sin dispositivos vinculados")).font(.system(size: 12)).flyoutSecondary() }
                 ForEach(devices, id: \.addr) { d in
                     Row(icon: nil, title: d.name, subtitle: d.connected ? "Conectado" : nil, checked: d.connected, shape: AnyView(BluetoothShape().stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round)).padding(2))) {
                         Bluetooth.toggle(addr: d.addr)

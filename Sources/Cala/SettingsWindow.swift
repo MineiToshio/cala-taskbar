@@ -31,38 +31,6 @@ final class SettingsWindowController {
     }
 }
 
-/// Launch-at-login, implemented as a user LaunchAgent owned by this app.
-enum LoginItem {
-    static var url: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/local.cala.plist")
-    }
-    /// Launch agent written by the app under its former name (MacTaskbar).
-    static var legacyURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/local.mactaskbar.plist")
-    }
-    /// One-time move of the old launch-at-login agent to the new label, keeping the on/off state.
-    /// Only re-enabled from ~/Applications, never from a build folder.
-    static func migrateLegacy() {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: legacyURL.path) else { return }
-        try? fm.removeItem(at: legacyURL)
-        if Bundle.main.bundlePath.hasPrefix(fm.homeDirectoryForCurrentUser.path + "/Applications/") { set(true) }
-    }
-    static var enabled: Bool { FileManager.default.fileExists(atPath: url.path) }
-    static func set(_ on: Bool) {
-        if on {
-            let dict: [String: Any] = ["Label": "local.cala",
-                                       "ProgramArguments": ["/usr/bin/open", "-a", Bundle.main.bundlePath],
-                                       "RunAtLoad": true]
-            guard let data = try? PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0) else { return }
-            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: url)
-        } else {
-            try? FileManager.default.removeItem(at: url)
-        }
-    }
-}
-
 // MARK: - Structure
 
 enum SettingsPane: String, CaseIterable, Identifiable {
@@ -279,8 +247,15 @@ struct GeneralPane: View {
                     Toggle("", isOn: Binding(get: { store.config.autoHide }, set: { store.config.autoHide = $0 })).toggleStyle(.switch).labelsHidden()
                 }
                 RowDivider()
-                SettingRow(title: "Abrir al iniciar sesión", caption: "La barra arranca sola cada vez que entras a tu usuario.") {
-                    Toggle("", isOn: Binding(get: { login }, set: { login = $0; LoginItem.set($0) })).toggleStyle(.switch).labelsHidden()
+                SettingRow(title: tx("Open at login", "Abrir al iniciar sesión"),
+                           caption: LoginItem.needsApproval
+                            ? tx("Switched off in System Settings → General → Login Items. Turn Cala on there.", "Desactivado en Ajustes del Sistema → General → Ítems de inicio. Activa Cala allí.")
+                            : tx("The bar starts by itself every time you log in.", "La barra arranca sola cada vez que entras a tu usuario.")) {
+                    HStack(spacing: 8) {
+                        if LoginItem.needsApproval { Button(tx("Open Login Items", "Abrir Ítems de inicio")) { LoginItem.openSystemSettings() }.controlSize(.small) }
+                        Toggle("", isOn: Binding(get: { login }, set: { LoginItem.set($0); login = LoginItem.enabled })).toggleStyle(.switch).labelsHidden()
+                            .accessibilityLabel(tx("Open at login", "Abrir al iniciar sesión"))
+                    }
                 }
             }
             SectionTitle(text: "Disco")
@@ -578,52 +553,33 @@ struct ScreensPane: View {
 
 // MARK: - Permissions
 
-struct PermissionRow: View {
-    let icon: String, title: String, caption: String, granted: Bool, pane: String
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                .frame(width: 30, height: 30)
-                .background(RoundedRectangle(cornerRadius: 8).fill(granted ? Color.green.gradient : Color.orange.gradient))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13, weight: .medium))
-                Text(caption).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 12)
-            if granted {
-                Label("Concedido", systemImage: "checkmark.circle.fill").font(.system(size: 12, weight: .medium)).foregroundStyle(.green)
-            } else {
-                Button("Abrir ajustes") {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!)
-                }.controlSize(.small)
-            }
-        }
-        .padding(.horizontal, 16).padding(.vertical, 12)
-    }
-}
-
 struct PermissionsPane: View {
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1.5)) { _ in
-            let loc = CLLocationManager().authorizationStatus
-            VStack(alignment: .leading, spacing: 20) {
-                Card {
-                    PermissionRow(icon: "hand.raised.fill", title: "Accesibilidad", caption: "Leer y controlar las ventanas de otras apps (preview, cerrar, enfocar).",
-                                  granted: AXIsProcessTrusted(), pane: "Privacy_Accessibility")
-                    RowDivider()
-                    PermissionRow(icon: "rectangle.dashed.badge.record", title: "Grabación de pantalla", caption: "Capturar las miniaturas de las ventanas.",
-                                  granted: CGPreflightScreenCaptureAccess(), pane: "Privacy_ScreenCapture")
-                    RowDivider()
-                    PermissionRow(icon: "location.fill", title: "Ubicación", caption: "macOS la exige para mostrar los nombres de las redes Wi-Fi.",
-                                  granted: loc == .authorizedAlways, pane: "Privacy_LocationServices")
-                    RowDivider()
-                    PermissionRow(icon: "dot.radiowaves.left.and.right", title: "Bluetooth", caption: "Mostrar y conectar tus dispositivos desde la bandeja.",
-                                  granted: CBManager.authorization == .allowedAlways, pane: "Privacy_Bluetooth")
-                }
-                Text("La barra nunca cambia ajustes del sistema por su cuenta: aquí solo se muestra el estado y se abre el panel correspondiente.")
-                    .font(.system(size: 11.5)).foregroundStyle(.secondary).padding(.leading, 4)
+        VStack(alignment: .leading, spacing: 20) {
+            SectionTitle(text: tx("For the bar", "Para la barra"))
+            Card {
+                PermissionCard(kind: .accessibility)
+                RowDivider()
+                PermissionCard(kind: .screenRecording)
             }
+            SectionTitle(text: tx("Optional", "Opcionales"))
+            Card {
+                ForEach(Array([PermissionKind.calendar, .location, .bluetooth, .automation, .notifications].enumerated()), id: \.element) { i, kind in
+                    if i > 0 { RowDivider() }
+                    PermissionCard(kind: kind)
+                }
+            }
+            HStack(alignment: .top) {
+                Text(tx("Cala never changes these by itself: it asks, or opens the right pane of System Settings. Status updates on its own.",
+                        "Cala nunca los cambia por su cuenta: los pide, o abre el panel justo de Ajustes del Sistema. El estado se actualiza solo."))
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                Button(tx("Show the welcome again", "Ver la bienvenida otra vez")) { OnboardingWindowController.shared.show() }
+            }
+            .padding(.leading, 4)
         }
+        .onAppear { PermissionCenter.shared.beginWatching() }
+        .onDisappear { PermissionCenter.shared.endWatching() }
     }
 }
 
@@ -690,6 +646,13 @@ struct AdvancedPane: View {
             .confirmationDialog("¿Salir de Cala?", isPresented: $confirmQuit) {
                 Button("Salir", role: .destructive) { NSApp.terminate(nil) }
             } message: { Text("La barra desaparecerá hasta que vuelvas a abrir la app.") }
+            Card {
+                SettingRow(title: tx("Uninstall Cala", "Desinstalar Cala"),
+                           caption: tx("Puts the Dock and menu bar back, stops opening at login, deletes Cala's settings and moves the app to the Trash.",
+                                       "Devuelve el Dock y la barra de menús, deja de abrirse al iniciar sesión, borra los ajustes de Cala y mueve la app a la Papelera.")) {
+                    Button(tx("Uninstall…", "Desinstalar…"), role: .destructive) { Uninstaller.confirmAndRun(store: store) }
+                }
+            }
         }
     }
 }

@@ -168,11 +168,14 @@ final class ConfigStore: ObservableObject {
 
     var fileURL: URL { url }
     private(set) var configLoadFailed = false
+    /// A config file was already there when Cala started (an existing install, not a first run).
+    private(set) var existedAtLaunch = false
     private var canSave = true
 
     private init() {
         config = Config()
-        guard FileManager.default.fileExists(atPath: url.path) else { save(); return }
+        existedAtLaunch = FileManager.default.fileExists(atPath: url.path)
+        guard existedAtLaunch else { save(); return }
         do {
             config = try JSONDecoder().decode(Config.self, from: Data(contentsOf: url))
             if config.recoveredFromInvalidFields { log("config: invalid fields replaced with defaults") }
@@ -198,6 +201,9 @@ final class ConfigStore: ObservableObject {
         do { try enc.encode(config).write(to: url, options: .atomic) }
         catch { log("config: save failed: \(error)") }
     }
+
+    /// Uninstall: stop writing config.json (its folder is about to be removed).
+    func disableSaving() { canSave = false }
 
     var barHeight: CGFloat { CGFloat(config.iconSize) + 20 }
 }

@@ -363,6 +363,15 @@ final class UsageService: ObservableObject {
             self.timer = timer; timer.resume()
         }
     }
+    /// Uninstall: take Cala's statusLine entry out of Claude Code's settings.json right now (backup kept).
+    func removeStatusLineNow() {
+        queue.sync {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let dir = configuredDirectory.isEmpty ? folder(config.usageClaudeConfigDir, "CLAUDE_CONFIG_DIR", home + "/.claude") : configuredDirectory
+            statusLine(enable: false, directory: dir)
+            statusLineConfigured = false
+        }
+    }
     func settingsOpened() { queue.async { self.detect(force: true); self.publish() } }
     func refresh(_ provider: UsageProvider? = nil, force: Bool = false) {
         queue.async {

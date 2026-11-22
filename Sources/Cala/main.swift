@@ -136,18 +136,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WindowSwitcher.shared.ensureTap()
         MinimizeWatcher.shared.start()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in WindowSwitcher.shared.ensureTap(); MinimizeWatcher.shared.sync() }
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(opts)
-        if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
+        // No permission prompt at launch: the welcome asks for them one by one, and each feature asks again the first
+        // time it is used (see PermissionCenter).
         enableBackgroundCursor()
-        WifiInfo.shared.requestLocation()
         WifiInfo.shared.scan()
 
         rebuildBars()
-        let usageVisible = !store.config.autoHide || bars.contains(where: { !$0.hidden })
-        UsageService.shared.start(store: store, visible: usageVisible)
-        UsagePace.shared.start(store: store)
-        if usageVisible { UsageService.shared.refresh() }
+        // Claude/Codex usage reads their credentials, which can make macOS ask for Keychain access: start it only
+        // once the welcome is out of the way so that dialog never lands on top of it.
+        let startUsage = { [weak self] in
+            guard let self else { return }
+            let usageVisible = !self.store.config.autoHide || self.bars.contains(where: { !$0.hidden })
+            UsageService.shared.start(store: self.store, visible: usageVisible)
+            UsagePace.shared.start(store: self.store)
+            if usageVisible { UsageService.shared.refresh() }
+        }
+        OnboardingWindowController.shared.onFinish = startUsage
+        if !OnboardingWindowController.shared.showIfNeeded(existingInstall: store.existedAtLaunch) {
+            OnboardingWindowController.shared.onFinish = nil
+            startUsage()
+        }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, !self.store.config.autoHide || self.bars.contains(where: { !$0.hidden }) else { return }
             UsageService.shared.refresh()
