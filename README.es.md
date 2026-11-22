@@ -6,7 +6,7 @@
 
 **Una barra de tareas para tu Mac.** Tus apps abajo con miniaturas de cada ventana, y a la derecha Wi‑Fi, sonido, batería, disco, calendario y un panel que te explica por qué tu Mac va lento.
 
-Gratis · Sin cuentas · Nada sale de tu Mac · macOS 14 o más nuevo · Apple silicon e Intel
+Gratis · Código visible · Sin cuentas · Nada sale de tu Mac · macOS 14 o más nuevo · Apple silicon e Intel
 
 ### [⬇︎ Descargar la última versión](https://github.com/MineiToshio/cala-taskbar/releases/latest)
 
@@ -79,7 +79,7 @@ xattr -dr com.apple.quarantine /Applications/Cala.app
 ```
 </details>
 
-> **¿Es seguro?** El código está completo en este repositorio y puedes compilarlo tú mismo (ver [Compilar desde el código](#compilar-desde-el-código)). El aviso de macOS solo significa que la app no pasó por el pago de Apple, no que tenga algo malo.
+> **¿Es seguro?** El código está completo en este repositorio: puedes leerlo y compilarlo tú mismo (ver [Compilar desde el código](#compilar-desde-el-código)). El aviso de macOS solo significa que la app no pasó por el pago de Apple, no que tenga algo malo.
 
 ---
 
@@ -145,4 +145,4 @@ git clone https://github.com/MineiToshio/cala-taskbar.git && cd cala-taskbar
 
 ---
 
-Licencia: [MIT](LICENSE)
+Licencia: [PolyForm Noncommercial 1.0.0](LICENSE). Cala es gratis para descargar, usar y modificar con fines personales u otros fines no comerciales. Venderla o usar su código con fines comerciales requiere permiso del autor.

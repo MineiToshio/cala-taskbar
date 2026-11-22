@@ -6,7 +6,7 @@
 
 **A taskbar for your Mac.** Your apps at the bottom with a thumbnail of every window, and on the right Wi‑Fi, sound, battery, disk, calendar and a panel that tells you why your Mac is slow.
 
-Free · No accounts · Nothing leaves your Mac · macOS 14 or later · Apple silicon and Intel
+Free · Source available · No accounts · Nothing leaves your Mac · macOS 14 or later · Apple silicon and Intel
 
 ### [⬇︎ Download the latest version](https://github.com/MineiToshio/cala-taskbar/releases/latest)
 
@@ -79,7 +79,7 @@ xattr -dr com.apple.quarantine /Applications/Cala.app
 ```
 </details>
 
-> **Is it safe?** All the code is in this repository and you can build it yourself (see [Build from source](#build-from-source)). The macOS warning only means the app did not go through Apple's paid program, not that something is wrong with it.
+> **Is it safe?** All the code is in this repository: you can read it and build it yourself (see [Build from source](#build-from-source)). The macOS warning only means the app did not go through Apple's paid program, not that something is wrong with it.
 
 ---
 
@@ -145,4 +145,4 @@ git clone https://github.com/MineiToshio/cala-taskbar.git && cd cala-taskbar
 
 ---
 
-License: [MIT](LICENSE)
+License: [PolyForm Noncommercial 1.0.0](LICENSE). Cala is free to download, use and modify for personal and other noncommercial purposes. Selling it or using its code commercially requires the author's permission.

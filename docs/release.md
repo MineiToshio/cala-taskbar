@@ -15,7 +15,7 @@ Luego abre el borrador (`gh release view v1.0.0 --web`), revísalo y pulsa **Pub
 
 **Antes de la primera versión pública:**
 - El repositorio tiene que ser **público**; si no, nadie fuera de él puede descargar el DMG. Se cambia en *Settings → General → Danger Zone → Change visibility* en GitHub.
-- Añade una licencia (archivo `LICENSE`), por ejemplo MIT, para que quede claro que la gente puede usarla gratis.
+- La licencia es PolyForm Noncommercial 1.0.0 (`LICENSE`): uso y modificación gratis sin fines comerciales; vender o usar el código comercialmente requiere tu permiso. Como autor puedes vender Cala o cambiar la licencia de versiones futuras.
 - Opcional: `CALA_SENTRY_DSN` para que *Reportar un problema* envíe informes. Sin él, los usuarios usan *Copiar informe* y lo pegan en un issue.
 
 **Instalador de una línea:** `scripts/get-cala.sh` toma siempre la última release publicada (API de GitHub), verifica el `.sha256` que sube `publish-github.sh`, instala y abre Cala sin el bloqueo de Gatekeeper (curl no marca la descarga). Necesita que el repo sea público y que la release tenga el `.dmg` y el `.dmg.sha256`. Para probarlo con un build local: `CALA_DMG_URL=file://$PWD/build/Cala-X.dmg CALA_SHA_URL=file://$PWD/build/Cala-X.dmg.sha256 bash scripts/get-cala.sh`.
