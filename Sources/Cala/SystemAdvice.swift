@@ -3,7 +3,7 @@ import AppKit
 
 enum SystemAdvice {
     private static let protectedIDs: Set<String> = [
-        "com.apple.finder", "com.apple.dock", "com.apple.loginwindow", "com.apple.systemuiserver", "local.cala"
+        "com.apple.finder", "com.apple.dock", "com.apple.loginwindow", "com.apple.systemuiserver"
     ]
 
     static func quittable(pid: Int32) -> NSRunningApplication? {

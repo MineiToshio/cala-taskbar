@@ -164,21 +164,26 @@ enum Cleanup {
         return false
     }
 
-    /// Working directories of this user's running processes (one `lsof` call).
-    static func busyDirectories() -> [String] {
+    /// Working directories of this user's running processes (one `lsof` call). nil when they could not be read: then
+    /// every worktree counts as in use, so nothing is offered for removal on a guess.
+    static func busyDirectories() -> [String]? {
         let p = Process(), o = Pipe()
         p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         p.arguments = ["-a", "-d", "cwd", "-Fn", "-u", String(getuid())]
         p.standardOutput = o; p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return [] }
+        guard (try? p.run()) != nil else { return nil }
+        // lsof can stall on an unreachable network volume; a stuck scan must not block the window forever.
+        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 20, execute: killer)
         let data = o.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        p.waitUntilExit(); killer.cancel()
+        guard p.terminationReason == .exit, p.terminationStatus == 0 || !data.isEmpty else { return nil }
         return String(decoding: data, as: UTF8.self).split(separator: "\n").filter { $0.hasPrefix("n") }.map { String($0.dropFirst()) }
     }
 
-    static func details(_ group: WorktreeGroup, busyDirs: [String] = []) -> WorktreeGroup {
+    static func details(_ group: WorktreeGroup, busyDirs: [String]?) -> WorktreeGroup {
         var g = group
-        g.busy = busyDirs.contains { $0 == g.path || $0.hasPrefix(g.path + "/") }
+        g.busy = busyDirs?.contains { $0 == g.path || $0.hasPrefix(g.path + "/") } ?? true
         g.bytes = DiskService.size(of: g.path).bytes
         g.dirty = isDirty(g.path, nested: g.children)
         g.childrenDirty = g.children.contains { child in isDirty(child, nested: g.children.filter { $0.hasPrefix(child + "/") }) }
@@ -209,7 +214,7 @@ enum Cleanup {
     // MARK: Caches
 
     static func caches() -> [CacheItem] {
-        let h = NSHomeDirectory(), fm = FileManager.default
+        let h = NSHomeDirectory()
         let list: [(String, String, String)] = [
             (h + "/Library/Caches", calendarText("App caches", "Cachés de apps"), calendarText("Apps rebuild them as needed. Quit big apps first.", "Las apps las regeneran. Cierra antes las apps grandes.")),
             (h + "/Library/Developer/Xcode/DerivedData", "Xcode DerivedData", calendarText("Build output; Xcode recreates it.", "Resultado de compilar; Xcode lo recrea.")),
@@ -221,14 +226,22 @@ enum Cleanup {
             (h + "/.cargo/registry/cache", calendarText("Cargo cache", "Caché de Cargo"), calendarText("Crates are downloaded again on demand.", "Los crates se vuelven a bajar cuando hacen falta.")),
         ]
         return list.compactMap { path, name, note in
-            var isDir: ObjCBool = false
-            return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue ? CacheItem(path: path, name: name, note: note) : nil
+            isRealFolder(path) ? CacheItem(path: path, name: name, note: note) : nil
         }
     }
 
-    /// Deletes the contents of a cache folder (never the folder itself). Returns how many entries could not be removed.
+    /// A directory that is not itself a symlink: a cache folder redirected elsewhere (another disk, a project) is never offered.
+    static func isRealFolder(_ path: String) -> Bool {
+        guard let type = (try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType else { return false }
+        return type == .typeDirectory
+    }
+
+    /// Deletes the contents of a cache folder (never the folder itself). Entries are removed as they are: a symlink
+    /// inside is unlinked, never followed. Returns how many entries could not be removed.
     static func empty(_ item: CacheItem) -> Int {
         let fm = FileManager.default
+        // Re-checked at deletion time, and only for the fixed list of known cache folders.
+        guard caches().contains(where: { $0.path == item.path }), isRealFolder(item.path) else { return 1 }
         var failed = 0
         for child in (try? fm.contentsOfDirectory(atPath: item.path)) ?? [] {
             do { try fm.removeItem(atPath: item.path + "/" + child) } catch { failed += 1 }
