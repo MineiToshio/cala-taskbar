@@ -1,6 +1,6 @@
 # Release: publicar una versión
 
-Cala se reparte **gratis y sin firma de Apple**. Los usuarios la desbloquean una vez al abrirla por primera vez, y el README explica cómo. Si algún día quieres quitar ese paso, la firma con Developer ID está más abajo (cuesta 99 USD al año).
+Cala se reparte **gratis y sin firma de Apple**. Los usuarios la desbloquean una vez al abrirla por primera vez, y el README (inglés, `README.md`, y español, `README.es.md`) explica cómo. Si algún día quieres quitar ese paso, la firma con Developer ID está más abajo (cuesta 99 USD al año).
 
 ## Publicar una versión gratuita (el camino normal)
 

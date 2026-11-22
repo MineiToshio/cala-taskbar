@@ -3,7 +3,7 @@
 # (scripts/publish-github.sh does that, as a draft).
 #
 # Two kinds of release:
-#   free (default)  ad-hoc signed, not notarized. Users unblock it once (README, "Instalar" step 3). No Apple account.
+#   free (default)  ad-hoc signed, not notarized. Users unblock it once (README "Install", option 2 step 3). No Apple account.
 #   signed          CALA_SIGN_IDENTITY="Developer ID Application: …" plus notarization credentials
 #                   (scripts/notarize.sh): no Gatekeeper block at all. Needs the paid Apple Developer Program.
 # CALA_SKIP_NOTARIZE=1 signs with Developer ID but skips notarization.

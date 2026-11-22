@@ -4,176 +4,144 @@
 
 # Cala
 
-**Una barra de tareas para tu Mac.** Tus apps abajo con miniaturas de cada ventana, y a la derecha Wi‑Fi, sonido, batería, disco, calendario y un panel que te explica por qué tu Mac va lento.
+**A taskbar for your Mac.** Your apps at the bottom with a thumbnail of every window, and on the right Wi‑Fi, sound, battery, disk, calendar and a panel that tells you why your Mac is slow.
 
-Gratis · Sin cuentas · Nada sale de tu Mac · macOS 14 o más nuevo · Apple silicon e Intel
+Free · No accounts · Nothing leaves your Mac · macOS 14 or later · Apple silicon and Intel
 
-### [⬇︎ Descargar la última versión](https://github.com/MineiToshio/cala-taskbar/releases/latest)
+### [⬇︎ Download the latest version](https://github.com/MineiToshio/cala-taskbar/releases/latest)
 
-*[English version below](#english)*
+**English** · [Español](README.es.md)
 
-<img src="docs/images/bar.jpg" alt="La barra de Cala" width="100%">
+<img src="docs/images/bar.jpg" alt="The Cala bar" width="100%">
 
 </div>
 
 ---
 
-## Qué hace
+## What it does
 
 <table>
 <tr>
 <td width="50%" valign="top">
 
-**Tus apps, abajo.** Un clic para cambiar de app, pasa el mouse para ver cada ventana y clic derecho para anclar, abrir otra ventana o cerrarla.
+**Your apps, at the bottom.** Click to switch apps, hover to see each window, right-click to pin, open a new window or quit.
 
-**Opción + Tab** te muestra todas tus ventanas, no solo las apps.
+**Option + Tab** shows all your windows, not just your apps.
 
-**La bandeja de la derecha** tiene Wi‑Fi, Bluetooth, sonido, brillo, batería, disco, teclado, descargas, papelera y un reloj con tus próximos eventos y un botón para unirte a la videollamada.
+**The tray on the right** has Wi‑Fi, Bluetooth, sound, brightness, battery, disk, keyboard, Downloads, Trash, and a clock with your upcoming events and a button to join the video call.
 
-**¿Por qué mi Mac va lento?** El panel de CPU y memoria te dice qué app pesa más y te recomienda reiniciar cuando hace falta.
+**Why is my Mac slow?** The CPU and memory panel tells you which app weighs the most and recommends a restart when it is worth it.
 
 </td>
 <td width="50%" valign="top">
-<img src="docs/images/system-panel.jpg" alt="Panel de sistema" width="100%">
+<img src="docs/images/system-panel.jpg" alt="System panel" width="100%">
 </td>
 </tr>
 </table>
 
 ---
 
-## Instalar
+## Install
 
-### Opción 1: con un comando (recomendada, sin avisos de macOS)
+### Option 1: one command (recommended, no macOS warnings)
 
-Abre **Terminal** (búscala con Spotlight: ⌘ + Espacio, "Terminal"), pega esta línea y pulsa Enter:
+Open **Terminal** (find it with Spotlight: ⌘ + Space, "Terminal"), paste this line and press Return:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh | bash
 ```
 
-Descarga la última versión, comprueba que el archivo es el publicado aquí (SHA-256), instala Cala en Aplicaciones y la abre. Como no pasa por el navegador, macOS no la bloquea. Sirve también para **actualizar**, y tus ajustes se conservan. Puedes [leer el script](scripts/get-cala.sh) antes de usarlo. Luego sigue la bienvenida de Cala.
+It downloads the latest version, checks that the file is the one published here (SHA-256), installs Cala in Applications and opens it. Because it does not go through the browser, macOS does not block it. It also **updates** Cala, and your settings are kept. You can [read the script](scripts/get-cala.sh) before running it. Then follow Cala's welcome window.
 
-### Opción 2: descargando el archivo
+### Option 2: download the file
 
-1. **Descarga** `Cala-x.y.z.dmg` desde [Releases](https://github.com/MineiToshio/cala-taskbar/releases/latest).
-2. **Ábrelo** y arrastra **Cala** a la carpeta **Aplicaciones**.
-3. **Ábrela la primera vez.** Cala es gratis y no está firmada por Apple (eso cuesta 99 USD al año), así que macOS la bloquea **una sola vez**:
+1. **Download** `Cala-x.y.z.dmg` from [Releases](https://github.com/MineiToshio/cala-taskbar/releases/latest).
+2. **Open it** and drag **Cala** to the **Applications** folder.
+3. **Open it the first time.** Cala is free and not signed by Apple (that costs 99 USD a year), so macOS blocks it **once**:
 
-   **macOS 15 (Sequoia) o más nuevo**
-   1. Haz doble clic en **Cala** dentro de Aplicaciones. Aparece *"Apple no pudo verificar…"*: pulsa **Listo**.
-   2. Abre **Ajustes del Sistema → Privacidad y seguridad** y baja hasta el final.
-   3. Junto a *"Se bloqueó el uso de Cala"*, pulsa **Abrir igualmente** y escribe tu contraseña.
-   4. Vuelve a abrir Cala y elige **Abrir igualmente**.
+   **macOS 15 (Sequoia) or later**
+   1. Double-click **Cala** in Applications. You see *"Apple could not verify…"*: press **Done**.
+   2. Open **System Settings → Privacy & Security** and scroll to the bottom.
+   3. Next to *"Cala was blocked"*, press **Open Anyway** and enter your password.
+   4. Open Cala again and choose **Open Anyway**.
 
-   **macOS 14 (Sonoma)**: en Aplicaciones, haz clic derecho sobre **Cala → Abrir**, y otra vez **Abrir**.
+   **macOS 14 (Sonoma)**: in Applications, right-click **Cala → Open**, then **Open** again.
 
-   Después de esto, Cala abre normal para siempre. (Con el comando de arriba te saltas este paso.)
+   After that, Cala opens normally for good. (Option 1 skips this step.)
 
-4. **Sigue la bienvenida.** Son cuatro pasos cortos y puedes saltar cualquiera.
+4. **Follow the welcome.** Four short steps, and you can skip any of them.
 
 <details>
-<summary>¿Prefieres la Terminal? Un comando hace lo mismo que el paso 3</summary>
+<summary>Prefer Terminal? One command does the same as step 3</summary>
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Cala.app
 ```
 </details>
 
-> **¿Es seguro?** El código está completo en este repositorio y puedes compilarlo tú mismo (ver [Compilar desde el código](#compilar-desde-el-código)). El aviso de macOS solo significa que la app no pasó por el pago de Apple, no que tenga algo malo.
+> **Is it safe?** All the code is in this repository and you can build it yourself (see [Build from source](#build-from-source)). The macOS warning only means the app did not go through Apple's paid program, not that something is wrong with it.
 
 ---
 
-## Permisos
+## Permissions
 
-<img src="docs/images/permissions.jpg" alt="Permisos en la bienvenida" width="380" align="right">
+<img src="docs/images/permissions.jpg" alt="Permissions in the welcome window" width="380" align="right">
 
-Cala pide cada permiso con una frase que explica para qué sirve y un botón que abre el panel justo de **Ajustes del Sistema**. Cuando lo activas, Cala lo nota sola, sin reiniciar.
+Cala asks for each permission with a sentence on what it is for and a button that opens the exact pane of **System Settings**. Once you allow it, Cala notices by itself, with no restart.
 
-| Permiso | Para qué | Si no lo das |
+| Permission | What for | If you skip it |
 |---|---|---|
-| **Accesibilidad** | Ver, enfocar, minimizar y cerrar ventanas; Opción+Tab | La barra igual abre tus apps, sin manejar ventanas |
-| **Grabación de pantalla** | Miniaturas de las ventanas | No hay miniaturas. Cala nunca graba ni envía tu pantalla |
-| Calendario | Próximos eventos y botón Unirse | El reloj no muestra eventos |
-| Ubicación | macOS solo deja ver nombres de redes Wi‑Fi con este permiso | No se ven nombres de redes |
-| Bluetooth | Ver y conectar tus dispositivos | No se listan |
-| Controlar Finder | Contar y vaciar la Papelera, reiniciar | Esas acciones no están |
-| Notificaciones | Avisos de cuota de Claude o Codex | Sin avisos |
+| **Accessibility** | See, focus, minimize and close windows; Option+Tab | The bar still opens your apps, without managing windows |
+| **Screen Recording** | Window thumbnails | No thumbnails. Cala never records or sends your screen |
+| Calendar | Upcoming events and the Join button | The clock shows no events |
+| Location | macOS only reveals Wi‑Fi network names with this permission | No network names |
+| Bluetooth | See and connect your devices | They are not listed |
+| Control Finder | Count and empty the Trash, restart | Those actions are unavailable |
+| Notifications | Claude or Codex quota alerts | No alerts |
 
-Para **Accesibilidad** y **Grabación de pantalla**, macOS abre una lista: activa **Cala** (te pedirá Touch ID o contraseña). Si tras Grabación de pantalla macOS ofrece **Salir y volver a abrir**, acéptalo.
+For **Accessibility** and **Screen Recording**, macOS opens a list: turn on **Cala** (it asks for Touch ID or your password). If macOS offers **Quit & Reopen** after Screen Recording, accept it.
 
-¿Dijiste que no a algo? Todo lo demás sigue funcionando. Actívalo cuando quieras en **Configuración → Permisos** (clic derecho en una zona vacía de la barra → Configuración…).
+Said no to something? Everything else keeps working. Turn it on whenever you like in **Settings → Permissions** (right-click an empty part of the bar → Settings…).
 
 <br clear="right">
 
 ---
 
-## Uso diario
+## Everyday use
 
-- **Configuración**: clic derecho en una zona vacía de la barra → *Configuración…*, o vuelve a abrir Cala desde Aplicaciones.
-- **Abrir al iniciar sesión**: se elige en la bienvenida o en *Configuración → General*. Aparece en *Ajustes del Sistema → General → Ítems de inicio*.
-- **Ocultar el Dock de macOS**: *Configuración → General*. Al apagarlo, o al salir de Cala, el Dock vuelve exactamente como estaba.
-- **Actualizar**: descarga el nuevo DMG y reemplaza Cala en Aplicaciones. Tus ajustes y permisos se conservan. Repite el paso 3 de la instalación si macOS lo pide.
+- **Settings**: right-click an empty part of the bar → *Settings…*, or open Cala again from Applications.
+- **Open at login**: chosen in the welcome or in *Settings → General*. It shows up in *System Settings → General → Login Items*.
+- **Hide the macOS Dock**: *Settings → General*. Turning it off, or quitting Cala, brings the Dock back exactly as it was.
+- **Update**: run the Option 1 command again, or download the new DMG and replace Cala in Applications. Your settings and permissions are kept.
 
-## Desinstalar
+## Uninstall
 
-*Configuración → Avanzado → **Desinstalar Cala…*** devuelve el Dock y la barra de menús a como estaban, quita el inicio de sesión, borra los ajustes de Cala y mueve la app a la Papelera.
+*Settings → Advanced → **Uninstall Cala…*** puts the Dock and menu bar back as they were, removes the login item, deletes Cala's settings and moves the app to the Trash.
 
-Los permisos quedan listados en *Ajustes del Sistema → Privacidad y seguridad*; puedes quitarlos allí. Sin abrir la app: [`scripts/uninstall.sh`](scripts/uninstall.sh).
+Permissions stay listed in *System Settings → Privacy & Security*; you can remove them there. Without opening the app: [`scripts/uninstall.sh`](scripts/uninstall.sh).
 
-## Privacidad
+## Privacy
 
-Nada sale de tu Mac salvo que tú lo envíes. *Reportar un problema* te muestra exactamente qué se incluye antes de enviarlo, y quita tu carpeta personal, tu nombre de usuario, el nombre del Mac y tus correos. Si la versión que descargaste no tiene envío configurado, puedes **copiar el informe** y pegarlo en un [issue](https://github.com/MineiToshio/cala-taskbar/issues).
+Nothing leaves your Mac unless you send it. *Report a problem* shows you exactly what is included before sending, and removes your home folder, user name, Mac name and email addresses. If the version you downloaded has no reporting destination set up, you can **copy the report** and paste it in an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
-## Problemas frecuentes
+## Troubleshooting
 
-- **"Cala no se puede abrir" / "Apple no pudo verificar…"**: es el bloqueo de una sola vez; mira el paso 3 de [Instalar](#instalar), o instala con el comando de Terminal, que no lo muestra.
-- **No veo miniaturas**: activa Grabación de pantalla en *Configuración → Permisos*.
-- **El Dock desapareció**: Cala lo oculta solo si lo pediste. Apágalo en *Configuración → General*, o sal de Cala.
-- **Algo falla**: clic derecho en la barra → *Reportar un problema…*, o abre un [issue](https://github.com/MineiToshio/cala-taskbar/issues).
+- **"Cala can't be opened" / "Apple could not verify…"**: that is the one-time block; see step 3 of [Install](#install), or install with the Option 1 command, which avoids it.
+- **No thumbnails**: turn on Screen Recording in *Settings → Permissions*.
+- **The Dock disappeared**: Cala only hides it if you asked. Turn it off in *Settings → General*, or quit Cala.
+- **Something is wrong**: right-click the bar → *Report a problem…*, or open an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
-## Compilar desde el código
+## Build from source
 
-Necesitas las herramientas de línea de comandos de Xcode (`xcode-select --install`).
+You need the Xcode command line tools (`xcode-select --install`).
 
 ```bash
 git clone https://github.com/MineiToshio/cala-taskbar.git && cd cala-taskbar
-./install.sh            # compila e instala en ~/Applications y la abre
+./install.sh            # builds, installs to ~/Applications and opens it
 ```
 
-`./build.sh` y `./scripts/make-dmg.sh` generan el `.app` universal y el DMG. Más en [docs/](docs/README.md) y, para publicar versiones, [docs/release.md](docs/release.md).
+`./build.sh` and `./scripts/make-dmg.sh` produce the universal `.app` and the DMG. More in [docs/](docs/README.md) and, for publishing versions, [docs/release.md](docs/release.md).
 
 ---
 
-<a id="english"></a>
-
-## English
-
-**Cala is a free taskbar for macOS 14+** (Apple silicon and Intel): your apps at the bottom with window thumbnails, plus Wi‑Fi, sound, battery, disk, calendar and a "why is my Mac slow" panel on the right. No accounts, nothing leaves your Mac.
-
-**Install — quickest (no macOS warnings)**: open Terminal and run
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh | bash
-```
-
-It downloads the latest release, checks its SHA-256, installs Cala in Applications and opens it. Also updates. [Read the script](scripts/get-cala.sh) first if you like.
-
-**Install — from the DMG**
-1. Download `Cala-x.y.z.dmg` from [Releases](https://github.com/MineiToshio/cala-taskbar/releases/latest), open it and drag **Cala** to **Applications**.
-2. Cala is free and not signed by Apple, so macOS blocks it **once**:
-   - **macOS 15 or later**: open Cala, press **Done**, then go to **System Settings → Privacy & Security**, click **Open Anyway** next to "Cala was blocked", enter your password, and open Cala again → **Open Anyway**.
-   - **macOS 14**: right-click Cala in Applications → **Open** → **Open**.
-   - Terminal alternative: `xattr -dr com.apple.quarantine /Applications/Cala.app`
-3. Follow the four-step welcome.
-
-**Permissions**: each one comes with a sentence on what it is for and a button to the exact System Settings pane, and Cala notices by itself when you allow it. Accessibility (manage windows, Option+Tab) and Screen Recording (thumbnails) power the bar; Calendar, Location (Wi‑Fi names), Bluetooth, Finder control (Trash, restart) and Notifications are optional. Skip anything; turn it on later in **Settings → Permissions**.
-
-**Uninstall**: **Settings → Advanced → Uninstall Cala…** puts the Dock and menu bar back and moves the app to the Trash.
-
-**Privacy**: nothing leaves your Mac unless you send a report yourself, and you see exactly what is in it first.
-
-**Build from source**: `./install.sh` (needs Xcode Command Line Tools).
-
----
-
-Licencia / License: [MIT](LICENSE)
+License: [MIT](LICENSE)

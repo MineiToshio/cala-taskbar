@@ -14,7 +14,7 @@ The original goal was a Windows-like experience on a Mac. The Dock plus DockDoor
 
 | File | Contents |
 |---|---|
-| [../README.md](../README.md) | Install guide for end users (Spanish and English) |
+| [../README.md](../README.md) · [../README.es.md](../README.es.md) | Install guide for end users (English · Spanish) |
 | [release.md](release.md) | Signing, notarization, costs and the release checklist |
 | [features.md](features.md) | Everything the bar does and how to use it |
 | [architecture.md](architecture.md) | Source layout, how each part works, key technical decisions |

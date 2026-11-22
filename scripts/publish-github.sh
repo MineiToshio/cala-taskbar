@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/$(gh repo view --json nameWithOwner
 2. La primera vez macOS la bloquea porque Cala es gratis y no está firmada por Apple:
    - **macOS 15 o más nuevo:** abre Cala → **Listo** → *Ajustes del Sistema → Privacidad y seguridad* → **Abrir igualmente** → vuelve a abrir Cala → **Abrir igualmente**.
    - **macOS 14:** clic derecho sobre Cala → **Abrir** → **Abrir**.
-3. Sigue la bienvenida. Guía completa: [README](https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)#instalar).
+3. Sigue la bienvenida. Guía completa: [README](https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/blob/main/README.es.md#instalar).
 
 Requiere macOS 14 o más nuevo · Apple silicon e Intel · SHA-256: \`$SUM\`
 
