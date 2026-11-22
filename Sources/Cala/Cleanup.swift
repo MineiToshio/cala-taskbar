@@ -319,6 +319,9 @@ final class CleanupModel: ObservableObject {
         selectedGroups.reduce(0) { $0 + ($1.bytes ?? 0) } + selectedCaches.reduce(0) { $0 + ($1.bytes ?? 0) }
     }
 
+    /// Every selected worktree and cache has its size (a missing size is not shown as 0 KB).
+    var selectionMeasured: Bool { selectedGroups.allSatisfy { $0.bytes != nil } && selectedCaches.allSatisfy { $0.bytes != nil } }
+
     func selectSafe() { selected.formUnion(groups.filter(\.safe).map(\.id)) }
 
     /// Asks for confirmation (nothing is deleted before), then removes the selection in the background.
@@ -327,11 +330,20 @@ final class CleanupModel: ObservableObject {
         guard !gs.isEmpty || !cs.isEmpty || trash, !working else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = selectedBytes > 0 ? calendarText("Free up \(diskBytes(selectedBytes))\(trash ? " and empty the Trash" : "")?", "¿Liberar \(diskBytes(selectedBytes))\(trash ? " y vaciar la Papelera" : "")?")
-                                              : calendarText("Empty the Trash?", "¿Vaciar la Papelera?")
+        // The title says what will happen: the Trash only when only the Trash is selected, and a size only when every
+        // selected item has been measured (a size still being measured used to read as 0 KB).
+        let measured = gs.allSatisfy { $0.bytes != nil } && cs.allSatisfy { $0.bytes != nil }
+        if gs.isEmpty && cs.isEmpty {
+            alert.messageText = tx("Empty the Trash?", "¿Vaciar la Papelera?")
+        } else if measured && selectedBytes > 0 {
+            alert.messageText = tx("Free up \(diskBytes(selectedBytes))\(trash ? " and empty the Trash" : "")?", "¿Liberar \(diskBytes(selectedBytes))\(trash ? " y vaciar la Papelera" : "")?")
+        } else {
+            alert.messageText = tx("Delete the selected items\(trash ? " and empty the Trash" : "")?", "¿Eliminar lo seleccionado\(trash ? " y vaciar la Papelera" : "")?")
+        }
+        func size(_ bytes: Int64?) -> String { bytes.map(diskBytes) ?? tx("size still being measured", "tamaño aún sin medir") }
         var lines: [String] = []
-        let items = gs.map { $0.repoName + " / " + $0.name + " (" + diskBytes($0.bytes ?? 0) + ")" }
-            + cs.map { $0.name + " (" + diskBytes($0.bytes ?? 0) + ")" }
+        let items = gs.map { $0.repoName + " / " + $0.name + " (" + size($0.bytes) + ")" }
+            + cs.map { $0.name + " (" + size($0.bytes) + ")" }
             + (trash ? [calendarText("Trash (\(trashCount ?? 0) items)", "Papelera (\(trashCount ?? 0) elementos)")] : [])
         lines.append(calendarText("This will delete:", "Se va a eliminar:"))
         lines += items.prefix(12).map { "• " + $0 }
@@ -462,7 +474,9 @@ struct CleanupView: View {
                 Text(model.message.isEmpty ? (model.working ? calendarText("Working…", "Trabajando…") : "") : model.message)
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(3)
                 Spacer()
-                Button(calendarText("Review and delete selected (\(diskBytes(model.selectedBytes)))…", "Revisar y eliminar lo seleccionado (\(diskBytes(model.selectedBytes)))…")) { model.removeSelected() }
+                Button(model.selectionMeasured && model.selectedBytes > 0
+                       ? tx("Review and delete selected (\(diskBytes(model.selectedBytes)))…", "Revisar y eliminar lo seleccionado (\(diskBytes(model.selectedBytes)))…")
+                       : tx("Review and delete selected…", "Revisar y eliminar lo seleccionado…")) { model.removeSelected() }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.working || (model.selectedGroups.isEmpty && model.selectedCaches.isEmpty && !model.trashSelected))
             }
