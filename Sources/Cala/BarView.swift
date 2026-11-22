@@ -144,6 +144,10 @@ struct DeskStrip: View {
             .frame(width: 10)
             .frame(maxHeight: .infinity)
             .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(0.25)).frame(width: 0.5) }
+            .accessibilityElement()
+            .accessibilityLabel(tx("Show desktop", "Mostrar escritorio"))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { (NSApp.delegate as? AppDelegate)?.toggleDesktop() }
     }
 }
 
@@ -216,6 +220,12 @@ struct ClockView: View {
             .padding(.horizontal, 8)
             .frame(maxHeight: .infinity)
             .background(TrayHighlight(hovering: model.trayHover == trayClock))
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint(tx("Shows your calendar", "Muestra tu calendario"))
+            .accessibilityAction {
+                if let app = NSApp.delegate as? AppDelegate, let bar = app.bars.first { app.trayClick(trayClock, bar: bar) }
+            }
             .reportFrame(trayClock)
         }
     }

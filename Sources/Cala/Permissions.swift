@@ -265,7 +265,7 @@ struct PermissionCard: View {
                 Text(kind.title).font(.system(size: 13, weight: .medium))
                 Text(kind.why).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if state == .waiting && kind.grantedInSettings {
-                    Text(tx("Turn on Cala in the list that opened, then come back here.", "Activa Cala en la lista que se abrió y vuelve aquí."))
+                    Text(tx("Not on yet. Turn on Cala in System Settings → Privacy & Security → \(kind.title); Cala notices by itself.", "Aún no está activo. Activa Cala en Ajustes del Sistema → Privacidad y seguridad → \(kind.title); Cala lo nota sola."))
                         .font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                 } else if state == .denied {
                     Text(tx("Turned off. You can turn it on in System Settings.", "Desactivado. Puedes activarlo en Ajustes del Sistema."))

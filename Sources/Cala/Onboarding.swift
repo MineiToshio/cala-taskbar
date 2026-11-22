@@ -264,7 +264,7 @@ struct OnboardingView: View {
         switch step {
         case .welcome: return tx("Get started", "Empezar")
         case .essentials:
-            return center.granted(.accessibility) && center.granted(.screenRecording) ? tx("Continue", "Continuar") : tx("Continue without them", "Continuar sin ellos")
+            return center.granted(.accessibility) || center.granted(.screenRecording) ? tx("Continue", "Continuar") : tx("Continue without them", "Continuar sin ellos")
         default: return tx("Continue", "Continuar")
         }
     }

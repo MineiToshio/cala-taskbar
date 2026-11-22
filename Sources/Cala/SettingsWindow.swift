@@ -256,6 +256,10 @@ struct GeneralPane: View {
                         if LoginItem.needsApproval { Button(tx("Open Login Items", "Abrir Ítems de inicio")) { LoginItem.openSystemSettings() }.controlSize(.small) }
                         Toggle("", isOn: Binding(get: { login }, set: { LoginItem.set($0); login = LoginItem.enabled })).toggleStyle(.switch).labelsHidden()
                             .accessibilityLabel(tx("Open at login", "Abrir al iniciar sesión"))
+                            // Can change outside this view (the welcome, System Settings → Login Items): re-read it.
+                            .onAppear { login = LoginItem.enabled }
+                            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in login = LoginItem.enabled }
+                            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in login = LoginItem.enabled }
                     }
                 }
             }
