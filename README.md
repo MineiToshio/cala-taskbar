@@ -15,6 +15,21 @@ Necesitas macOS 14 (Sonoma) o más nuevo. Funciona en Macs con Apple silicon y c
 
 Si abriste Cala directamente desde la descarga, la bienvenida te ofrece **Mover y reabrir**: la copia a Aplicaciones por ti.
 
+### Si macOS dice que no puede abrir Cala
+
+Las versiones oficiales de Cala están firmadas y revisadas por Apple, y solo muestran el aviso normal de "descargada de internet": pulsa **Abrir**.
+
+Si te pasaron una **versión de prueba** (sin firmar), macOS la bloquea la primera vez. Se desbloquea una sola vez:
+
+- **macOS 15 (Sequoia) o más nuevo:**
+  1. Abre Cala. Aparece un aviso de que Apple no pudo verificarla; pulsa **Listo**.
+  2. Abre **Ajustes del Sistema → Privacidad y seguridad** y baja hasta el final.
+  3. Junto a *"Se bloqueó el uso de Cala"*, pulsa **Abrir igualmente** y escribe tu contraseña.
+  4. Abre Cala otra vez y elige **Abrir igualmente**.
+- **macOS 14 (Sonoma):** en Aplicaciones, haz clic derecho sobre **Cala → Abrir**, y otra vez **Abrir**.
+
+Hazlo solo si sabes de dónde viene esa versión de prueba.
+
 ## Los permisos, uno por uno
 
 Cala pide cada permiso con una frase que dice para qué sirve y un botón que abre el panel justo de **Ajustes del Sistema**. Cuando lo activas, Cala lo nota sola: no hace falta reiniciarla.
@@ -62,6 +77,8 @@ Nada sale de tu Mac salvo que tú envíes un informe con **Reportar un problema�
 A taskbar for your Mac: your apps at the bottom with window thumbnails, and Wi‑Fi, sound, battery, disk, calendar and a "why is my Mac slow" panel on the right. Requires macOS 14 or later, Apple silicon or Intel.
 
 **Install:** open **Cala‑x.y.z.dmg**, drag **Cala** to **Applications**, open it from Applications and follow the four-step welcome. If you open it straight from the download, the welcome offers **Move and reopen**.
+
+**"Cala can't be opened":** official releases are signed and notarized by Apple and only show the usual "downloaded from the internet" prompt. A test build that is not signed is blocked once: on macOS 15 or later open it, press Done, then System Settings → Privacy & Security → **Open Anyway** next to "Cala was blocked" (password), and open it again; on macOS 14, right-click Cala in Applications → **Open** → **Open**.
 
 **Permissions:** each one comes with a sentence on what it is for and a button to the exact System Settings pane; Cala notices by itself when you allow it. Accessibility (manage windows, Option+Tab) and Screen Recording (thumbnails) are the two the bar is built on; Calendar, Location (Wi‑Fi names), Bluetooth, Finder control (Trash, restart) and Notifications are optional. Anything you skip can be turned on later in **Settings → Permissions**.
 

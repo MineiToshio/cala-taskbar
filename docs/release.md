@@ -2,6 +2,26 @@
 
 Nota para quien publica Cala. Todo el pipeline está en el repo y no contiene ningún valor personal: identidad, credenciales y DSN se pasan por variables de entorno.
 
+## Por qué hace falta y cuánto cuesta
+
+Sin firma Developer ID y notarización, cualquier Mac que descargue Cala de una web la bloquea al abrirla (Gatekeeper). En macOS 15 o más nuevo no hay forma rápida de saltarlo: el usuario tiene que ir a Ajustes del Sistema → Privacidad y seguridad → **Abrir igualmente** y escribir su contraseña. Casi nadie lo hace solo. Con firma y notarización, solo ve el aviso normal de "descargada de internet, ¿abrir?".
+
+| Qué | Costo |
+|---|---|
+| Apple Developer Program (necesario para el certificado Developer ID) | **99 USD al año** (o su equivalente en tu moneda) |
+| Notarización | Gratis, incluida en la membresía, sin límite práctico |
+| Certificado Developer ID | Incluido. Dura 5 años |
+| Xcode / herramientas | Gratis. Este pipeline solo usa las Command Line Tools |
+| Alojar el DMG (GitHub Releases, tu web) | Gratis en GitHub Releases |
+
+Si dejas de pagar la membresía, las versiones ya publicadas siguen abriendo (la firma lleva sello de tiempo y la notarización queda registrada), pero no puedes firmar versiones nuevas.
+
+Comprobado en la máquina de desarrollo: `spctl` rechaza el build ad-hoc y su DMG ("rejected, no usable signature"), que es exactamente lo que verá otra Mac. En la propia Mac de desarrollo el bloqueo no aparece aunque el archivo esté marcado como descargado, porque macOS recuerda que los archivos se crearon ahí. Por eso **la prueba final se hace siempre en otra Mac u otra cuenta de usuario**, descargando el DMG publicado.
+
+### Mientras no tengas la cuenta: versión de prueba
+
+Puedes repartir el DMG ad-hoc (`./build.sh && ./scripts/make-dmg.sh`) a gente de confianza. El README explica cómo desbloquearlo una vez («Si macOS dice que no puede abrir Cala»). No lo publiques así para el público general.
+
 ## Una sola vez
 
 1. **Cuenta de Apple Developer** (99 USD/año): https://developer.apple.com/programs/ — con una cuenta individual basta.

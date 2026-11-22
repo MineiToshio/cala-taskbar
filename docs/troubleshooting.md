@@ -66,3 +66,10 @@ Inspect `~/Library/Application Support/Cala/debug.log` for `usage:` lines: provi
 - **No Join button:** it is shown only for HTTP(S) Meet, Zoom/ZoomGov (including their subdomains), Teams (`teams.microsoft.com` / `teams.live.com`) and Webex (`*.webex.com`) meeting links in the event URL, location or notes. Other links and non-web schemes are not opened as meeting links.
 - **An event click opens Calendar without selecting it:** specific-event links use an undocumented `ical://ekevent/…` route and may change between macOS releases. The safe fallback opens Calendar.app; navigate to the event’s displayed date. No AppleScript or duplicate event files are created.
 - **Privacy / distribution:** every user grants their own calendar permission. `build.sh` supplies `NSCalendarsFullAccessUsageDescription` and the legacy `NSCalendarsUsageDescription`. Use the built, signed app bundle; a raw executable lacks its privacy descriptions. Disabling upcoming events stops reads and clears in-memory snapshots. Cala does not store event content, transmit it, or handle your calendar account passwords.
+
+
+## "Cala can't be opened" / "Apple could not verify Cala"
+That is Gatekeeper on a build that is not signed with Developer ID and notarized (an ad-hoc test build). Official releases made with `scripts/release.sh` do not show it. For a test build, unblock it once: macOS 15+ → System Settings → Privacy & Security → **Open Anyway**; macOS 14 → right-click → Open. See the README. It never shows on the Mac that built the app, so check releases on another Mac.
+
+## Cala froze at first launch (older builds)
+Builds before commit 3018657 could hang on a Mac where the Bluetooth permission had not been decided yet. Update to a current build.
