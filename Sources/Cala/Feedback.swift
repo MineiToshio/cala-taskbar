@@ -238,11 +238,21 @@ final class FeedbackWindowController {
 struct FeedbackView: View {
     let crash: CrashReporter.Crash?
     let close: () -> Void
+
+    init(crash: CrashReporter.Crash?, close: @escaping () -> Void) {
+        self.crash = crash
+        self.close = close
+        let text = DiagnosticReport.text(config: ConfigStore.shared.config, before: crash?.date)
+        _preview = State(initialValue: text)
+        log("feedback: diagnostics prepared (\(text.count) characters)")
+    }
     @State private var kind: Telemetry.Kind = .problem
     @State private var message = ""
     @State private var email = ""
     @State private var includeDiagnostics = true
-    @State private var preview = ""
+    /// The redacted diagnostics, built once when the window opens (it was filled in onAppear, which left it empty
+    /// in the preview sheet).
+    @State private var preview: String
     @State private var showPreview = false
     @State private var status = ""
     @State private var sending = false
@@ -309,14 +319,28 @@ struct FeedbackView: View {
             if crash == nil {
                 Toggle(tx("Include technical information (recommended)", "Incluir información técnica (recomendado)"), isOn: $includeDiagnostics).font(.system(size: 12.5))
             }
-            DisclosureGroup(isExpanded: $showPreview) {
-                ScrollView {
-                    Text(fullText).font(.system(size: 10.5, design: .monospaced)).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+            // A sheet instead of an inline disclosure: growing this auto-sized window left a gap at the top and
+            // squeezed the text to two lines.
+            Button { showPreview = true } label: {
+                Label(tx("See exactly what is sent…", "Ver exactamente qué se envía…"), systemImage: "doc.text.magnifyingglass")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(.link)
+            .sheet(isPresented: $showPreview) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(tx("What is sent", "Lo que se envía")).font(.system(size: 15, weight: .semibold))
+                    ScrollView {
+                        Text(fullText).font(.system(size: 10.5, design: .monospaced)).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+                    HStack {
+                        Spacer()
+                        Button(tx("Done", "Listo")) { showPreview = false }.keyboardShortcut(.defaultAction)
+                    }
                 }
-                .frame(height: 170).background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
-            } label: {
-                Text(tx("See exactly what is sent", "Ver exactamente qué se envía")).font(.system(size: 12, weight: .medium))
+                .padding(20)
+                .frame(width: 520, height: 420)
             }
             Text(tx("Your home folder, user name, Mac name and email addresses are removed from the technical text. Your window titles, files and credentials are not sent.", "Se quitan tu carpeta personal, tu nombre de usuario, el nombre del Mac y las direcciones de correo del texto técnico. No se envían los títulos de tus ventanas, tus archivos ni tus credenciales."))
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -345,7 +369,7 @@ struct FeedbackView: View {
         }
         .padding(22)
         .frame(width: 560)
-        .onAppear { preview = DiagnosticReport.text(config: config, before: crash?.date) }
+
     }
 
     private func send() {

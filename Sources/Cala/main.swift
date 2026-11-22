@@ -117,7 +117,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        source.setEventHandler { NSApp.terminate(nil) }
+        source.setEventHandler {
+            // A sheet or a modal alert makes AppKit refuse to quit, which left Cala running after a SIGTERM (an
+            // installer, a logout script, `pkill`). Close them first, then quit normally so Dock and menu bar are restored.
+            log("signal: SIGTERM, quitting")
+            if NSApp.modalWindow != nil { NSApp.abortModal() }
+            for window in NSApp.windows { if let sheet = window.attachedSheet { window.endSheet(sheet) } }
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+            // If AppKit still refuses (a SwiftUI sheet can keep it busy), do the same cleanup and exit anyway.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                log("signal: quit was refused, exiting after cleanup")
+                self?.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+                exit(0)
+            }
+        }
         terminationSource = source
         source.resume()
         LoginItem.migrateLegacy()
