@@ -34,7 +34,7 @@ Hide automatically, Theme (submenu), Transparency (submenu), **Configuración…
 
 ## Settings window
 Sidebar with seven sections (General, Appearance, Screens, Usage, Calendar, Permissions, Advanced); every change applies instantly (no save button).
-- **General:** auto-hide; window switcher (Option+Tab, optional Cmd+Tab); open at login (creates/removes the LaunchAgent); hide the macOS Dock (with "return the Dock when the bar quits"); preview delay.
+- **General:** auto-hide; window switcher (Option+Tab, optional Cmd+Tab); open at login (System Settings → Login Items); hide the macOS Dock (with "return the Dock when the bar quits"); preview delay.
 - **Appearance:** live mock-up of the bar; nine theme swatches; transparency; icon size; preview size.
 - **Screens:** one card per connected screen with an icon-alignment picker (drawn as small diagrams).
 - **Usage:** AI usage indicator switches, custom Claude/Codex folders, optional Claude Code statusLine (see below).

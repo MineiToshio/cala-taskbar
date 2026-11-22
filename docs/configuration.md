@@ -48,7 +48,7 @@ Example:
 
 Find an app's bundle ID: `osascript -e 'id of app "Notes"'`.
 
-Not in `config.json`: the login item is the LaunchAgent file `~/Library/LaunchAgents/local.cala.plist`, created and removed by the "Abrir al iniciar sesión" switch.
+Not in `config.json`: the login item lives in System Settings → General → Login Items (SMAppService), and the welcome-done flag in the app's UserDefaults (`onboardingCompleted`).
 
 ## Usage settings
 

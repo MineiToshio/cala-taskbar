@@ -1,15 +1,14 @@
 # Reverting to the normal Dock
 
-Everything is reversible. Do these in order.
+**Shortest way:** Settings → Advanced → **Uninstall Cala…** does all of the steps below (Dock, menu bar, login item, statusLine entry, settings, app to the Trash). Without opening the app: `scripts/uninstall.sh`.
+
+Everything is reversible. By hand, do these in order.
 
 ## 1. Stop the taskbar
 Settings → Advanced → "Salir…" (there is no Quit in the right-click menu). To open it again: Spotlight or Launchpad, search "Cala", or `open ~/Applications/Cala.app`.
 
 ## 2. Remove start at login
-Settings → General → switch off "Abrir al iniciar sesión", or:
-```bash
-launchctl bootout gui/$(id -u)/local.cala && rm ~/Library/LaunchAgents/local.cala.plist
-```
+Settings → General → switch off "Open at login", or System Settings → General → Login Items → remove Cala.
 Then remove the installed app (after step 1, with the bar quit):
 ```bash
 rm -rf ~/Applications/Cala.app
@@ -33,9 +32,7 @@ System Settings > Desktop & Dock > Menu Bar > "Automatically hide and show" = Ne
 ## 5. Optional cleanup
 ```bash
 rm -rf "$HOME/Library/Application Support/Cala"      # config and debug log
-tccutil reset Accessibility local.cala
-tccutil reset ScreenCapture local.cala
-tccutil reset Calendar local.cala
+tccutil reset All local.cala                            # every permission Cala was given
 ```
 If you enabled the Claude Code statusLine (Settings → Usage), switch it off first: that removes only Cala's entry. The first backup of your Claude `settings.json` stays next to it as `settings.json.mactaskbar.bak`; delete it and `claude-statusline.sh` / `claude-usage.json` (inside the Application Support folder above) if you no longer want them.
 The project folder (including `build/Cala.app`) can then be deleted.
