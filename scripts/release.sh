@@ -8,6 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 : ${CALA_SIGN_IDENTITY:?Set CALA_SIGN_IDENTITY to your \"Developer ID Application: …\" identity (see docs/release.md)}
 [[ "$CALA_SIGN_IDENTITY" != "-" ]] || { echo "A release needs a Developer ID identity, not ad-hoc (-)" >&2; exit 1; }
+[[ -z "${CALA_QA_REGULAR:-}" ]] || { echo "CALA_QA_REGULAR is for testing builds only" >&2; exit 1; }
 [[ -n "${CALA_SENTRY_DSN:-}" ]] || echo "warning: CALA_SENTRY_DSN is not set; 'Report a problem' will be off in this build" >&2
 
 ./scripts/check-rules.sh >/dev/null && echo "› checks passed"

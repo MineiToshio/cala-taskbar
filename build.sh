@@ -8,6 +8,7 @@
 #   CALA_SIGN_IDENTITY  codesign identity; "-" = ad-hoc       (default: -)
 #                       e.g. "Developer ID Application: Your Name (TEAMID)" for a release
 #   CALA_SENTRY_DSN     where "Report a problem" sends to      (optional; without it reporting is off)
+#   CALA_QA_REGULAR     1 = testing only: a normal (Dock) app, so UI-automation tools can drive it. Never for a release.
 #
 # A Developer ID identity turns on the hardened runtime, a secure timestamp and packaging/Cala.entitlements.
 set -euo pipefail
@@ -57,7 +58,7 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
-<key>LSUIElement</key><true/>
+<key>LSUIElement</key>$([[ -n "${CALA_QA_REGULAR:-}" ]] && echo "<false/><key>CalaQARegular</key><true/>" || echo "<true/>")
 <key>NSHighResolutionCapable</key><true/>
 ${DSN:+<key>CalaSentryDSN</key><string>$(xml "$DSN")</string>}
 <key>NSScreenCaptureUsageDescription</key><string>Cala draws thumbnails of your windows when you hover over an app. Your screen is never recorded or sent.</string>

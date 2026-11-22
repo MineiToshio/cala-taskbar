@@ -586,7 +586,8 @@ func openAppLauncher() {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+// QA builds (CALA_QA_REGULAR=1 in build.sh) run as a regular app so UI-automation tools can see and drive it.
+app.setActivationPolicy(Bundle.main.object(forInfoDictionaryKey: "CalaQARegular") as? Bool == true ? .regular : .accessory)
 #if DEBUG
 if let index = CommandLine.arguments.firstIndex(of: "--render-system"), index + 1 < CommandLine.arguments.count {
     let dir = CommandLine.arguments[index + 1]
