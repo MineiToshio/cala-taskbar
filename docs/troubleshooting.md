@@ -69,7 +69,7 @@ Inspect `~/Library/Application Support/Cala/debug.log` for `usage:` lines: provi
 
 
 ## "Cala can't be opened" / "Apple could not verify Cala"
-That is Gatekeeper on a build that is not signed with Developer ID and notarized (an ad-hoc test build). Official releases made with `scripts/release.sh` do not show it. For a test build, unblock it once: macOS 15+ → System Settings → Privacy & Security → **Open Anyway**; macOS 14 → right-click → Open. See the README. It never shows on the Mac that built the app, so check releases on another Mac.
+Cala is distributed free and not notarized, so Gatekeeper blocks the first launch once. Unblock it: macOS 15+ → open Cala, Done, System Settings → Privacy & Security → **Open Anyway**; macOS 14 → right-click → Open; or `xattr -dr com.apple.quarantine /Applications/Cala.app`. See the README. It never shows on the Mac that built the app. A Developer ID signed and notarized build (docs/release.md) would not show it at all.
 
 ## Cala froze at first launch (older builds)
 Builds before commit 3018657 could hang on a Mac where the Bluetooth permission had not been decided yet. Update to a current build.

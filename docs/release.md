@@ -1,8 +1,32 @@
-# Release: firma, notarización y publicación
+# Release: publicar una versión
 
-Nota para quien publica Cala. Todo el pipeline está en el repo y no contiene ningún valor personal: identidad, credenciales y DSN se pasan por variables de entorno.
+Cala se reparte **gratis y sin firma de Apple**. Los usuarios la desbloquean una vez al abrirla por primera vez, y el README explica cómo. Si algún día quieres quitar ese paso, la firma con Developer ID está más abajo (cuesta 99 USD al año).
 
-## Por qué hace falta y cuánto cuesta
+## Publicar una versión gratuita (el camino normal)
+
+```bash
+echo 1.0.0 > VERSION && git commit -am "Version 1.0.0"   # sube la versión
+./scripts/release.sh                                    # checks + build universal + DMG + SHA-256
+git push                                                # el README del repo apunta a Releases
+./scripts/publish-github.sh                             # crea un BORRADOR de release con el DMG y las instrucciones
+```
+
+Luego abre el borrador (`gh release view v1.0.0 --web`), revísalo y pulsa **Publish release**. El README enlaza a `releases/latest`, así que el botón de descarga siempre lleva a la última versión publicada.
+
+**Antes de la primera versión pública:**
+- El repositorio tiene que ser **público**; si no, nadie fuera de él puede descargar el DMG. Se cambia en *Settings → General → Danger Zone → Change visibility* en GitHub.
+- Añade una licencia (archivo `LICENSE`), por ejemplo MIT, para que quede claro que la gente puede usarla gratis.
+- Opcional: `CALA_SENTRY_DSN` para que *Reportar un problema* envíe informes. Sin él, los usuarios usan *Copiar informe* y lo pegan en un issue.
+
+**Cómo probar una versión antes de publicarla:** en otra Mac u otra cuenta de usuario, descarga el DMG del borrador y sigue el README tal cual. En la Mac donde se compiló no aparece el bloqueo de macOS (macOS recuerda que los archivos se crearon ahí), así que ahí no sirve como prueba.
+
+### Sobre la firma ad-hoc
+
+Las versiones gratuitas se firman "ad-hoc" con un requisito fijo al bundle id. Así macOS **conserva los permisos al actualizar**: el usuario no tiene que volver a dar Accesibilidad ni Grabación de pantalla con cada versión. A cambio, otra app firmada ad-hoc con el mismo bundle id podría heredar esos permisos. Para eso tendría que estar ya ejecutándose en la Mac del usuario, así que es un riesgo bajo; la firma Developer ID lo elimina.
+
+## Opcional: firma Developer ID y notarización (de pago)
+
+### Por qué y cuánto cuesta
 
 Sin firma Developer ID y notarización, cualquier Mac que descargue Cala de una web la bloquea al abrirla (Gatekeeper). En macOS 15 o más nuevo no hay forma rápida de saltarlo: el usuario tiene que ir a Ajustes del Sistema → Privacidad y seguridad → **Abrir igualmente** y escribir su contraseña. Casi nadie lo hace solo. Con firma y notarización, solo ve el aviso normal de "descargada de internet, ¿abrir?".
 
@@ -18,11 +42,7 @@ Si dejas de pagar la membresía, las versiones ya publicadas siguen abriendo (la
 
 Comprobado en la máquina de desarrollo: `spctl` rechaza el build ad-hoc y su DMG ("rejected, no usable signature"), que es exactamente lo que verá otra Mac. En la propia Mac de desarrollo el bloqueo no aparece aunque el archivo esté marcado como descargado, porque macOS recuerda que los archivos se crearon ahí. Por eso **la prueba final se hace siempre en otra Mac u otra cuenta de usuario**, descargando el DMG publicado.
 
-### Mientras no tengas la cuenta: versión de prueba
-
-Puedes repartir el DMG ad-hoc (`./build.sh && ./scripts/make-dmg.sh`) a gente de confianza. El README explica cómo desbloquearlo una vez («Si macOS dice que no puede abrir Cala»). No lo publiques así para el público general.
-
-## Una sola vez
+### Una sola vez
 
 1. **Cuenta de Apple Developer** (99 USD/año): https://developer.apple.com/programs/ — con una cuenta individual basta.
 2. **Certificado Developer ID Application.** Hay dos caminos:
@@ -42,7 +62,7 @@ Puedes repartir el DMG ad-hoc (`./build.sh && ./scripts/make-dmg.sh`) a gente de
 4. **Decide el bundle id definitivo antes del primer release público**, por ejemplo `com.tudominio.cala`. Cambiarlo después hace que macOS trate la app como otra: cada usuario tendría que volver a dar todos los permisos. El valor por defecto `local.cala` funciona, pero no es un identificador propio.
 5. **(Opcional) DSN de Sentry** para *Reportar un problema* y los informes de fallo. Sin él, la ventana de reporte dice que el envío no está activado en esa versión. El DSN no se guarda en el repo.
 
-## Cada release
+### Cada release firmado
 
 ```bash
 # 1. Sube la versión
@@ -65,14 +85,14 @@ Para probar la firma antes de tener las credenciales de notarización:
 CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 ```
 
-### Qué comprueba `release.sh`
+#### Qué comprueba `release.sh`
 
 - Que pasen `scripts/check-rules.sh`.
 - Que la firma sea válida y que las entitlements estén puestas (`packaging/Cala.entitlements`: Apple Events para Finder, Calendario y Ubicación; nada más).
 - Que notarytool devuelva *Accepted*. Si no, imprime el `id` para pedir el log con `xcrun notarytool log <id> --keychain-profile cala-notary`.
 - `spctl` sobre la app y el DMG, es decir, lo mismo que mira Gatekeeper.
 
-### Después de publicar
+#### Después de publicar
 
 - Prueba el DMG descargado en otra Mac o en otra cuenta de usuario: doble clic, arrastrar a Aplicaciones y abrir. No debería salir ningún aviso de "desarrollador no identificado".
 - Para Intel y macOS 14, el build es universal y apunta a macOS 14. **No se pudo probar en Intel ni en macOS 14 en la máquina de desarrollo**, así que hazlo en una Mac real o en una VM antes de anunciarlo.

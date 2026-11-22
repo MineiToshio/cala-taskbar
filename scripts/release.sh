@@ -1,13 +1,17 @@
 #!/bin/zsh
-# Full release build, ready to upload by hand: universal app signed with Developer ID, notarized and stapled,
-# inside a signed, notarized and stapled disk image, plus its SHA-256. Uploads nothing.
+# Release build, ready to upload: universal app inside a disk image, plus its SHA-256. Uploads nothing
+# (scripts/publish-github.sh does that, as a draft).
 #
-# Needs CALA_SIGN_IDENTITY and notarization credentials (see scripts/notarize.sh and docs/release.md).
-# CALA_SKIP_NOTARIZE=1 builds and signs only (useful to check the signature before you have credentials).
+# Two kinds of release:
+#   free (default)  ad-hoc signed, not notarized. Users unblock it once (README, "Instalar" step 3). No Apple account.
+#   signed          CALA_SIGN_IDENTITY="Developer ID Application: …" plus notarization credentials
+#                   (scripts/notarize.sh): no Gatekeeper block at all. Needs the paid Apple Developer Program.
+# CALA_SKIP_NOTARIZE=1 signs with Developer ID but skips notarization.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-: ${CALA_SIGN_IDENTITY:?Set CALA_SIGN_IDENTITY to your \"Developer ID Application: …\" identity (see docs/release.md)}
-[[ "$CALA_SIGN_IDENTITY" != "-" ]] || { echo "A release needs a Developer ID identity, not ad-hoc (-)" >&2; exit 1; }
+CALA_SIGN_IDENTITY=${CALA_SIGN_IDENTITY:--}
+export CALA_SIGN_IDENTITY
+[[ "$CALA_SIGN_IDENTITY" == "-" ]] && { echo "› free release: ad-hoc signed, not notarized (users unblock it once)"; CALA_SKIP_NOTARIZE=1; }
 [[ -z "${CALA_QA_REGULAR:-}" ]] || { echo "CALA_QA_REGULAR is for testing builds only" >&2; exit 1; }
 [[ -n "${CALA_SENTRY_DSN:-}" ]] || echo "warning: CALA_SENTRY_DSN is not set; 'Report a problem' will be off in this build" >&2
 
@@ -15,7 +19,9 @@ cd "$(dirname "$0")/.."
 ./build.sh
 APP=build/Cala.app
 codesign --verify --strict --verbose=2 "$APP"
-codesign -d --entitlements - "$APP" 2>/dev/null | grep -q automation.apple-events || { echo "entitlements missing" >&2; exit 1; }
+if [[ "$CALA_SIGN_IDENTITY" != "-" ]]; then
+  codesign -d --entitlements - "$APP" 2>/dev/null | grep -q automation.apple-events || { echo "entitlements missing" >&2; exit 1; }
+fi
 
 if [[ -z "${CALA_SKIP_NOTARIZE:-}" ]]; then
   # 1. Notarize and staple the app itself, so it opens without a network check once copied out of the disk image.
