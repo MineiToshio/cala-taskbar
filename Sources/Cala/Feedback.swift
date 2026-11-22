@@ -71,19 +71,43 @@ enum DiagnosticReport {
         ]
     }
 
-    static func logTail(lines count: Int = 150) -> String {
+    private static let stampFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+        return f
+    }()
+
+    /// Last log lines, optionally only those written at or before `date` (what happened just before a crash).
+    static func logLines(count: Int, before date: Date? = nil) -> [String] {
         let url = AppPaths.supportDirectory.appendingPathComponent("debug.log")
-        guard let h = try? FileHandle(forReadingFrom: url) else { return "(no log)" }
+        guard let h = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? h.close() }
         let size = (try? h.seekToEnd()) ?? 0
-        try? h.seek(toOffset: size > 65_536 ? size - 65_536 : 0)
+        try? h.seek(toOffset: size > 262_144 ? size - 262_144 : 0)
         let data = (try? h.readToEnd()) ?? Data()
-        let all = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true)
-        return all.suffix(count).joined(separator: "\n")
+        var lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        if let date {
+            lines = lines.filter { line in
+                guard line.count > 25, let t = stampFormat.date(from: String(line.prefix(25))) else { return false }
+                return t <= date.addingTimeInterval(1)
+            }
+        }
+        return Array(lines.suffix(count))
+    }
+
+    static func logTail(lines count: Int = 150, before date: Date? = nil) -> String {
+        let lines = logLines(count: count, before: date)
+        return lines.isEmpty ? "(no log)" : lines.joined(separator: "\n")
+    }
+
+    /// The last few things Cala did before a crash, as plain text for the report and for Sentry's context panel.
+    static func activity(before date: Date) -> String {
+        Redactor.clean(logLines(count: 12, before: date).joined(separator: "\n"))
     }
 
     /// The exact text that is attached to a report, already redacted.
-    static func text(config: Config) -> String {
+    static func text(config: Config, before date: Date? = nil) -> String {
         let c = context(config)
         func part(_ key: String) -> [String: Any] { c[key] as? [String: Any] ?? [:] }
         let app = part("app"), os = part("os"), device = part("device"), perms = part("permissions"), settings = part("settings")
@@ -98,8 +122,8 @@ enum DiagnosticReport {
         Tray bar: \(config.barTrayIDs.map { $0.replacingOccurrences(of: "__t_", with: "") }.joined(separator: ", "))
         Tray ^: \(config.moreTrayIDs.map { $0.replacingOccurrences(of: "__t_", with: "") }.joined(separator: ", "))
 
-        --- Last log lines ---
-        \(logTail())
+        --- \(date == nil ? "Last log lines" : "Log lines up to the crash") ---
+        \(logTail(before: date))
         """
         return Redactor.clean(body)
     }
@@ -148,9 +172,10 @@ enum CrashReporter {
             case "never": return
             case "auto":
                 guard Telemetry.isConfigured else { return }
-                let ctx = DiagnosticReport.context(store.config)
+                var ctx = DiagnosticReport.context(store.config)
+                ctx["activity_before_crash"] = ["log": DiagnosticReport.activity(before: crash.date)]
                 Telemetry.send(kind: .crash, message: "Cala closed unexpectedly", email: nil, tags: [:], contexts: ctx,
-                               attachments: [.init(filename: "crash.ips", text: crash.text), .init(filename: "diagnostics.txt", text: DiagnosticReport.text(config: store.config))],
+                               attachments: [.init(filename: "crash.ips", text: crash.text), .init(filename: "diagnostics.txt", text: DiagnosticReport.text(config: store.config, before: crash.date))],
                                extras: CrashSummary.payload(crash.text)) { out in
                     log("feedback: crash report auto-sent ok=\(out.ok)")
                 }
@@ -205,6 +230,7 @@ struct FeedbackView: View {
     @State private var includeDiagnostics = true
     @State private var preview = ""
     @State private var showPreview = false
+    @State private var showComment = false
     @State private var status = ""
     @State private var sending = false
     @State private var sent = false
@@ -224,12 +250,30 @@ struct FeedbackView: View {
     }
     private var canSend: Bool { !sending && !sent && (crash != nil || message.trimmingCharacters(in: .whitespacesAndNewlines).count >= 10) }
 
+    private var fields: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(crash != nil ? "¿Qué estabas haciendo?" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12.5, weight: .medium))
+                TextEditor(text: $message)
+                    .font(.system(size: 13)).scrollContentBackground(.hidden)
+                    .padding(6).frame(minHeight: 90).fieldBox()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Tu correo (opcional, solo para poder responderte)").font(.system(size: 12.5, weight: .medium))
+                TextField("nombre@correo.com", text: $email)
+                    .textFieldStyle(.plain).font(.system(size: 13))
+                    .padding(.horizontal, 10).padding(.vertical, 8).fieldBox()
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(crash != nil ? "Cala se cerró inesperadamente" : "Reportar un problema").font(.system(size: 20, weight: .semibold))
                 Text(Telemetry.isConfigured
-                     ? "Lo que escribas llega a quien desarrolla Cala. Antes de enviar puedes ver exactamente qué se incluye."
+                     ? (crash != nil ? "No tienes que escribir nada: el informe ya incluye el fallo y lo que Cala estaba haciendo justo antes. Antes de enviar puedes ver exactamente qué se incluye."
+                                     : "Lo que escribas llega a quien desarrolla Cala. Antes de enviar puedes ver exactamente qué se incluye.")
                      : "El envío de informes no está activado en esta versión de Cala.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -240,17 +284,13 @@ struct FeedbackView: View {
                     Text("Otro").tag(Telemetry.Kind.other)
                 }.pickerStyle(.segmented).labelsHidden()
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text(crash != nil ? "¿Qué estabas haciendo? (opcional)" : "¿Qué pasó? ¿Qué esperabas que pasara?").font(.system(size: 12.5, weight: .medium))
-                TextEditor(text: $message)
-                    .font(.system(size: 13)).scrollContentBackground(.hidden)
-                    .padding(6).frame(minHeight: 110).fieldBox()
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Tu correo (opcional, solo para poder responderte)").font(.system(size: 12.5, weight: .medium))
-                TextField("nombre@correo.com", text: $email)
-                    .textFieldStyle(.plain).font(.system(size: 13))
-                    .padding(.horizontal, 10).padding(.vertical, 8).fieldBox()
+            if crash == nil {
+                fields
+            } else {
+                // A crash report is complete on its own: nobody has to write anything. A comment stays possible.
+                DisclosureGroup(isExpanded: $showComment) { fields.padding(.top, 8) } label: {
+                    Text("Añadir un comentario o tu correo (opcional)").font(.system(size: 12.5, weight: .medium))
+                }
             }
             if crash == nil {
                 Toggle("Incluir información técnica (recomendado)", isOn: $includeDiagnostics).font(.system(size: 12.5))
@@ -279,15 +319,17 @@ struct FeedbackView: View {
             }
         }
         .padding(22)
-        .onAppear { preview = DiagnosticReport.text(config: config) }
+        .onAppear { preview = DiagnosticReport.text(config: config, before: crash?.date) }
     }
 
     private func send() {
         sending = true; status = ""
         let note = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = note.isEmpty ? "(sin descripción)" : Redactor.clean(note)
+        var ctx = DiagnosticReport.context(config)
+        if let crash { ctx["activity_before_crash"] = ["log": DiagnosticReport.activity(before: crash.date)] }
         Telemetry.send(kind: effectiveKind, message: text, email: email.trimmingCharacters(in: .whitespaces), tags: [:],
-                       contexts: DiagnosticReport.context(config), attachments: attachments,
+                       contexts: ctx, attachments: attachments,
                        extras: crash.map { CrashSummary.payload($0.text) } ?? [:]) { out in
             sending = false
             sent = out.ok
