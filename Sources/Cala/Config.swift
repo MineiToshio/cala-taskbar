@@ -2,12 +2,11 @@ import Foundation
 import Combine
 
 struct Config: Codable, Equatable {
+    /// First-run pins: apps every Mac has. Anything not installed is skipped when the bar is built.
     var pinned: [String] = [
         "com.apple.finder",
-        "com.google.Chrome",
-        "dev.zed.Zed",
-        "com.tinyspeck.slackmacgap",
-        "com.spotify.client",
+        "com.apple.Safari",
+        "com.apple.systempreferences",
     ]
     var autoHide = true
     var iconSize: Double = 28

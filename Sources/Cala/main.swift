@@ -402,7 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if id == deskID {
             toggleDesktop()
         } else if id == startID {
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Apps.app"))
+            openAppLauncher()
         } else if let item {
             if e.modifierFlags.contains(.shift), let pid = item.pid { newWindow(pid: pid) } else { model.click(item) }
         }
@@ -574,6 +574,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
+}
+
+/// The system's app grid: "Apps" on macOS 26, Launchpad before it. Finder's Applications folder as a last resort.
+func openAppLauncher() {
+    let fm = FileManager.default
+    for path in ["/System/Applications/Apps.app", "/System/Applications/Launchpad.app", "/Applications/Launchpad.app"] where fm.fileExists(atPath: path) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: path)); return
+    }
+    NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications", isDirectory: true))
 }
 
 let app = NSApplication.shared
