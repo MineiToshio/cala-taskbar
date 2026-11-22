@@ -153,3 +153,7 @@ git clone https://github.com/MineiToshio/cala-taskbar.git && cd cala-taskbar
 **Privacy**: nothing leaves your Mac unless you send a report yourself, and you see exactly what is in it first.
 
 **Build from source**: `./install.sh` (needs Xcode Command Line Tools).
+
+---
+
+Licencia / License: [MIT](LICENSE)
