@@ -101,7 +101,7 @@ enum SystemFixtures {
                                                 loads: background.loads + [lightSafari, mail, preview, calendar])
         let maintenance = RestartRules.summary(
             RestartRules.evaluate(RestartInput(uptime: 21 * 86_400, ram: gib(16), pendingUpdate: "macOS")),
-            lang: Locale.preferredLanguages.first
+            lang: appLanguage
         )
         var measuring = fine
         measuring.lastReading = nil

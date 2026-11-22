@@ -9,6 +9,8 @@ struct Config: Codable, Equatable {
         "com.apple.systempreferences",
     ]
     var autoHide = true
+    /// Interface language: "system" (follow macOS), "en" or "es".
+    var language = "system"
     var iconSize: Double = 28
     var previewDelay: Double = 0.05
     var previewWidth: Double = 420
@@ -74,6 +76,7 @@ struct Config: Codable, Equatable {
     var recoveredFromInvalidFields = false
 
     enum CodingKeys: String, CodingKey {
+        case language
         case pinned, autoHide, iconSize, previewDelay, previewWidth, alignments, order, theme, barOpacity
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, trayLayout, trayOrder
@@ -98,6 +101,8 @@ extension Config {
         }
         pinned = field([String].self, .pinned) ?? pinned
         autoHide = field(Bool.self, .autoHide) ?? autoHide
+        language = field(String.self, .language) ?? language
+        if !["system", "en", "es"].contains(language) { language = "system"; invalid = true }
         iconSize = field(Double.self, .iconSize) ?? iconSize
         previewDelay = field(Double.self, .previewDelay) ?? previewDelay
         previewWidth = field(Double.self, .previewWidth) ?? previewWidth
@@ -156,7 +161,15 @@ final class ConfigStore: ObservableObject {
     static let shared = ConfigStore()
 
     @Published var config: Config {
-        didSet { if config != oldValue { save() } }
+        didSet {
+            if config.language != oldValue.language { Self.applyLanguage(config) }
+            if config != oldValue { save() }
+        }
+    }
+
+    /// Makes every tx()/calendarText() call use the chosen language ("system" follows macOS).
+    static func applyLanguage(_ config: Config) {
+        appLanguageOverride = config.language == "system" ? nil : config.language
     }
 
     private let url: URL = {
@@ -172,6 +185,7 @@ final class ConfigStore: ObservableObject {
     private var canSave = true
 
     private init() {
+        defer { Self.applyLanguage(config) }
         config = Config()
         existedAtLaunch = FileManager.default.fileExists(atPath: url.path)
         guard existedAtLaunch else { save(); return }

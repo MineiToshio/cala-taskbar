@@ -1,7 +1,14 @@
 import Foundation
 
-/// Calendar chrome follows the first preferred language; unsupported languages use English.
-func calendarText(_ english: String, _ spanish: String, preferredLanguage: String? = Locale.preferredLanguages.first) -> String {
+/// Language chosen in Settings → General ("en" or "es"); nil follows the system. Set once at launch and when the
+/// setting changes, on the main thread.
+nonisolated(unsafe) var appLanguageOverride: String?
+
+/// The interface language: the one chosen in Settings, else the Mac's first preferred language.
+var appLanguage: String? { appLanguageOverride ?? Locale.preferredLanguages.first }
+
+/// Interface text in the interface language; anything other than Spanish uses English.
+func calendarText(_ english: String, _ spanish: String, preferredLanguage: String? = appLanguage) -> String {
     let language = preferredLanguage?.replacingOccurrences(of: "_", with: "-").split(separator: "-").first?.lowercased()
     return language == "es" ? spanish : english
 }

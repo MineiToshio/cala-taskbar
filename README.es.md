@@ -111,6 +111,7 @@ Para **Accesibilidad** y **Grabación de pantalla**, macOS abre una lista: activ
 
 - **Configuración**: clic derecho en una zona vacía de la barra → *Configuración…*, o vuelve a abrir Cala desde Aplicaciones.
 - **Abrir al iniciar sesión**: se elige en la bienvenida o en *Configuración → General*. Aparece en *Ajustes del Sistema → General → Ítems de inicio*.
+- **Idioma**: español o inglés; por defecto, el de tu Mac. Se cambia en *Configuración → General → Idioma*.
 - **Ocultar el Dock de macOS**: *Configuración → General*. Al apagarlo, o al salir de Cala, el Dock vuelve exactamente como estaba.
 - **Actualizar**: vuelve a ejecutar el comando de la opción 1, o descarga el nuevo DMG y reemplaza Cala en Aplicaciones. Tus ajustes y permisos se conservan.
 

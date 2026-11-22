@@ -240,8 +240,40 @@ struct GeneralPane: View {
         store.config.diskFolders = diskFolders.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
+    @State private var languageChanged = false
+    private var systemLanguageName: String {
+        let code = Locale.preferredLanguages.first?.split(separator: "-").first.map(String.init) == "es" ? "es" : "en"
+        return code == "es" ? "Español" : "English"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
+            Card {
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tx("Language", "Idioma")).font(.system(size: 13, weight: .medium))
+                        Text(languageChanged
+                             ? tx("Some texts (menus, tray names) change after reopening Cala.", "Algunos textos (menús, nombres de la bandeja) cambian al reabrir Cala.")
+                             : tx("By default Cala uses your Mac's language.", "Por defecto Cala usa el idioma de tu Mac."))
+                            .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 12) {
+                        Picker("", selection: Binding(get: { store.config.language }, set: { store.config.language = $0; languageChanged = true })) {
+                            Text(tx("System", "Sistema") + " (" + systemLanguageName + ")").tag("system")
+                            Text("English").tag("en")
+                            Text("Español").tag("es")
+                        }
+                        .pickerStyle(.segmented).labelsHidden().frame(width: 360)
+                        .accessibilityLabel(tx("Language", "Idioma"))
+                        Spacer(minLength: 0)
+                        if languageChanged {
+                            Button(tx("Reopen Cala", "Reabrir Cala")) { Relaunch.open() }.fixedSize()
+                        }
+                    }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             Card {
                 SettingRow(title: tx("Hide the bar automatically", "Ocultar la barra automáticamente"), caption: tx("It hides, and shows again when you move the mouse to the bottom edge of the screen.", "Se esconde y aparece al llevar el mouse al borde inferior de la pantalla.")) {
                     Toggle("", isOn: Binding(get: { store.config.autoHide }, set: { store.config.autoHide = $0 })).toggleStyle(.switch).labelsHidden()

@@ -367,7 +367,7 @@ enum SystemRules {
     }
 
     static func memoryStatus(_ pressure: MemoryPressure, state: MeterState,
-                             lang: String? = Locale.preferredLanguages.first) -> String {
+                             lang: String? = appLanguage) -> String {
         if state == .veryTight { return calendarText("Very tight", "Muy justa", preferredLanguage: lang) }
         return pressure == .normal ? calendarText("Normal", "Normal", preferredLanguage: lang)
                                    : calendarText("Tight", "Justa", preferredLanguage: lang)
@@ -453,7 +453,7 @@ enum SystemRules {
         return card(kind, level: level, primary: .openActivityMonitor)
     }
 
-    static func text(_ m: SystemMessage, lang: String? = Locale.preferredLanguages.first,
+    static func text(_ m: SystemMessage, lang: String? = appLanguage,
                      locale: Locale = .current) -> MessageText {
         func tr(_ en: String, _ es: String) -> String { calendarText(en, es, preferredLanguage: lang) }
         let title: String

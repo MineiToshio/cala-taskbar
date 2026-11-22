@@ -77,3 +77,7 @@ The statusLine option creates `~/Library/Application Support/Cala/claude-statusl
 | `calendarExcludedIDs` | array of strings | `[]` | EventKit calendar identifiers to exclude; new calendars are included automatically |
 
 Fields decode independently: malformed calendar settings do not reset other valid settings. The configuration stores only calendar exclusions and display preferences, not events or account credentials. Use Settings → Calendar to select accounts’ calendars. Add or sign in to accounts manually in System Settings → Internet Accounts, and enable Calendars for each account.
+
+
+### `language`
+Interface language: `"system"` (default, follows the first preferred language of macOS; Spanish if it is Spanish, English otherwise), `"en"` or `"es"`. Set in Settings → General → Language. Most texts switch at once; menus and tray names built at launch switch after reopening Cala.

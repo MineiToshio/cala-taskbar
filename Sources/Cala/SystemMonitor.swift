@@ -490,7 +490,7 @@ struct SystemPanelModel {
 
     var cpuBreakdown: Breakdown? {
         guard let reading = snapshot.displayedReading else { return nil }
-        return SystemRules.cpuBreakdown(reading.loads, total: reading.cpuWindow, lang: Locale.preferredLanguages.first,
+        return SystemRules.cpuBreakdown(reading.loads, total: reading.cpuWindow, lang: appLanguage,
                                         rowLimit: layout.rowLimit)
     }
 
@@ -498,7 +498,7 @@ struct SystemPanelModel {
         guard tab == 1 else { return cpuBreakdown }
         guard let inventory = snapshot.displayedInventory else { return nil }
         return SystemRules.memoryBreakdown(inventory.loads, used: snapshot.memoryUsed,
-                                           lang: Locale.preferredLanguages.first, locale: .current, rowLimit: layout.rowLimit)
+                                           lang: appLanguage, locale: .current, rowLimit: layout.rowLimit)
     }
 
     private var inventory: ProcessInventory? {
@@ -512,7 +512,7 @@ struct SystemPanelModel {
     private var usableRestProbe: RestProbe? { listAvailability == .fresh ? restProbe : nil }
 
     func detailRows(for row: Breakdown.Row, in breakdown: Breakdown) -> [LoadDetail] {
-        let lang = Locale.preferredLanguages.first
+        let lang = appLanguage
         let layout = detailLayout(for: row, in: breakdown)
         guard let inventory else { return [] }
         if row.isRest {
@@ -645,7 +645,7 @@ struct SystemPane: View {
     }
 
     private func panelModel(_ snapshot: LoadSnapshot) -> SystemPanelModel {
-        let maintenance = advisor.visible ? RestartRules.summary(advisor.advice, lang: Locale.preferredLanguages.first) : nil
+        let maintenance = advisor.visible ? RestartRules.summary(advisor.advice, lang: appLanguage) : nil
         var model = SystemPanelModel(snapshot: snapshot, cpuHistory: m.cpuHistory, memoryHistory: m.memoryHistory,
                                      maintenance: maintenance, tab: tab, expandedKey: expandedKey,
                                      reservesExpandedHeight: reservesExpandedHeight, restProbe: m.restProbe,
@@ -727,7 +727,7 @@ struct SystemPanelView: View {
             HStack(spacing: 4) {
                 Image(systemName: symbol).font(.system(size: 11)).foregroundStyle(color)
                     .accessibilityHidden(true)
-                Text(SystemRules.chip(level, lang: Locale.preferredLanguages.first))
+                Text(SystemRules.chip(level, lang: appLanguage))
                     .font(.system(size: 11.5)).foregroundStyle(labelColor)
             }
         }
@@ -873,7 +873,7 @@ struct SystemPanelView: View {
                     }
                     Spacer(minLength: 0)
                     if let action = detail.action {
-                        Button(SystemRules.actionLabel(action, lang: Locale.preferredLanguages.first)) {
+                        Button(SystemRules.actionLabel(action, lang: appLanguage)) {
                             onDetailAction(action)
                         }
                         .buttonStyle(.plain).foregroundStyle(Color.accentColor).lineLimit(1)

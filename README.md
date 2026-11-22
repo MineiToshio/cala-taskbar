@@ -111,6 +111,7 @@ Said no to something? Everything else keeps working. Turn it on whenever you lik
 
 - **Settings**: right-click an empty part of the bar → *Settings…*, or open Cala again from Applications.
 - **Open at login**: chosen in the welcome or in *Settings → General*. It shows up in *System Settings → General → Login Items*.
+- **Language**: English or Spanish, following your Mac by default. Change it in *Settings → General → Language*.
 - **Hide the macOS Dock**: *Settings → General*. Turning it off, or quitting Cala, brings the Dock back exactly as it was.
 - **Update**: run the Option 1 command again, or download the new DMG and replace Cala in Applications. Your settings and permissions are kept.
 
