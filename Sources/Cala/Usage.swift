@@ -591,14 +591,17 @@ final class UsageService: ObservableObject {
         active.insert(p)
         states[i].fetching = true; lastAttempt[p] = started; publish()
         // Capture paths on the service queue. The independent worker never touches mutable service state.
-        let dir = claudeDir, home = codexHome, exe = executable, keychainServices = services
+        let dir = claudeDir, home = codexHome, exe = executable, keychainServices = services, claudeExe = findExecutable("claude")
         var env = ProcessInfo.processInfo.environment
         env["CODEX_HOME"] = home
         if let path = environment["PATH"], !path.isEmpty { env["PATH"] = path }
         let processEnvironment = env
         DispatchQueue.global(qos: .utility).async {
             let result: FetchResult
-            if p == .claude { result = Self.fetchClaude(directory: dir, services: keychainServices) }
+            if p == .claude {
+                let renew: (() -> Void)? = claudeExe.map { exe in { Self.renewClaudeCredential(executable: exe, environment: processEnvironment) } }
+                result = Self.fetchClaude(directory: dir, services: keychainServices, renew: renew)
+            }
             else { result = Self.fetchCodex(home: home, executable: exe, environment: processEnvironment) }
             self.queue.async {
                 self.active.remove(p)
@@ -635,11 +638,20 @@ final class UsageService: ObservableObject {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(secondsFromGMT: 0); f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
         return f.date(from: s)?.timeIntervalSinceNow ?? 0
     }
+    /// Claude Code's access token lasts about 8 hours and only Claude Code renews it. When nobody has used it
+    /// for a while the token sits expired, so ask Claude Code itself for one tiny non-interactive turn (it
+    /// renews and stores its own credentials; Cala never touches the refresh token) and read the credential again.
+    private static func renewClaudeCredential(executable: String, environment: [String: String]) {
+        let r = UsageProcess.run(executable, ["-p", "ok", "--model", "haiku", "--max-turns", "1", "--tools", ""], timeout: 60, environment: environment)
+        log("usage: claude token renewed via Claude Code status=\(r.status) timedOut=\(r.timedOut)")
+    }
     private static func fetchClaude(directory: String, services: [String], credentialReader: (() -> Credential?)? = nil,
-                                    transport: ((String, [String: String]) -> (Data, HTTPURLResponse?))? = nil) -> FetchResult {
+                                    transport: ((String, [String: String]) -> (Data, HTTPURLResponse?))? = nil,
+                                    renew: (() -> Void)? = nil) -> FetchResult {
         let read = credentialReader ?? { readClaudeCredential(directory: directory, services: services) }
         let send = transport ?? http
         var credential = read()
+        if let renew, credential?.expired == true { renew(); credential = read() }
         for attempt in 0...1 {
             guard let current = credential, !current.expired else {
                 return FetchResult(status: 401, error: tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla"), expired: true, credentialStamp: credential?.stamp ?? CredentialStamp())

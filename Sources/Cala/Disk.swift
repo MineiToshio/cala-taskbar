@@ -214,12 +214,22 @@ struct DiskPane: View {
                     Label(tx("Space is running low. Start with the biggest items in the list.", "Queda poco espacio. Empieza por lo más grande de la lista."), systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 11)).foregroundStyle(Color.orange).fixedSize(horizontal: false, vertical: true)
                 }
+            } else {
+                SystemLoadingPulse {
+                    VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            SystemSkeletonMark().frame(width: 150, height: 22)
+                            SystemSkeletonMark().frame(width: 110, height: 10)
+                        }
+                        SystemSkeletonMark().frame(height: 12)
+                        SystemSkeletonMark().frame(width: 220, height: 10)
+                    }
+                }
             }
             Divider()
             HStack {
                 Text(tx("Where the space goes", "Dónde se va el espacio")).font(.system(size: 12, weight: .semibold)).flyoutSecondary()
                 Spacer()
-                if service.scanning { ProgressView().controlSize(.small).scaleEffect(0.7) }
             }
             ScrollView {
                 VStack(spacing: 0) {
@@ -255,12 +265,18 @@ struct DiskPane: View {
                     HStack {
                         Text(f.name).font(.system(size: 12.5)).lineLimit(1)
                         Spacer(minLength: 6)
-                        Text(f.bytes.map { (f.partial ? "≥ " : "") + diskBytes($0) } ?? "…").font(.system(size: 11.5)).monospacedDigit().flyoutSecondary()
+                        if let b = f.bytes {
+                            Text((f.partial ? "≥ " : "") + diskBytes(b)).font(.system(size: 11.5)).monospacedDigit().flyoutSecondary()
+                        } else {
+                            SystemLoadingPulse { SystemSkeletonMark().frame(width: 44, height: 10) }
+                        }
                     }
                     GeometryReader { g in
                         Capsule().fill(Color.primary.opacity(0.1))
                             .overlay(alignment: .leading) {
-                                Capsule().fill(accent.opacity(0.75)).frame(width: g.size.width * CGFloat(Double(f.bytes ?? 0) / top))
+                                if f.bytes != nil {
+                                    Capsule().fill(accent.opacity(0.75)).frame(width: g.size.width * CGFloat(Double(f.bytes ?? 0) / top))
+                                }
                             }
                     }.frame(height: 3)
                 }

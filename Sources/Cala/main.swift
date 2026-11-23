@@ -154,6 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enableBackgroundCursor()
         WifiInfo.shared.scan()
 
+        LaunchFeedback.shared.model = model
         rebuildBars()
         // Claude/Codex usage reads their credentials, which can make macOS ask for Keychain access: start it only
         // once the welcome is out of the way so that dialog never lands on top of it.
@@ -202,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   let id = self.hitInfo(m)?.id, let item = self.model.items.first(where: { $0.id == id }) else { return e }
             self.preview.commitPeek()
             self.preview.hide()
-            if let pid = item.pid { newWindow(pid: pid) } else { self.model.click(item) }
+            if let pid = item.pid { newWindow(pid: pid); self.launchFeedback(item) } else if self.model.click(item) { self.launchFeedback(item) }
             return nil
         }
         NSEvent.addLocalMonitorForEvents(matching: .leftMouseDragged) { [weak self] e in
@@ -301,6 +302,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func iconCenterX(_ b: Bar, _ id: String, fallback: CGFloat) -> CGFloat {
         guard let r = b.frames[id] else { return fallback }
         return b.panel.frame.minX + r.midX
+    }
+
+    /// Ghost zoom + pulse on the item's icon (on `bar`, or the bar under the mouse / the first one showing it).
+    func launchFeedback(_ item: AppItem, bar: Bar? = nil) {
+        let m = NSEvent.mouseLocation
+        let shown = bars.filter { !$0.hidden && $0.frames[item.id] != nil }
+        guard let b = bar ?? shown.first(where: { $0.screen.frame.contains(m) }) ?? shown.first,
+              let r = b.frames[item.id] else { return }
+        let f = b.panel.frame
+        let center = NSPoint(x: f.minX + r.midX, y: f.maxY - r.midY)
+        LaunchFeedback.shared.play(item, center: center, size: CGFloat(store.config.iconSize))
     }
 
     func iconLeftX(_ b: Bar, _ id: String) -> CGFloat {
@@ -417,7 +429,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if id == startID {
             openAppLauncher()
         } else if let item {
-            if e.modifierFlags.contains(.shift), let pid = item.pid { newWindow(pid: pid) } else { model.click(item) }
+            if e.modifierFlags.contains(.shift), let pid = item.pid { newWindow(pid: pid); launchFeedback(item, bar: bar) }
+            else if model.click(item) { launchFeedback(item, bar: bar) }
         }
     }
 
@@ -520,13 +533,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let pid = item.pid {
             let news = WindowService.newItems(pid: pid)
             for n in news {
-                menu.addItem(BlockItem(n.title) { WindowService.press(n.el, pid: pid) })
+                menu.addItem(BlockItem(n.title) { [weak self] in WindowService.press(n.el, pid: pid); self?.launchFeedback(item) })
             }
             if !news.isEmpty { menu.addItem(.separator()) }
         }
         if item.pid == nil, let url = item.url {
-            menu.addItem(BlockItem(tx("Open", "Abrir")) {
+            menu.addItem(BlockItem(tx("Open", "Abrir")) { [weak self] in
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+                self?.launchFeedback(item)
             })
         }
         if item.pid != ProcessInfo.processInfo.processIdentifier {

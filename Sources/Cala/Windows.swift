@@ -245,8 +245,9 @@ enum WindowService {
     }
 
     /// Click on a running app's icon: toggle like the Windows taskbar.
-    static func toggle(pid: pid_t) {
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+    @discardableResult
+    static func toggle(pid: pid_t) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         let wins = windows(for: pid)
         log("click \(app.localizedName ?? "?") windows=\(wins.count) trusted=\(AXIsProcessTrusted())")
         if wins.isEmpty || wins.allSatisfy({ $0.ax == nil }) {
@@ -254,13 +255,14 @@ enum WindowService {
             if let url = app.bundleURL {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             }
-            return
+            return true
         }
         if app.isActive, let visible = wins.first(where: { !$0.minimized }) {
             if wins.filter({ !$0.minimized }).count == 1 { minimize(visible) } else { bringFront(app) }
         } else if let first = wins.first(where: { !$0.minimized }) ?? wins.first {
             raise(first)
         }
+        return false
     }
 }
 

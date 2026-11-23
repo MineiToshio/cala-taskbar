@@ -38,7 +38,8 @@ struct BarView: View {
                            hovering: model.hovered?.id == item.id,
                            active: item.pid != nil && item.pid == model.frontPID,
                            badge: model.badge(for: item),
-                           windowless: item.pid.map { model.windowless.contains($0) } ?? false)
+                           windowless: item.pid.map { model.windowless.contains($0) } ?? false,
+                           launching: model.launching.contains(item.id))
                     // VoiceOver: the bar's clicks are handled by an event monitor, so give each icon its own action.
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(item.name)
@@ -93,6 +94,7 @@ struct IconButton: View {
     let active: Bool
     var badge: String? = nil
     var windowless = false
+    var launching = false
 
     var body: some View {
         let running = item.pid != nil
@@ -102,6 +104,7 @@ struct IconButton: View {
             Image(nsImage: item.icon)
                 .resizable().interpolation(.high)
                 .frame(width: size, height: size)
+                .modifier(LaunchPulse(active: launching))
                 .frame(maxHeight: .infinity)
             if running && windowless {
                 Circle().fill(Color.secondary.opacity(0.7)).frame(width: 4, height: 4).padding(.bottom, 3)

@@ -112,7 +112,7 @@ struct FlyoutView: View {
             case trayUser: UserPane()
             case trayKB: KeyboardPane(model: model)
             case trayClock: CalendarPane(maxAgendaHeight: min(400, max(60, fm.availableHeight - 480)))
-            case trayUsage, UsageProvider.claude.trayID, UsageProvider.codex.trayID: UsagePane(model: model)
+            case trayUsage, UsageProvider.claude.trayID, UsageProvider.codex.trayID: UsagePane(model: model, maxHeight: max(300, fm.availableHeight - 40))
             default: EmptyView()
             }
             }
@@ -472,33 +472,38 @@ struct CalendarPane: View {
     }
 }
 
+private struct UsageHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 struct UsagePane: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var model: TaskbarModel
+    @State private var contentHeight: CGFloat = 0
+    /// Room the screen allows for the pane (the flyout adds its own padding).
+    let maxHeight: CGFloat
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("AI plan usage").font(.system(size: 17, weight: .semibold))
-                        Text("Remaining allowance").font(.system(size: 12)).flyoutSecondary()
-                    }
-                    ForEach(model.usage.filter(\.available)) { state in
-                        provider(state, now: context.date)
-                    }
+            let content = VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(tx("AI plan usage", "Uso de planes de IA")).font(.system(size: 17, weight: .semibold))
+                    Text(tx("Remaining allowance", "Cupo restante")).font(.system(size: 12)).flyoutSecondary()
+                }
+                ForEach(model.usage.filter(\.available)) { state in
+                    provider(state, now: context.date)
                 }
             }
-            .frame(height: paneHeight)
+            .background(GeometryReader { g in Color.clear.preference(key: UsageHeightKey.self, value: g.size.height) })
+            // No ScrollView at all unless the content really exceeds the limit.
+            if contentHeight > maxHeight {
+                ScrollView { content }.frame(height: maxHeight)
+            } else {
+                content
+            }
         }
+        .onPreferenceChange(UsageHeightKey.self) { contentHeight = $0 }
         .onAppear { UsageService.shared.refresh() }
-    }
-    private var paneHeight: CGFloat {
-        var height = 68
-        for state in model.usage where state.available {
-            height += 100 + max(1, state.reading?.windows.count ?? 0) * 86
-            if state.error != nil { height += 32 }
-        }
-        return CGFloat(min(600, height))
     }
     private func age(_ date: Date?, now: Date) -> String {
         guard let date else { return tx("Not updated yet", "Aún sin actualizar") }
@@ -519,16 +524,16 @@ struct UsagePane: View {
     }
     private func provider(_ state: UsageState, now: Date) -> some View {
         let retry = max(0, Int(ceil(state.cooldownUntil?.timeIntervalSince(now) ?? 0)))
-        let brand = providerColor(state.provider, dark: scheme == .dark)
+        let brand = Color.primary
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                ProviderMark(provider: state.provider, colored: true).frame(width: 20, height: 20)
+                ProviderMark(provider: state.provider, colored: false).frame(width: 20, height: 20)
                 Text(state.provider.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(brand)
                 Spacer()
                 if let plan = state.reading?.plan ?? state.plan {
                     Text(usagePlanTitle(plan)).font(.system(size: 10, weight: .semibold)).foregroundStyle(brand).lineLimit(1).help(plan)
                         .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(Capsule().fill(brand.opacity(0.12)))
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
                 }
             }
             ForEach(state.orderedWindows) { window in
@@ -574,14 +579,14 @@ struct UsagePane: View {
                 Button {
                     UsageService.shared.refresh(state.provider, force: true)
                 } label: {
-                    Label(retry > 0 ? "Retry in \(retry)s" : (state.fetching ? "Refreshing…" : "Refresh"), systemImage: "arrow.clockwise")
+                    Label(retry > 0 ? tx("Retry in \(retry)s", "Reintentar en \(retry) s") : (state.fetching ? tx("Refreshing…", "Actualizando…") : tx("Refresh", "Actualizar")), systemImage: "arrow.clockwise")
                         .font(.system(size: 10.5, weight: .medium))
                 }
                 .buttonStyle(.plain).foregroundStyle(brand)
                 .padding(.horizontal, 8).padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 6).fill(brand.opacity(0.1)))
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08)))
                 .disabled(retry > 0 || state.fetching)
-                .help(retry > 0 ? "Rate-limited; wait for the cooldown" : "Refresh " + state.provider.title)
+                .help(retry > 0 ? tx("Rate-limited; wait for the cooldown", "Límite de uso alcanzado; espera a que termine la pausa") : tx("Refresh ", "Actualizar ") + state.provider.title)
             }
         }
         .padding(12)

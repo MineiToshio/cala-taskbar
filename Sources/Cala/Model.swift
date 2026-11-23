@@ -28,6 +28,8 @@ final class TaskbarModel: ObservableObject {
     @Published var dragID: String?
     @Published var dragScreen = ""
     @Published var dragX: CGFloat = 0
+    /// Items whose app is opening (see LaunchFeedback): their icon pulses until a window appears.
+    @Published var launching: Set<String> = []
     @Published var batt: (pct: Int, charging: Bool, isCharging: Bool)?
     @Published var disk: DiskInfo?
     @Published var wifiOn = true
@@ -166,12 +168,16 @@ final class TaskbarModel: ObservableObject {
         return nil
     }
 
-    func click(_ item: AppItem) {
+    /// Returns true when the click opens something (launch or reopen) rather than raising/minimizing a window.
+    @discardableResult
+    func click(_ item: AppItem) -> Bool {
         if let pid = item.pid {
-            WindowService.toggle(pid: pid)
+            return WindowService.toggle(pid: pid)
         } else if let url = item.url {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+            return true
         }
+        return false
     }
 
     /// Moves an icon to the position of another one (drag reorder).
