@@ -1,0 +1,1520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Cala · A taskbar for your Mac</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --navy: #1c2944;
+    --navy-deep: #10192b;
+    --mint: #8de4cd;
+    --bg: #0d1421;
+    --surface: #131e2f;
+    --card: #19263a;
+    --raised: #223148;
+    --text: #f1f5fc;
+    --muted: #acbbd0;
+    --accent: var(--mint);
+    --accent-ink: #102a25;
+    --accent-surface: #1e3e3c;
+    --line: #324157;
+    --control-line: #647997;
+    --scene: #1b2b42;
+    --material: rgba(17, 27, 44, .91);
+    --warm: #ffca8b;
+    --warm-surface: #392f28;
+    --shadow: 0 14px 38px #080e1990;
+    --s1: 4px;
+    --s2: 8px;
+    --s3: 12px;
+    --s4: 16px;
+    --s5: 24px;
+    --s6: 32px;
+    --s7: 48px;
+    --s8: 64px;
+    --s9: 96px;
+    --r-control: 8px;
+    --r-card: 12px;
+    --r-window: 20px;
+    --wrap: 1120px;
+    --gutter: clamp(16px, 4vw, 48px);
+    --section: clamp(56px, 7.1vw, 104px);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --surface: #eaf0f7;
+      --card: #fff;
+      --raised: #e1eaf4;
+      --text: #142238;
+      --muted: #445670;
+      --accent: #146753;
+      --accent-ink: #fff;
+      --accent-surface: #d7efe7;
+      --line: #bdccdf;
+      --control-line: #7186a0;
+      --scene: #d6e3f2;
+      --material: rgba(243, 248, 254, .93);
+      --warm: #783e08;
+      --warm-surface: #faecda;
+      --shadow: 0 14px 38px #425e8533;
+    }
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-padding-top: 20px; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 var(--font); }
+  :where(h1,h2,h3,p,figure,dl,dd) { margin: 0; }
+  :where(h1,h2,h3) { color: var(--text); line-height: 1.1; }
+  h2 { font-size: clamp(32px, 4.1vw, 54px); font-weight: 720; letter-spacing: -.05em; text-wrap: balance; }
+  h3 { font-size: 22px; letter-spacing: -.025em; }
+  :where(button,select) { color: inherit; font: inherit; }
+  :where(button,select,summary) { cursor: pointer; }
+  a { color: var(--accent); text-underline-offset: .24em; }
+  a:hover { text-decoration-thickness: 2px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+  [hidden] { display: none !important; }
+  .wrap { width: min(var(--wrap), calc(100% - 2 * var(--gutter))); margin-inline: auto; }
+  .icon { display: inline-block; flex: none; width: 1.15em; height: 1.15em; vertical-align: -.15em; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+  .sr-only, .skip:not(:focus) { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+  .skip { position: fixed; z-index: 5; top: var(--s3); left: var(--s3); padding: var(--s2) var(--s4); background: var(--card); border-radius: var(--r-control); }
+  .site-header { border-bottom: 1px solid var(--line); }
+  .header-inner, .footer-inner { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
+  .header-inner { min-height: 72px; gap: clamp(16px, 3vw, 36px); }
+  .brand { display: inline-flex; align-items: center; gap: 9px; color: var(--text); font-weight: 740; font-size: 21px; letter-spacing: -.04em; text-decoration: none; }
+  .brand-mark { width: 35px; height: 35px; flex: none; }
+  .site-nav, .footer-nav { display: flex; flex-wrap: wrap; align-items: center; gap: clamp(16px, 3vw, 36px); }
+  .site-nav a, .footer-nav a { color: var(--muted); font-size: 14px; font-weight: 580; text-decoration: none; }
+  .site-nav a:hover, .footer-nav a:hover { color: var(--text); text-decoration: underline; }
+  .language { display: flex; align-items: center; gap: var(--s2); color: var(--muted); margin-inline-start: auto; }
+  .language select { background: var(--bg); border: 1px solid var(--control-line); border-radius: var(--r-control); color: var(--text); font-size: 13px; padding: 6px 8px; min-height: 36px; max-width: 100%; }
+  .hero { padding-top: clamp(42px, 5.1vw, 74px); }
+  .hero-copy { text-align: center; margin-inline: auto; }
+  .hero h1 { font-size: clamp(43px, 6.5vw, 79px); letter-spacing: -.053em; line-height: .99; font-weight: 760; text-wrap: balance; }
+  .hero h1 span:last-child { color: var(--accent); }
+  .hero-lead { color: var(--muted); font-size: clamp(16px, 1.65vw, 21px); max-width: 600px; margin: 18px auto 0; text-wrap: balance; }
+  .hero-actions { max-width: 746px; margin: var(--s5) auto 0; }
+  .hero-links { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--s2) var(--s5); align-items: center; margin-top: var(--s3); font-size: 14px; }
+  .hero-links a, .inline-link { display: inline-flex; gap: 6px; align-items: center; font-weight: 630; }
+  .specs { color: var(--muted); font-size: 14px; }
+  .button { display: inline-flex; justify-content: center; align-items: center; gap: var(--s2); padding: 9px var(--s3); min-height: 42px; border-radius: var(--r-control); border: 1px solid var(--control-line); background: var(--raised); color: var(--text); font-size: 14px; font-weight: 680; line-height: 1.2; text-align: center; text-decoration: none; }
+  .button:hover { border-color: var(--accent); }
+  .button-primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .button-primary:hover { filter: brightness(1.09); }
+  .command { display: flex; align-items: center; gap: var(--s3); padding: var(--s2); border-radius: var(--r-card); background: var(--card); border: 1px solid var(--line); text-align: left; }
+  .command > .icon { margin-left: var(--s2); color: var(--accent); }
+  .command code { flex: 1; min-width: 0; color: var(--text); font: 12px/1.55 var(--mono); overflow-wrap: anywhere; }
+  .command .button { flex: none; }
+  .mobile-actions { display: none; }
+  .mobile-actions p { color: var(--muted); margin-bottom: var(--s3); }
+  .mobile-actions .button { margin-inline: 3px; }
+  .demo { margin: 0; }
+  .demo-caption { display: flex; justify-content: center; flex-wrap: wrap; gap: 2px 8px; margin-top: 6px; color: var(--muted); font-size: 13px; text-align: center; }
+  .demo-caption strong { color: var(--text); font-weight: 670; }
+  .desktop { position: relative; isolation: isolate; height: 287px; display: flex; align-items: end; justify-content: center; padding-bottom: var(--deck-floor); }
+  .taskbar { position: relative; z-index: 2; display: flex; justify-content: space-between; align-items: center; gap: 8px; animation: taskbar-in .62s cubic-bezier(.2,.7,.2,1) both; }
+  .task-apps, .task-tray { display: flex; align-items: center; gap: var(--s1); }
+  .task-button { display: grid; place-items: center; position: relative; min-width: 36px; min-height: 38px; padding: 3px; border: 1px solid transparent; border-radius: 7px; background: transparent; font-size: 17px; }
+  .task-button:hover, .task-button[aria-expanded="true"] { background: var(--raised); border-color: var(--line); }
+  .task-app { min-width: 44px; min-height: 47px; padding-bottom: 8px; }
+  .task-app::after { content: ""; position: absolute; bottom: 3px; width: 8px; height: 2px; border-radius: 2px; background: var(--muted); }
+  .task-app[aria-expanded="true"]::after { background: var(--accent); width: 16px; }
+  .app-tile { width: 29px; height: 29px; display: inline-grid; place-items: center; border-radius: 7px; font-size: 16px; border: 1px solid #ffffff50; box-shadow: 0 2px 4px #0d142138; }
+  .tile-files { background: #236d96; color: #f4f9ff; }
+  .tile-notes { background: #f0cb79; color: #3e2a11; }
+  .tile-browser { background: #416498; color: #fbfcff; }
+  .tile-terminal { background: #263848; color: #b4efdb; }
+  .task-reading { font: 600 9px/1 var(--mono); color: var(--muted); }
+  .task-clock { padding-inline: 6px; min-width: 63px; font: 640 12px/1.15 var(--mono); font-variant-numeric: tabular-nums; text-align: center; }
+  .task-clock small { font: 10px/1.2 var(--font); color: var(--muted); }
+  .demo-popover { position: absolute; z-index: 1; bottom: 65px; left: var(--s3); max-width: calc(100% - 2 * var(--s3)); padding: var(--s2); border-radius: var(--r-card); border: 1px solid var(--control-line); background: var(--material); backdrop-filter: blur(18px); box-shadow: var(--shadow); }
+  .demo-popover[data-side="tray"] { left: auto; right: var(--s3); width: min(288px, calc(100% - 2 * var(--s3))); }
+  .demo-popover.is-opening { animation: reveal .16s ease-out both; }
+  .preview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s2); width: min(348px, 64vw); }
+  .preview-grid:has(> :only-child) { width: min(174px, 62vw); grid-template-columns: 1fr; }
+  .preview-card { min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: var(--r-control); background: var(--card); }
+  .preview-title { display: flex; align-items: center; gap: 5px; min-height: 22px; color: var(--text); font-size: 11px; font-weight: 650; }
+  .preview-title .icon { color: var(--accent); }
+  .preview-art { height: 84px; position: relative; overflow: hidden; display: grid; grid-template-columns: 26% 1fr; margin-top: 4px; background: var(--raised); border: 1px solid var(--line); border-radius: 4px; }
+  .preview-art > span:first-child { background: var(--surface); border-right: 1px solid var(--line); }
+  .preview-art > span:last-child { padding: 11px 8px; }
+  .preview-art .fake-line { height: 3px; margin-bottom: 5px; }
+  .preview-art .tiny-blocks { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 3px; margin-top: 7px; }
+  .tiny-blocks i { height: 17px; background: var(--accent-surface); border: 1px solid var(--line); border-radius: 2px; }
+  .preview-art[data-art="notes"] { grid-template-columns: 1fr; background: var(--card); }
+  .preview-art[data-art="notes"] > span:first-child, .preview-art[data-art="notes"] .tiny-blocks { display: none; }
+  .preview-art[data-art="browser"] .tiny-blocks i:first-child { grid-column: span 2; }
+  .preview-art[data-art="terminal"] { grid-template-columns: 1fr; background: var(--navy-deep); }
+  .preview-art[data-art="terminal"] > span:first-child { display: none; }
+  .preview-art[data-art="terminal"] .fake-line { background: var(--mint); }
+  .preview-art[data-art="terminal"] .tiny-blocks { display: none; }
+  .demo-popover .mock-panel { border: 0; box-shadow: none; padding: var(--s2); line-height: 1.2; }
+  .demo-popover :is(.spark, .segmented, .load-row .meter) { display: none; }
+  .demo-popover :is(.health-grid, .maintenance) { margin-top: var(--s2); }
+  .demo-popover .health-stat strong { line-height: 1.2; }
+  .demo-popover .load-top { margin: var(--s2) 0 var(--s1); }
+  .demo-popover .load-row + .load-row { margin-top: 3px; }
+  .demo-popover .mock-divider { margin-block: 6px; }
+  .demo-popover .calendar-time { font-size: 21px; }
+  .demo-popover .month-grid { margin-top: 2px; gap: 1px; line-height: 1; }
+  .demo-panel { padding: var(--s2); }
+  .demo-panel strong { display: block; margin-bottom: var(--s2); }
+  .demo-panel p { color: var(--muted); font-size: 13px; }
+  @keyframes reveal { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+  .section { padding-block: var(--section); }
+  .section-intro { margin-bottom: var(--s6); }
+  .section-intro > p, .section-heading > p { color: var(--muted); margin-top: var(--s3); max-width: 61ch; }
+  .features .section-intro { text-align: center; }
+  .features .section-intro > p { margin-inline: auto; }
+  .feature-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--s4); }
+  .feature { min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); overflow: hidden; }
+  .feature-copy { padding: var(--s5); }
+  .feature-copy .feature-icon { display: inline-grid; place-items: center; width: 35px; height: 35px; margin-bottom: var(--s3); border-radius: var(--r-control); background: var(--accent-surface); color: var(--accent); }
+  .feature-copy p { color: var(--muted); margin-top: var(--s2); font-size: 15px; max-width: 50ch; }
+  .feature-stage { display: grid; align-items: center; justify-items: center; flex: 1; min-height: 255px; padding: var(--s5); border-top: 1px solid var(--line); background: var(--scene); }
+  .feature-stage.tall { min-height: 336px; }
+  .mock-panel { width: min(100%, 350px); min-width: 0; color: var(--text); border: 1px solid var(--control-line); border-radius: var(--r-card); background: var(--card); padding: var(--s4); box-shadow: var(--shadow); font-size: 12px; }
+  .mock-panel-title { display: flex; gap: var(--s2); align-items: center; justify-content: space-between; font-size: 14px; font-weight: 710; }
+  .mock-panel-title small { color: var(--accent); font-size: 11px; font-weight: 660; }
+  .mock-panel-title .check-reading { color: var(--warm); }
+  .switcher-panel { width: min(100%, 445px); padding: var(--s3); }
+  .switcher-heading { display: flex; justify-content: center; gap: 6px; align-items: center; margin-bottom: var(--s3); }
+  kbd { font: 650 11px/1.2 var(--mono); border: 1px solid var(--control-line); border-radius: 5px; padding: 3px 6px; color: var(--text); background: var(--surface); box-shadow: 0 1px 0 var(--control-line); }
+  .switcher-cards { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 6px; }
+  .switcher-card { padding: 5px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+  .switcher-card.selected { border: 2px solid var(--accent); padding: 4px; background: var(--accent-surface); }
+  .switcher-card .preview-art { height: 61px; }
+  .switcher-card .preview-title { line-height: 1.2; overflow-wrap: anywhere; }
+  .tray-example { width: min(100%, 340px); display: grid; justify-items: end; gap: var(--s2); }
+  .tray-example .mock-panel { width: min(100%, 280px); }
+  .mock-row { display: flex; align-items: center; gap: var(--s2); }
+  .mock-row .icon { color: var(--muted); }
+  .mock-tray { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 5px var(--s2); border: 1px solid var(--control-line); border-radius: var(--r-control); background: var(--card); }
+  .mock-tray > span { display: grid; place-items: center; width: 29px; height: 28px; border-radius: 5px; }
+  .mock-tray .selected { background: var(--accent-surface); color: var(--accent); }
+  .mock-slider, .meter { height: 5px; flex: 1; border-radius: 3px; background: var(--raised); overflow: hidden; }
+  .mock-slider { position: relative; height: 6px; overflow: visible; }
+  .mock-slider::after { content: ""; position: absolute; left: 63%; top: 50%; width: 12px; height: 12px; transform: translate(-50%, -50%); border-radius: 50%; background: var(--accent); border: 1px solid var(--card); }
+  .mock-slider i, .meter i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+  .volume-row { margin-top: var(--s4); }
+  .mock-divider { margin-block: var(--s3); border-top: 1px solid var(--line); }
+  .health-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--s2); margin-top: var(--s3); }
+  .health-stat { padding: 6px 8px; background: var(--surface); border-radius: 6px; color: var(--muted); font-size: 10px; }
+  .health-stat strong { display: block; color: var(--text); font-size: clamp(17px, 2vw, 23px); letter-spacing: -.045em; }
+  .spark { display: block; width: 100%; height: 22px; stroke: var(--accent); fill: none; stroke-width: 1.6; }
+  .load-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s1); margin: var(--s3) 0 var(--s2); }
+  .segmented { display: inline-flex; gap: 2px; padding: 2px; border-radius: 5px; background: var(--surface); font-size: 10px; }
+  .segmented span { padding: 2px 5px; }
+  .segmented span:first-child { background: var(--accent-surface); color: var(--accent); border-radius: 3px; font-weight: 670; }
+  .load-row + .load-row { margin-top: 6px; }
+  .load-row .mock-row { justify-content: space-between; }
+  .load-row .meter { height: 3px; margin-top: 3px; }
+  .maintenance { display: flex; align-items: center; gap: 7px; margin-top: var(--s3); padding: 6px 8px; border-radius: 6px; color: var(--warm); background: var(--warm-surface); font-size: 11px; }
+  .calendar-time { display: block; font-size: 26px; line-height: 1.06; font-weight: 470; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
+  .calendar-date { color: var(--muted); font-size: 10px; }
+  .month-grid { margin-top: 5px; display: grid; grid-template-columns: repeat(7,1fr); text-align: center; align-items: center; gap: 2px; font-size: 10px; }
+  .month-grid span { padding: 1px; }
+  .month-grid .weekday { color: var(--muted); }
+  .month-grid .today { background: var(--accent-surface); color: var(--accent); border-radius: 4px; font-weight: 730; }
+  .calendar-event { display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: var(--s2); align-items: center; margin-top: 5px; }
+  .calendar-event .icon { color: var(--accent); }
+  .calendar-event small { display: block; color: var(--muted); }
+  .mock-action { background: var(--accent-surface); color: var(--accent); padding: 4px 7px; border-radius: 5px; font-weight: 680; }
+
+  .installation, .privacy { background: var(--surface); border-block: 1px solid var(--line); }
+  .install-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--s4); align-items: start; }
+  .install-card { min-width: 0; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--card); padding: clamp(16px, 3vw, 30px); }
+  .install-card:first-child { border-top: 3px solid var(--accent); }
+  .install-card header { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s2) var(--s3); margin-bottom: var(--s3); }
+  .recommended { color: var(--accent); font-size: 12px; font-weight: 680; }
+  .install-card p, .install-card li { color: var(--muted); font-size: 15px; }
+  .install-card p + p { margin-top: var(--s3); }
+  .install-card .command { display: grid; grid-template-columns: auto minmax(0,1fr); align-items: start; background: var(--bg); margin: var(--s4) 0; padding: var(--s3); }
+  .install-card .command > .icon { margin: 2px 0 0; }
+  .install-card .command .button { grid-column: 2; justify-self: end; }
+  .install-card .inline-link, .install-card .download-action { margin-top: var(--s4); }
+  .install-card ol { padding-inline-start: 1.25em; margin-block: var(--s4); }
+  .install-card li + li { margin-top: 5px; }
+  .install-card li::marker { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .install-card h4 { font-size: 14px; margin: 0 0 var(--s2); }
+  .unlock { border-top: 1px solid var(--line); padding-top: var(--s4); }
+  .unlock p + h4 { margin-top: var(--s4); }
+  .unlock ol { margin-top: var(--s2); }
+  .install-card details { margin-top: var(--s4); }
+  .install-card summary { color: var(--accent); font-size: 14px; }
+  .install-card details .command { margin-bottom: 0; }
+  .welcome-note { margin-top: var(--s4); color: var(--muted); font-size: 14px; }
+  .content-split { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.45fr); gap: clamp(24px, 5.2vw, 78px); align-items: start; }
+  .permissions-list { border: 1px solid var(--line); border-radius: var(--r-card); background: var(--card); }
+  .permission-row, .permission-head { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--s3); padding: var(--s3) var(--s4); }
+  .permission-head { border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; font-weight: 660; background: var(--surface); border-radius: var(--r-card) var(--r-card) 0 0; }
+  .permission-row + .permission-row { border-top: 1px solid var(--line); }
+  .permission-row [role="rowheader"] { display: flex; align-items: baseline; gap: 7px; font-size: 13px; font-weight: 700; line-height: 1.4; }
+  .permission-row .icon { align-self: flex-start; margin-top: 2px; color: var(--accent); }
+  .permission-row [role="cell"] { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .mobile-permission-label { display: none; }
+  .note { color: var(--muted); font-size: 14px; margin-top: var(--s4); }
+  .privacy-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: var(--s4); align-items: start; }
+  .privacy-item { min-width: 0; padding: var(--s5); background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card); }
+  .privacy-item h3 { display: flex; align-items: center; gap: var(--s2); }
+  .privacy-item h3 .icon { color: var(--accent); }
+  .privacy-item p { color: var(--muted); margin-top: var(--s3); font-size: 15px; }
+  .privacy-item a { display: inline-flex; align-items: center; gap: 6px; margin-top: var(--s4); }
+  .privacy-list { list-style: none; padding: 0; margin: 0; }
+  .privacy-list li { margin-top: var(--s4); }
+  .privacy-list li + li { padding-top: var(--s4); border-top: 1px solid var(--line); }
+  .privacy-list p { margin-top: var(--s1); }
+  .privacy-list p + p { margin-top: var(--s2); }
+  .faq-list { border-block: 1px solid var(--line); }
+  .faq details + details { border-top: 1px solid var(--line); }
+  .faq summary { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); padding: var(--s4) 3px; list-style: none; font-weight: 660; }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary .icon { color: var(--accent); transition: transform .15s ease; }
+  .faq details[open] summary .icon { transform: rotate(180deg); }
+  .faq details p { color: var(--muted); padding: 0 3px var(--s4); max-width: 65ch; }
+  .site-footer { border-top: 1px solid var(--line); padding-block: var(--s5); }
+  .footer-nav { gap: var(--s2) var(--s5); }
+  .copy-status:not(:empty) { position: fixed; z-index: 4; right: var(--gutter); bottom: var(--s4); max-width: calc(100% - 2 * var(--gutter)); margin: 0; padding: 9px var(--s3); background: var(--card); color: var(--text); border: 1px solid var(--accent); border-radius: var(--r-control); box-shadow: var(--shadow); font-size: 14px; }
+  .clipboard-fallback { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+  @media (max-width: 920px) {
+    .content-split { grid-template-columns: 1fr; gap: var(--s5); }
+  }
+  @media (max-width: 767px), (any-pointer: none), (pointer: coarse) {
+    .desktop-actions { display: none; }
+    .mobile-actions { display: block; }
+  }
+  @media (max-width: 767px) {
+    .header-inner { display: grid; grid-template-columns: 1fr auto; min-height: auto; padding-block: var(--s3) var(--s2); gap: var(--s2) var(--s4); }
+    .site-nav { grid-row: 2; grid-column: 1 / -1; gap: var(--s5); }
+    .site-nav a { display: flex; align-items: center; min-height: 32px; }
+    .feature-grid, .install-grid, .privacy-grid { grid-template-columns: minmax(0,1fr); }
+    .feature-copy, .feature-stage, .privacy-item { padding: var(--s4); }
+    .feature-stage { min-height: 205px; }
+    .feature-stage.tall { min-height: 0; }
+    .demo-popover .month-grid { display: none; }
+    .footer-inner { flex-wrap: wrap; }
+  }
+  @media (max-width: 640px) {
+    .taskbar { flex-wrap: wrap; gap: 0; padding: 2px var(--s2) var(--s1); }
+    .task-apps { width: 100%; justify-content: flex-start; }
+    .task-tray { width: 100%; justify-content: space-between; gap: 0; border-top: 1px solid var(--line); }
+    .task-app { min-height: 42px; min-width: 42px; }
+    .task-tray .task-button { min-width: 32px; }
+    .task-tray .task-clock { min-width: 61px; }
+    .task-button:focus-visible { outline-offset: 0; }
+    .demo-popover .load-row + .load-row { display: none; }
+  }
+  @media (max-width: 560px) {
+    .preview-grid { width: min(286px, calc(100vw - 82px)); }
+    .preview-art { height: 62px; }
+    .permission-head { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    .permission-row { grid-template-columns: 1fr; gap: var(--s1); }
+    .permission-row [role="cell"] { padding-left: 22px; }
+    .mobile-permission-label { display: inline; color: var(--text); font-weight: 630; }
+    .install-card .command .button { min-height: 40px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  }
+  /* No assets or runtime dependencies. The stage keeps the logo's mint light in each palette. */
+  :root {
+    --studio-top: #10192b;
+    --studio-mid: #1c2944;
+    --studio-edge: #0f1829;
+    --studio-horizon: #8de4cd62;
+    --studio-light: #8de4cd38;
+    --studio-shadow: #02071398;
+    --host-base: #111b2a;
+    --deck-floor: 44px;
+    --bar-height: 68px;
+  }
+  @property --theme-start { syntax: "<color>"; inherits: true; initial-value: #1c2944; }
+  @property --theme-end { syntax: "<color>"; inherits: true; initial-value: #10192b; }
+
+  [data-palette] {
+    --theme-start: #1c2944;
+    --theme-end: #10192b;
+    --theme-accent: #86baff;
+    --theme-ink: #fff;
+    --theme-muted: #c8d4e4;
+    --theme-base: #101522;
+    --theme-scrim: #0c1424a8;
+    --theme-hairline: #f2fcf85c;
+    --theme-warm: #ffca8b;
+    --theme-warm-surface: #392f28;
+    --theme-gradient: linear-gradient(106deg, var(--theme-start), var(--theme-end));
+  }
+  [data-palette="system"] {
+    --theme-accent-text: #86baff;
+    --theme-gradient: linear-gradient(106deg, color-mix(in srgb, var(--theme-start) 87%, transparent), color-mix(in srgb, var(--theme-end) 90%, transparent));
+  }
+  @supports (color: AccentColor) {
+    [data-palette="system"] { --theme-accent: AccentColor; }
+  }
+  [data-palette="graphite"] { --theme-start: #2B2D31; --theme-end: #1E1F22; --theme-accent: #5B9DFF; }
+  [data-palette="midnight"] { --theme-start: #141B3A; --theme-end: #0B1026; --theme-accent: #7C9CFF; }
+  [data-palette="ocean"] { --theme-start: #0E7490; --theme-end: #1D4ED8; --theme-accent: #7DF9FF; }
+  [data-palette="sunset"] { --theme-start: #F97316; --theme-end: #DB2777; --theme-accent: #FFF1B8; }
+  [data-palette="forest"] { --theme-start: #14532D; --theme-end: #365314; --theme-accent: #A3E635; }
+  [data-palette="lavender"] { --theme-start: #7C3AED; --theme-end: #C026D3; --theme-accent: #F5D0FE; }
+  [data-palette="candy"] { --theme-start: #FBCFE8; --theme-end: #BAE6FD; --theme-accent: #DB2777; --theme-accent-text: #99174e; }
+  [data-palette="snow"] { --theme-start: #F8FAFC; --theme-end: #E2E8F0; --theme-accent: #2563EB; --theme-accent-text: #194bb9; }
+
+  [data-palette]:not([data-palette="system"], [data-palette="candy"], [data-palette="snow"]) { color-scheme: dark; }
+  [data-palette="candy"], [data-palette="snow"] {
+    --theme-ink: #15233a;
+    --theme-muted: #3f5069;
+    --theme-base: #fcfdff;
+    --theme-scrim: #ffffffbd;
+    --theme-hairline: #28425e50;
+    --theme-warm: #783e08;
+    --theme-warm-surface: #faecda;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --studio-top: #f4f7fb;
+      --studio-mid: #d7e4f2;
+      --studio-edge: #edf3fb;
+      --studio-horizon: #1b806c82;
+      --studio-light: #8de4cd98;
+      --studio-shadow: #233a5a46;
+      --host-base: #eef4fa;
+    }
+    [data-palette="system"] {
+      --theme-start: #f5fafd;
+      --theme-end: #d2e0ee;
+      --theme-accent-text: #194bb9;
+      --theme-ink: #15233a;
+      --theme-muted: #3f5069;
+      --theme-base: #fcfdff;
+      --theme-scrim: #f5faffbd;
+      --theme-hairline: #28425e50;
+      --theme-warm: #783e08;
+      --theme-warm-surface: #faecda;
+    }
+  }
+
+  .site-header { background: var(--studio-top); }
+  .hero {
+    position: relative;
+    isolation: isolate;
+    padding: clamp(32px, 4vw, 50px) 0 clamp(56px, 7vw, 92px);
+    background: radial-gradient(ellipse at 50% 36%, var(--studio-mid), transparent 66%),
+                linear-gradient(180deg, var(--studio-top), var(--studio-edge) 69%, var(--bg));
+  }
+  .hero::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    opacity: .13;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Cfilter id='grain'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.97' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Cpath fill='%23fff' opacity='.4' filter='url(%23grain)' d='M0 0h180v180H0z'/%3E%3C/svg%3E");
+    background-size: 180px 180px;
+    mask-image: linear-gradient(#000, transparent 80%);
+  }
+  .hero h1 { font-size: clamp(44px, 6.45vw, 90px); letter-spacing: -.052em; word-spacing: .035em; font-weight: 770; max-width: 1100px; margin-inline: auto; }
+  @media (min-width: 768px) { html[lang="es"] .hero h1 span:last-child { display: block; } }
+  .hero h1 span:last-child { white-space: nowrap; }
+  .hero-lead { max-width: 590px; margin-top: 15px; }
+  .desktop { width: min(1216px, 100%); margin-inline: auto; transition: --theme-start .36s ease, --theme-end .36s ease; }
+  .desktop:has(.demo-popover[data-kind="calendar"]:not([hidden]), .demo-popover[data-kind="system"]:not([hidden])) { height: 393px; }
+  .studio-floor {
+    position: absolute;
+    inset: auto 0 0;
+    height: 131px;
+    z-index: -1;
+    background:
+      radial-gradient(ellipse 47% 3px at 50% 89px, var(--studio-horizon), transparent 100%),
+      radial-gradient(ellipse 48% 42px at 50% 93px, var(--studio-light), transparent 100%),
+      radial-gradient(ellipse 58% 145px at 50% 89px, var(--studio-mid), transparent 99%);
+    mask-image: linear-gradient(#000 72%, transparent);
+    pointer-events: none;
+  }
+  .studio-floor::after {
+    content: "";
+    position: absolute;
+    width: min(850px, 80%);
+    height: 20px;
+    top: 45px;
+    left: 50%;
+    translate: -50%;
+    border-radius: 50%;
+    box-shadow: 0 3px 22px var(--studio-shadow);
+    background: var(--studio-shadow);
+    filter: blur(10px);
+  }
+  .taskbar {
+    width: min(996px, calc(100% - 2 * var(--gutter)));
+    min-height: var(--bar-height);
+    border: 1px solid var(--theme-hairline);
+    border-radius: 15px;
+    padding: 5px 13px;
+    color: var(--theme-ink);
+    background: var(--theme-gradient);
+    backdrop-filter: blur(20px);
+    box-shadow: inset 0 1px 0 #f2fcf84e, inset 0 -3px 0 #070d282b,
+                0 3px 0 #10192b65, 0 17px 26px -12px var(--studio-shadow), 0 9px 31px -12px var(--studio-horizon);
+    -webkit-box-reflect: below 4px linear-gradient(transparent 52%, #0003);
+  }
+  .task-apps { padding-inline: 2px; }
+  .task-tray {
+    min-width: 0;
+    gap: 4px;
+    padding: 1px 3px;
+    border-radius: 10px;
+    border: 1px solid var(--theme-hairline);
+    background: var(--theme-scrim);
+  }
+  .task-button { color: inherit; min-width: 39px; min-height: 43px; }
+  .task-button:hover, .task-button[aria-expanded="true"] { background: color-mix(in srgb, var(--theme-ink) 13%, transparent); border-color: var(--theme-hairline); }
+  .task-button:focus-visible { outline: 2px solid var(--theme-ink); outline-offset: -2px; box-shadow: inset 0 0 0 4px var(--theme-base); }
+  .task-app { min-width: 53px; min-height: 54px; padding-bottom: 9px; }
+  .task-app::after { background: var(--theme-ink); opacity: .64; bottom: 4px; }
+  .task-app[aria-expanded="true"]::after { background: var(--theme-accent); opacity: 1; box-shadow: 0 0 0 1px var(--theme-base); }
+  .task-reading, .task-clock small { color: inherit; }
+  .task-clock { min-width: 66px; font-size: 13px; }
+  .app-tile { width: 35px; height: 35px; font-size: 19px; background-image: linear-gradient(#ffffff24, transparent 69%, #090f2421); box-shadow: inset 0 1px 0 #ffffff38, 0 3px 5px #0d14214d; }
+  .task-app .app-tile { animation: app-in .48s ease-out both; }
+  .task-app:nth-child(2) .app-tile { animation-delay: .07s; }
+  .task-app:nth-child(3) .app-tile { animation-delay: .13s; }
+  .task-app:nth-child(4) .app-tile { animation-delay: .19s; }
+
+  .demo-popover {
+    bottom: calc(var(--deck-floor) + var(--bar-height) + 15px);
+    left: max(calc((100% - 996px) / 2 + 12px), calc(var(--gutter) + 12px));
+    max-width: calc(100% - 2 * var(--gutter));
+    color: var(--text);
+    background-color: var(--material);
+    border-color: var(--control-line);
+    box-shadow: inset 0 1px 0 #f2fcf837, 0 16px 32px -13px var(--studio-shadow), 0 4px 9px #050a142e;
+    animation: preview-in .64s .13s cubic-bezier(.2,.7,.2,1) both;
+  }
+  .demo-popover[data-side="tray"] {
+    right: max(calc((100% - 996px) / 2 + 12px), calc(var(--gutter) + 12px));
+    width: min(310px, calc(100% - 2 * var(--gutter) - 12px));
+  }
+  .demo-popover[data-side="apps"]::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: var(--preview-anchor, 26px);
+    width: 1px;
+    height: 14px;
+    background: linear-gradient(var(--control-line), transparent);
+  }
+  .demo-popover, .feature-stage {
+    --text: var(--theme-ink);
+    --muted: var(--theme-muted);
+    --accent: var(--theme-accent);
+    --accent-text: var(--theme-accent-text, var(--theme-accent));
+    --line: color-mix(in srgb, var(--theme-ink) 18%, var(--theme-base));
+    --control-line: color-mix(in srgb, var(--theme-ink) 37%, var(--theme-base));
+    --material: color-mix(in srgb, var(--theme-base) 90%, var(--theme-start));
+    --card: color-mix(in srgb, var(--theme-base) 94%, var(--theme-end));
+    --surface: color-mix(in srgb, var(--theme-base) 89%, var(--theme-start));
+    --raised: color-mix(in srgb, var(--theme-base) 77%, var(--theme-start));
+    --accent-surface: color-mix(in srgb, var(--theme-base) 91%, var(--theme-accent));
+    --warm: var(--theme-warm);
+    --warm-surface: var(--theme-warm-surface);
+    --shadow: 0 21px 36px -14px #0710279e, 0 4px 9px #050a1426;
+  }
+  :is(.mock-action, .month-grid .today, .mock-panel-title small:not(.check-reading), .segmented span:first-child) { color: var(--accent-text, var(--accent)); }
+  .preview-grid { width: min(405px, calc(100vw - 68px)); }
+  .preview-card { padding: 7px; box-shadow: inset 0 1px 0 #f2fcf816; }
+  .preview-title { padding-inline: 3px; }
+  .preview-art { height: 98px; border-radius: 5px; }
+  .preview-art .art-sidebar { padding: 15px 5px; display: grid; align-content: start; gap: 6px; }
+  .art-sidebar i { height: 3px; width: 82%; border-radius: 3px; background: var(--control-line); }
+  .art-sidebar i:first-child { height: 7px; width: 100%; background: var(--accent-surface); }
+  .art-content b { display: block; color: var(--text); font-size: 9px; line-height: 1.2; margin-bottom: 6px; }
+  .preview-art .tiny-blocks i { display: grid; place-items: center; height: 20px; font-size: 9px; color: var(--accent-text, var(--accent)); }
+  .preview-art[data-art="files"] .tiny-blocks i { color: var(--theme-muted); background: var(--surface); }
+  .preview-art[data-art="files"] .tiny-blocks i:first-child .icon { color: var(--accent-text, var(--accent)); }
+  .preview-art[data-art="files"] .art-content { background: linear-gradient(135deg, transparent 36%, var(--surface)); }
+  .preview-art[data-art="notes"] .art-content { background: repeating-linear-gradient(transparent 0 10px, var(--line) 10px 11px); background-position-y: 13px; }
+  .preview-art[data-art="browser"] .tiny-blocks i:first-child { background: linear-gradient(135deg, var(--accent-surface), var(--surface)); }
+  .preview-art[data-art="terminal"] .art-content b { color: var(--mint); font-family: var(--mono); }
+
+  .theme-picker { width: min(680px, calc(100% - 2 * var(--gutter))); margin: 20px auto 0; text-align: center; }
+  #theme-label { font-weight: 650; font-size: 14px; }
+  .theme-options { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+  .theme-option { position: relative; display: grid; align-content: start; gap: 5px; min-width: 0; padding: 4px 2px 3px; border-radius: 8px; color: var(--muted); cursor: pointer; }
+  .theme-option:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .theme-option:has(:checked) { color: var(--text); font-weight: 700; }
+  .theme-sample {
+    display: grid;
+    place-items: center;
+    width: calc(100% - 6px);
+    height: 23px;
+    margin-inline: auto;
+    border: 1px solid var(--theme-hairline);
+    border-radius: 6px;
+    background: var(--theme-gradient);
+    box-shadow: inset 0 1px 0 #fff4;
+    transition: transform .18s ease, box-shadow .18s ease;
+  }
+  .theme-option:hover .theme-sample { transform: translateY(-2px); }
+  .theme-option:active .theme-sample { transform: translateY(0); }
+  .theme-option:has(:checked) .theme-sample { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .theme-sample .icon {
+    visibility: hidden;
+    width: 15px;
+    height: 15px;
+    border-radius: 3px;
+    stroke-width: 2.6;
+    background: var(--theme-scrim);
+    color: var(--theme-ink);
+  }
+  .theme-option:has(:checked) .icon { visibility: visible; }
+  .theme-name { font-size: 11px; line-height: 1.25; }
+  .hero-actions { margin-top: 16px; text-align: center; }
+
+  .terminal, .install-card .terminal {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 8px 10px;
+    align-items: center;
+    padding: 0 8px 8px 12px;
+    background: var(--card);
+    box-shadow: 0 9px 22px var(--studio-shadow);
+  }
+  .terminal-title {
+    position: relative;
+    grid-column: 1 / -1;
+    border-bottom: 1px solid var(--line);
+    margin-inline: -12px -8px;
+    background: var(--raised);
+    text-align: center;
+    padding: 5px 42px;
+    border-radius: 11px 11px 0 0;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 640;
+  }
+  .traffic { position: absolute; left: 11px; top: 50%; translate: 0 -50%; display: flex; gap: 4px; }
+  .traffic i { width: 6px; height: 6px; border-radius: 50%; background: #f18f91; }
+  .traffic i:nth-child(2) { background: #e7b16c; }
+  .traffic i:nth-child(3) { background: #8de4cd; }
+  .prompt { color: var(--accent); font: 650 14px var(--mono); }
+  .install-card .terminal { grid-template-columns: auto minmax(0, 1fr); }
+  .button { transition: background-color .15s ease, border-color .15s ease, filter .15s ease, transform .15s ease; }
+  .button:active { transform: translateY(1px); }
+
+  .features { padding-top: 28px; }
+  .features .section-intro { margin-bottom: clamp(24px, 4vw, 56px); }
+  .feature-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .feature {
+    display: grid;
+    grid-template-columns: minmax(0, 4fr) minmax(0, 6fr);
+    background-color: color-mix(in srgb, var(--host-base) 94%, var(--theme-start));
+    border-radius: 16px;
+  }
+  .feature:nth-child(even) { grid-template-columns: minmax(0, 6fr) minmax(0, 4fr); }
+  .feature:nth-child(even) .feature-stage { grid-column: 1; grid-row: 1; }
+  .feature-copy { align-self: center; padding: clamp(22px, 4vw, 54px); }
+  .feature-copy h3 { font-size: clamp(23px, 3vw, 37px); letter-spacing: -.045em; text-wrap: balance; }
+  .feature-copy p { font-size: 16px; margin-top: 14px; }
+  .feature-copy .feature-icon { width: 39px; height: 39px; }
+  .feature-stage {
+    min-height: 310px;
+    padding: clamp(18px, 3vw, 40px);
+    border-top: 0;
+    background: radial-gradient(ellipse at 50% 50%, color-mix(in srgb, var(--host-base) 65%, var(--theme-start)), transparent 74%),
+                linear-gradient(135deg, color-mix(in srgb, var(--host-base) 77%, var(--theme-start)),
+                               color-mix(in srgb, var(--host-base) 85%, var(--theme-end)));
+  }
+  .feature-stage.tall { min-height: 390px; }
+  .feature-stage .mock-panel { box-shadow: inset 0 1px 0 #f2fcf82b, var(--shadow); }
+  .feature-stage .switcher-panel { width: min(100%, 488px); }
+  .feature-stage .switcher-card .preview-art { height: 85px; }
+  .feature-stage .tray-example { width: min(100%, 385px); }
+  .section-entering { animation: section-in .64s ease-out both; }
+  @keyframes section-in { from { opacity: .65; translate: 0 13px; } }
+  @keyframes taskbar-in { from { opacity: .33; translate: 0 17px; } }
+  @keyframes app-in { from { opacity: .55; translate: 0 5px; } }
+  @keyframes preview-in { from { opacity: 0; translate: 0 13px; } }
+
+  @media (max-width: 767px) {
+    .hero h1 { max-width: 13ch; }
+    .hero h1 span:last-child { display: block; }
+    .hero-lead { max-width: 38ch; font-size: 16px; margin-top: 14px; }
+    .desktop { height: 298px; }
+    .desktop:has(.demo-popover[data-kind="calendar"]:not([hidden]), .demo-popover[data-kind="system"]:not([hidden])) { height: 357px; }
+    .feature, .feature:nth-child(even) { grid-template-columns: minmax(0, 1fr); }
+    .feature:nth-child(even) .feature-stage { grid-column: auto; grid-row: auto; }
+    .feature-copy { padding: 24px 18px; }
+    .feature-stage, .feature-stage.tall { min-height: 210px; padding: 18px; }
+  }
+  @media (max-width: 640px) {
+    :root { --bar-height: 101px; --deck-floor: 42px; }
+    .desktop { height: 293px; }
+    .desktop:has(.demo-popover[data-kind="calendar"]:not([hidden]), .demo-popover[data-kind="system"]:not([hidden])) { height: 350px; }
+    .taskbar { gap: 2px; padding: 4px 5px; border-radius: 12px; }
+    .task-apps { gap: 5px; }
+    .task-app { min-width: 44px; min-height: 43px; }
+    .app-tile { width: 30px; height: 30px; font-size: 16px; }
+    .task-tray { gap: 0; padding: 0 1px; }
+    .task-tray .task-button { min-width: 30px; min-height: 41px; font-size: 16px; }
+    .task-tray .task-clock { min-width: 59px; font-size: 12px; }
+    .demo-caption { gap: 0 5px; margin-inline: var(--gutter); }
+    .demo-popover { left: calc(var(--gutter) + 6px); }
+    .demo-popover[data-side="tray"] { right: calc(var(--gutter) + 6px); }
+    .theme-picker { max-width: 402px; margin-top: 14px; }
+    .theme-options { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px 6px; }
+    .theme-option { min-height: 43px; gap: 5px; }
+    .theme-sample { width: calc(100% - 12px); height: 21px; }
+    .theme-name { font-size: 11px; }
+    .mobile-actions p { max-width: 34ch; margin-inline: auto; font-size: 14px; }
+  }
+  @media (641px <= width <= 920px) {
+    .task-app { min-width: 44px; }
+    .task-tray { gap: 0; }
+    .task-tray .task-button { min-width: 35px; }
+  }
+  @media (max-width: 560px) {
+    .demo-popover .preview-art { height: 64px; }
+    .demo-popover .art-content { padding-top: 7px; }
+    .demo-popover .preview-art .tiny-blocks { margin-top: 4px; }
+    .demo-popover .preview-art .tiny-blocks i { height: 15px; }
+    .demo-popover .preview-art .fake-line:nth-of-type(2) { display: none; }
+  }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="logo-navy" x2="1" y2="1"><stop stop-color="#1C2944"/><stop offset="1" stop-color="#10192B"/></linearGradient>
+    <symbol id="cala-logo" viewBox="0 0 1024 1024">
+      <rect x="32" y="32" width="960" height="960" rx="215" fill="url(#logo-navy)"/>
+      <path d="M237 369c0-46 37-83 83-83h384c46 0 83 37 83 83v184c0 46-37 83-83 83H320c-46 0-83-37-83-83z" fill="#8DE4CD"/>
+      <path d="M326 741h372" stroke="#F2FCF8" stroke-width="86" stroke-linecap="round"/>
+      <path d="M386 461h252" stroke="#1C2944" stroke-width="64" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m5 6 6 6-6 6m8 0h6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-notes" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8m-8 4h8m-8 4h5"/></symbol>
+    <symbol id="i-window" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M6 7h.1m3 0h.1"/></symbol>
+    <symbol id="i-windows" viewBox="0 0 24 24"><rect x="3" y="8" width="13" height="12" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-3M3 12h13"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M3 9a14 14 0 0 1 18 0M6 12a9 9 0 0 1 12 0m-9 3a5 5 0 0 1 6 0m-3 3h.1"/></symbol>
+    <symbol id="i-bluetooth" viewBox="0 0 24 24"><path d="m7 7 10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor"/></symbol>
+    <symbol id="i-sound" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3zm13-1a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5"/></symbol>
+    <symbol id="i-battery" viewBox="0 0 24 24"><rect x="2" y="7" width="18" height="10" rx="2"/><path d="M22 10v4M5 10h8v4H5z" fill="currentColor"/></symbol>
+    <symbol id="i-disk" viewBox="0 0 24 24"><path d="M3 14 6 7h12l3 7v4H3zM3 14h18m-5 2h2"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4 18a9 9 0 1 1 16 0zM12 13l4-4m-9 4-.9-.5m5.9-5V6m5.2 7.3.9-.5"/><circle cx="12" cy="13" r="1"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 10h18m-13 4h.1m3.9 0h.1m3.9 0h.1m-8.1 3h.1m3.9 0h.1"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-3v10l-6-3"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 6-5 6 5 6m8-12 5 6-5 6m-2-15-4 18"/></symbol>
+    <symbol id="i-pointer" viewBox="0 0 24 24"><path d="m5 3 14 10-7 1-3 7z"/></symbol>
+    <symbol id="i-screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><circle cx="12" cy="10.5" r="2.5"/><path d="M8 21h8m-4-4v4"/></symbol>
+    <symbol id="i-location" viewBox="0 0 24 24"><path d="m4 10 16-6-6 16-3-7z"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M5 17h14l-2-3v-4a5 5 0 0 0-10 0v4zm5 3a2 2 0 0 0 4 0"/></symbol>
+  </defs>
+</svg>
+<a class="skip" href="#main" data-i18n="skip">Skip to content</a>
+<!-- component: SiteHeader -->
+<header class="site-header" id="top">
+  <div class="wrap header-inner">
+    <a class="brand" href="#top"><svg class="brand-mark" aria-hidden="true"><use href="#cala-logo"/></svg>Cala</a>
+    <label class="language">
+      <svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>
+      <select id="language" data-i18n-label="language" aria-label="Language">
+        <option value="en" lang="en">English</option>
+        <option value="es" lang="es">Español</option>
+      </select>
+    </label>
+    <nav class="site-nav" data-i18n-label="navLabel" aria-label="Main navigation">
+      <a href="#features" data-i18n="navFeatures">Features</a>
+      <a href="#install" data-i18n="navInstall">Install</a>
+      <a href="#faq" data-i18n="navFaq">FAQ</a>
+    </nav>
+  </div>
+</header>
+<main id="main" tabindex="-1">
+  <!-- component: Hero -->
+  <section id="intro" class="hero" aria-labelledby="hero-title">
+    <div class="hero-copy wrap">
+      <h1 id="hero-title"><span data-i18n="heroTitle">A taskbar</span> <span data-i18n="heroAccent">for your Mac.</span></h1>
+      <p class="hero-lead" data-i18n="heroLead">Your apps and window previews below. Wi-Fi, sound and calendar on the right.</p>
+    </div>
+    <figure class="demo" data-demo>
+      <div class="desktop" data-palette="system">
+        <div class="studio-floor" aria-hidden="true"></div>
+        <div class="demo-popover" id="demo-popover" data-side="apps" role="region" aria-labelledby="demo-caption-title" hidden></div>
+        <div class="taskbar" role="group" data-i18n-label="demoBar" aria-label="Demo taskbar">
+          <div class="task-apps">
+            <button class="task-button task-app" type="button" data-app="files" data-i18n-label="files" aria-label="Files" aria-controls="demo-popover" aria-expanded="true"><span class="app-tile tile-files"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></span></button>
+            <button class="task-button task-app" type="button" data-app="notes" data-i18n-label="notes" aria-label="Notes" aria-controls="demo-popover" aria-expanded="false"><span class="app-tile tile-notes"><svg class="icon" aria-hidden="true"><use href="#i-notes"/></svg></span></button>
+            <button class="task-button task-app" type="button" data-app="browser" data-i18n-label="browser" aria-label="Browser" aria-controls="demo-popover" aria-expanded="false"><span class="app-tile tile-browser"><svg class="icon" aria-hidden="true"><use href="#i-window"/></svg></span></button>
+            <button class="task-button task-app" type="button" data-app="terminal" data-i18n-label="terminal" aria-label="Terminal" aria-controls="demo-popover" aria-expanded="false"><span class="app-tile tile-terminal"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg></span></button>
+          </div>
+          <div class="task-tray">
+            <button class="task-button" type="button" data-tray="wifi" aria-label="Wi-Fi" aria-controls="demo-popover" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-wifi"/></svg></button>
+            <button class="task-button" type="button" data-tray="bluetooth" aria-label="Bluetooth" aria-controls="demo-popover" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-bluetooth"/></svg></button>
+            <button class="task-button" type="button" data-tray="brightness" data-i18n-label="brightness" aria-label="Brightness" aria-controls="demo-popover" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></button>
+            <button class="task-button" type="button" data-tray="sound" data-i18n-label="sound" aria-label="Sound" aria-controls="demo-popover" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-sound"/></svg></button>
+            <button class="task-button" type="button" data-tray="system" data-i18n-label="system" aria-label="System" aria-controls="demo-popover" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg><span class="task-reading" aria-hidden="true">78%</span></button>
+            <button class="task-button" type="button" data-tray="disk" data-i18n-label="disk" aria-label="Disk" aria-controls="demo-popover" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-disk"/></svg><span class="task-reading" aria-hidden="true">31%</span></button>
+            <button class="task-button" type="button" data-tray="battery" data-i18n-label="battery" aria-label="Battery" aria-controls="demo-popover" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-battery"/></svg><span class="task-reading" aria-hidden="true">84%</span></button>
+            <button class="task-button task-clock" type="button" data-tray="calendar" data-i18n-label="calendar" aria-label="Calendar" aria-controls="demo-popover" aria-expanded="false"><time id="live-clock">--:--</time><small id="live-date" aria-hidden="true"></small></button>
+          </div>
+        </div>
+      </div>
+      <figcaption class="demo-caption" id="demo-caption"><strong id="demo-caption-title" data-i18n="demoTitle">Try the taskbar</strong><span data-i18n="demoHint">Hover, tap or use Tab on an app icon.</span></figcaption>
+      <span id="demo-announcement" class="sr-only" aria-live="polite"></span>
+    </figure>
+    <div class="theme-picker" role="radiogroup" aria-labelledby="theme-label">
+      <p id="theme-label" data-i18n="themeLabel">Nine themes for your taskbar</p>
+      <div class="theme-options">
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="system" checked>
+          <span class="theme-sample" data-palette="system" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-system">System</span>
+        </label>
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="graphite">
+          <span class="theme-sample" data-palette="graphite" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-graphite">Graphite</span>
+        </label>
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="midnight">
+          <span class="theme-sample" data-palette="midnight" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-midnight">Midnight</span>
+        </label>
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="ocean">
+          <span class="theme-sample" data-palette="ocean" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-ocean">Ocean</span>
+        </label>
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="sunset">
+          <span class="theme-sample" data-palette="sunset" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-sunset">Sunset</span>
+        </label>
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="forest">
+          <span class="theme-sample" data-palette="forest" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-forest">Forest</span>
+        </label>
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="lavender">
+          <span class="theme-sample" data-palette="lavender" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-lavender">Lavender</span>
+        </label>
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="candy">
+          <span class="theme-sample" data-palette="candy" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-candy">Candy</span>
+        </label>
+        <label class="theme-option">
+          <input class="sr-only" type="radio" name="bar-theme" value="snow">
+          <span class="theme-sample" data-palette="snow" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></span>
+          <span class="theme-name" data-i18n="theme-snow">Snow</span>
+        </label>
+      </div>
+    </div>
+      <div class="hero-actions wrap">
+        <div class="desktop-actions">
+          <div class="command terminal">
+            <div class="terminal-title"><span class="traffic" aria-hidden="true"><i></i><i></i><i></i></span>Terminal</div>
+            <span class="prompt" aria-hidden="true">$</span>
+            <code id="install-command">curl -fsSL https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh | bash</code>
+            <button type="button" class="button button-primary" data-copy="#install-command"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span data-i18n="copyCommand">Copy command</span></button>
+          </div>
+          <div class="hero-links">
+            <a href="https://github.com/MineiToshio/cala-taskbar/releases/latest"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span data-i18n="download">Download DMG</span></a>
+            <span class="specs" data-i18n="specs">Free · macOS 14+ · Apple silicon and Intel</span>
+          </div>
+        </div>
+        <div class="mobile-actions">
+          <p data-i18n="mobileLead">Cala is for Mac. Open this on your Mac or copy the GitHub link.</p>
+          <button type="button" class="button button-primary" data-copy="#repo-link"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span data-i18n="copyLink">Copy GitHub link</span></button>
+          <div class="hero-links"><a href="#install" data-i18n="installGuide">Installation guide</a><span class="specs" data-i18n="specs">Free · macOS 14+ · Apple silicon and Intel</span></div>
+        </div>
+      </div>
+  </section>
+
+  <!-- component: Features -->
+  <section id="features" class="section features wrap" aria-labelledby="features-title">
+    <header class="section-intro"><h2 id="features-title" data-i18n="featuresTitle">Your windows and controls, close at hand.</h2></header>
+    <div class="feature-grid">
+      <article class="feature" data-palette="midnight">
+        <div class="feature-copy"><span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#i-windows"/></svg></span><h3 data-i18n="switcherTitle">Switch windows with Option + Tab</h3><p data-i18n="switcherText">Choose from up to 20 windows, including minimized ones. Hover over an app for up to six previews. A minimized window may show its app icon when a thumbnail is unavailable.</p></div>
+        <div class="feature-stage" data-palette="midnight" aria-hidden="true">
+          <div class="mock-panel switcher-panel">
+            <div class="switcher-heading"><kbd data-i18n="optionKey">⌥ Option</kbd><span>+</span><kbd>Tab</kbd></div>
+            <div class="switcher-cards"><div class="switcher-card selected"><div class="preview-title"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span data-i18n="project">Atlas project</span></div><div class="preview-art" data-art="files" aria-hidden="true"><span class="art-sidebar"><i></i><i></i><i></i></span><span class="art-content"><b data-i18n="filePreviewHeading">Name</b><i class="fake-line"></i><i class="fake-line"></i><span class="tiny-blocks"><i></i><i></i><i></i></span></span></div></div><div class="switcher-card"><div class="preview-title"><svg class="icon" aria-hidden="true"><use href="#i-notes"/></svg><span data-i18n="designNotes">Design notes</span></div><div class="preview-art" data-art="notes" aria-hidden="true"><span class="art-sidebar"><i></i><i></i><i></i></span><span class="art-content"><b data-i18n="notesPreviewHeading">Checklist</b><i class="fake-line"></i><i class="fake-line"></i><span class="tiny-blocks"><i></i><i></i><i></i></span></span></div></div><div class="switcher-card"><div class="preview-title"><svg class="icon" aria-hidden="true"><use href="#i-window"/></svg><span data-i18n="reference">References</span></div><div class="preview-art" data-art="browser" aria-hidden="true"><span class="art-sidebar"><i></i><i></i><i></i></span><span class="art-content"><b data-i18n="browserPreviewHeading">Reading list</b><i class="fake-line"></i><i class="fake-line"></i><span class="tiny-blocks"><i></i><i></i><i></i></span></span></div></div></div>
+          </div>
+        </div>
+      </article>
+      <article class="feature" data-palette="ocean">
+        <div class="feature-copy"><span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#i-sound"/></svg></span><h3 data-i18n="trayTitle">Your Mac’s controls</h3><p data-i18n="trayText">Open Wi-Fi, Bluetooth, sound, brightness, battery or disk space from the tray. Choose which icons stay visible.</p></div>
+        <div class="feature-stage" data-palette="ocean" aria-hidden="true">
+          <div class="tray-example">
+            <div class="mock-panel">
+              <div class="mock-panel-title"><span data-i18n="sound">Sound</span></div>
+              <div class="mock-row volume-row"><svg class="icon" aria-hidden="true"><use href="#i-sound"/></svg><span class="mock-slider"><i style="width:63%"></i></span><span>63%</span></div>
+              <div class="mock-divider"></div>
+              <div class="mock-row"><span data-i18n="soundSettings">Sound settings</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></div>
+            </div>
+            <div class="mock-tray"><span><svg class="icon" aria-hidden="true"><use href="#i-wifi"/></svg></span><span><svg class="icon" aria-hidden="true"><use href="#i-bluetooth"/></svg></span><span><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></span><span class="selected"><svg class="icon" aria-hidden="true"><use href="#i-sound"/></svg></span><span><svg class="icon" aria-hidden="true"><use href="#i-disk"/></svg></span><span><svg class="icon" aria-hidden="true"><use href="#i-battery"/></svg></span><span><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg></span></div>
+          </div>
+        </div>
+      </article>
+      <article class="feature" data-palette="forest">
+        <div class="feature-copy"><span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg></span><h3 data-i18n="performanceTitle">Why is my Mac slow?</h3><p data-i18n="performanceText">See what uses the most CPU and memory, and why a restart might help.</p></div>
+        <div class="feature-stage tall" data-palette="forest" aria-hidden="true">
+          <div class="mock-panel">
+            <div class="mock-panel-title"><span data-i18n="system">System</span><small class="check-reading"><span data-i18n="normal">Check this</span></small></div>
+            <div class="health-grid">
+              <div class="health-stat"><span data-i18n="processor">CPU</span><strong>78%</strong><svg class="spark" viewBox="0 0 110 22" preserveAspectRatio="none"><path d="M0 18 10 17 16 13 22 15 28 7 33 10 41 5 48 8 54 5 62 7 69 3 73 6 80 4 88 5 94 2 101 5 110 4"/></svg></div>
+              <div class="health-stat"><span data-i18n="memory">Memory</span><strong>12 / 16 GB</strong><svg class="spark" viewBox="0 0 110 22" preserveAspectRatio="none"><path d="M0 13 9 12 18 11 23 13 32 9 44 8 52 9 63 7 75 6 84 7 94 6 104 7 110 6"/></svg></div>
+            </div>
+            <div class="load-top"><b data-i18n="topUsage">Top usage</b><div class="segmented"><span data-i18n="processor">CPU</span><span data-i18n="memory">Memory</span></div></div>
+            <div class="load-row"><div class="mock-row"><span data-i18n="browser">Browser</span><span>45%</span></div><div class="meter"><i style="width:58%"></i></div></div><div class="load-row"><div class="mock-row"><span data-i18n="notes">Notes</span><span>11%</span></div><div class="meter"><i style="width:14%"></i></div></div><div class="load-row"><div class="mock-row"><span data-i18n="systemOther">System and other</span><span>22%</span></div><div class="meter"><i style="width:28%"></i></div></div>
+            <div class="maintenance"><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg><span data-i18n="maintenance">macOS update pending</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></div>
+          </div>
+        </div>
+      </article>
+      <article class="feature" data-palette="sunset">
+        <div class="feature-copy"><span class="feature-icon"><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg></span><h3 data-i18n="eventsTitle">Your next video call</h3><p data-i18n="eventsText">Open the clock for upcoming events. When a call is about to start, join from the bar.</p></div>
+        <div class="feature-stage tall" data-palette="sunset" aria-hidden="true">
+          <div class="mock-panel">
+            <time class="calendar-time" data-calendar-time>--:--:--</time><div class="calendar-date" data-calendar-date></div>
+            <div class="mock-divider"></div>
+            <div class="mock-panel-title"><span data-calendar-month></span><small>‹ &nbsp; ›</small></div>
+            <div class="month-grid" data-example-calendar></div>
+            <div class="mock-divider"></div>
+            <b data-i18n="upcoming">Upcoming</b>
+            <div class="calendar-event"><svg class="icon" aria-hidden="true"><use href="#i-video"/></svg><div><b data-i18n="designReview">Design review</b><small><span data-i18n="calEventTime">Example · 10:30–11:00</span></small></div><span class="mock-action"><span data-i18n="join">Join</span></span></div>
+          </div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- component: Installation -->
+  <section id="install" class="section installation" aria-labelledby="install-title">
+    <div class="wrap">
+      <header class="section-intro"><h2 id="install-title" data-i18n="installTitle">Install Cala</h2><p data-i18n="installIntro">The same universal app runs on Apple silicon and Intel Macs with macOS 14 or later.</p></header>
+      <div class="install-grid">
+        <article class="install-card">
+          <header><h3 data-i18n="terminalTitle">One command</h3><span class="recommended" data-i18n="recommended">Recommended</span></header>
+          <p data-i18n="terminalInstruction">Open Terminal with Spotlight (⌘ + Space), paste this command and press Return.</p>
+          <div class="command terminal"><div class="terminal-title"><span class="traffic" aria-hidden="true"><i></i><i></i><i></i></span>Terminal</div><span class="prompt" aria-hidden="true">$</span><code id="terminal-command">curl -fsSL https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh | bash</code><button type="button" class="button" data-copy="#terminal-command"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span data-i18n="copyCommand">Copy command</span></button></div>
+          <p data-i18n="terminalResult">It downloads the latest release, checks its SHA-256 checksum, installs Cala in Applications and opens it. This method skips the one-time macOS prompt. Run it again to update and keep your settings.</p>
+          <a class="inline-link" href="https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh"><span data-i18n="readScript">Read the install script</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+        </article>
+        <article class="install-card">
+          <header><h3 data-i18n="dmgTitle">Download the disk image</h3></header>
+          <a class="button download-action" href="https://github.com/MineiToshio/cala-taskbar/releases/latest"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span data-i18n="download">Download DMG</span></a>
+          <ol><li data-i18n="dmgStep1">Download Cala-x.y.z.dmg from GitHub.</li><li data-i18n="dmgStep2">Open the DMG and drag Cala into Applications.</li><li data-i18n="dmgStep3">Allow Cala to open once. After that it opens normally.</li></ol>
+          <div class="unlock" id="unlock">
+            <h4>macOS 15 (Sequoia) <span data-i18n="orLater">or later</span></h4>
+            <ol><li data-i18n="newStep1">Double-click Cala in Applications. When you see the verification message, click Done.</li><li data-i18n="newStep2">In System Settings, open Privacy &amp; Security and scroll to the bottom.</li><li data-i18n="newStep3">Click Open Anyway next to the Cala notice and enter your password.</li><li data-i18n="newStep4">Open Cala again and choose Open Anyway.</li></ol>
+            <h4>macOS 14 (Sonoma)</h4>
+            <p data-i18n="sonoma">In Applications, right-click Cala, choose Open, then confirm with Open again.</p>
+            <details><summary data-i18n="unlockTerminal">Allow it from Terminal</summary>
+              <div class="command"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg><code id="unlock-command">xattr -dr com.apple.quarantine /Applications/Cala.app</code><button type="button" class="button" data-copy="#unlock-command"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span data-i18n="copyCommand">Copy command</span></button></div>
+            </details>
+          </div>
+        </article>
+      </div>
+      <p class="welcome-note" data-i18n="welcome">Follow Cala’s four short welcome steps. You can skip any of them.</p>
+    </div>
+  </section>
+
+  <!-- component: Permissions -->
+  <section id="permissions" class="section permissions wrap content-split" aria-labelledby="permissions-title">
+    <header class="section-heading"><h2 id="permissions-title" data-i18n="permissionsTitle">Permissions, one at a time</h2>
+      <p data-i18n="permissionsLead">Cala explains each request and takes you to the right place in System Settings. You can skip any permission and still use the rest of the app.</p>
+      <p data-i18n="permissionsLater">To grant them later, right-click an empty part of the bar and open Settings → Permissions.</p>
+    </header>
+    <div>
+      <div class="permissions-list" role="table" aria-labelledby="permissions-title">
+        <div class="permission-head" role="row"><div role="columnheader"><span data-i18n="permission">Permission</span></div><div role="columnheader"><span data-i18n="purpose">What it does</span></div><div role="columnheader"><span data-i18n="without">If you skip it</span></div></div>
+        <div class="permission-row" role="row"><div role="rowheader"><svg class="icon" aria-hidden="true"><use href="#i-pointer"/></svg><span data-i18n="access">Accessibility</span></div><div role="cell" data-i18n="accessPurpose">See, focus, minimize and close windows. It also enables Option + Tab.</div><div role="cell"><span class="mobile-permission-label" aria-hidden="true"><span data-i18n="without">If you skip it</span> · </span><span data-i18n="accessWithout">The bar still opens apps, without window controls.</span></div></div>
+        <div class="permission-row" role="row"><div role="rowheader"><svg class="icon" aria-hidden="true"><use href="#i-screen"/></svg><span data-i18n="record">Screen Recording</span></div><div role="cell" data-i18n="recordPurpose">Shows window thumbnails. Cala never saves a recording or sends your screen.</div><div role="cell"><span class="mobile-permission-label" aria-hidden="true"><span data-i18n="without">If you skip it</span> · </span><span data-i18n="recordWithout">Window thumbnails stay off.</span></div></div>
+        <div class="permission-row" role="row"><div role="rowheader"><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg><span data-i18n="calendar">Calendar</span></div><div role="cell" data-i18n="calendarPurpose">Shows upcoming events and the Join button.</div><div role="cell"><span class="mobile-permission-label" aria-hidden="true"><span data-i18n="without">If you skip it</span> · </span><span data-i18n="calendarWithout">The clock opens without events.</span></div></div>
+        <div class="permission-row" role="row"><div role="rowheader"><svg class="icon" aria-hidden="true"><use href="#i-location"/></svg><span data-i18n="location">Location</span></div><div role="cell" data-i18n="locationPurpose">macOS needs it to show Wi-Fi network names.</div><div role="cell"><span class="mobile-permission-label" aria-hidden="true"><span data-i18n="without">If you skip it</span> · </span><span data-i18n="locationWithout">Network names stay hidden.</span></div></div>
+        <div class="permission-row" role="row"><div role="rowheader"><svg class="icon" aria-hidden="true"><use href="#i-bluetooth"/></svg><span data-i18n="bluetooth">Bluetooth</span></div><div role="cell" data-i18n="bluetoothPurpose">Lists and connects paired devices.</div><div role="cell"><span class="mobile-permission-label" aria-hidden="true"><span data-i18n="without">If you skip it</span> · </span><span data-i18n="bluetoothWithout">Devices aren’t listed.</span></div></div>
+        <div class="permission-row" role="row"><div role="rowheader"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span data-i18n="finder">Control Finder</span></div><div role="cell" data-i18n="finderPurpose">Counts and empties the Trash, and restarts your Mac on request.</div><div role="cell"><span class="mobile-permission-label" aria-hidden="true"><span data-i18n="without">If you skip it</span> · </span><span data-i18n="finderWithout">Those actions are unavailable in Cala.</span></div></div>
+        <div class="permission-row" role="row"><div role="rowheader"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg><span data-i18n="notifications">Notifications</span></div><div role="cell" data-i18n="notificationsPurpose">Shows Claude or Codex quota alerts.</div><div role="cell"><span class="mobile-permission-label" aria-hidden="true"><span data-i18n="without">If you skip it</span> · </span><span data-i18n="notificationsWithout">You won’t see quota alerts.</span></div></div>
+      </div>
+      <p class="note" data-i18n="permissionNote">For Accessibility and Screen Recording, turn on Cala in the list macOS opens using Touch ID or your password. If macOS offers Quit &amp; Reopen after Screen Recording, accept it.</p>
+    </div>
+  </section>
+
+  <!-- component: Privacy -->
+  <section id="privacy" class="section privacy" aria-labelledby="privacy-title">
+    <div class="wrap">
+      <header class="section-intro">
+        <h2 id="privacy-title" data-i18n="privacyTitle">Privacy and security</h2>
+        <p data-i18n="privacySummary">Cala requires no account and uses no analytics. Window previews and calendar events are processed on your Mac.</p>
+      </header>
+      <div class="privacy-grid">
+        <article class="privacy-item">
+          <h3><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg><span data-i18n="privacyDataTitle">What leaves your Mac and when</span></h3>
+          <ul class="privacy-list" role="list">
+            <li>
+              <strong data-i18n="privacyUsageTitle">Claude and Codex quotas</strong>
+              <p data-i18n="privacyUsageText">On by default, the indicator uses your existing Claude Code and Codex credentials. It checks Claude’s quota with Anthropic. For Codex it uses the local codex app-server process or contacts OpenAI directly through ChatGPT.</p>
+              <p data-i18n="privacyUsageControl">Claude Code can send Haiku a short “ok” prompt to renew an expired token, using a little quota. Turn off the Usage switch in Cala’s Settings → Usage.</p>
+            </li>
+            <li>
+              <strong data-i18n="privacyReportsTitle">Reports</strong>
+              <p data-i18n="privacyReportsText">If reporting is configured, Cala sends reports to Sentry. You can review your message, optional email and attachments before sending. Even with “Include technical information” off, reports include your Mac model, macOS version, permission status and some settings. The detailed diagnostic attachment is optional.</p>
+              <p data-i18n="privacyCrashText">Cala asks before sending crash reports by default. With automatic sending enabled, Cala sends the .ips file and diagnostics the next time it opens.</p>
+            </li>
+            <li>
+              <strong data-i18n="privacyActionsTitle">Actions you start</strong>
+              <p data-i18n="privacyActionsText">Join opens the video call link. The Terminal installer downloads Cala from GitHub and verifies the published SHA-256 checksum.</p>
+            </li>
+          </ul>
+        </article>
+        <article class="privacy-item"><h3><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg><span data-i18n="privacySourceTitle">Is it safe to install?</span></h3><p data-i18n="privacySourceText">The source is public. You can read it, inspect the installer and build Cala yourself.</p><p data-i18n="privacySignText">Cala is distributed without an Apple Developer ID signature. The Apple Developer Program costs 99 USD a year. If you use the DMG, macOS asks you to allow Cala to open once.</p>
+          <a class="inline-link" href="https://github.com/MineiToshio/cala-taskbar"><span data-i18n="readSource">View the source on GitHub</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a></article>
+      </div>
+    </div>
+  </section>
+
+  <!-- component: Faq -->
+  <section id="faq" class="section faq wrap content-split" aria-labelledby="faq-title">
+    <header class="section-heading"><h2 id="faq-title" data-i18n="faqTitle">Frequently asked questions</h2></header>
+    <div class="faq-list">
+      <details><summary><span data-i18n="requirementsQ">What Macs can run Cala?</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary><p data-i18n="requirementsA">Cala runs on macOS 14 (Sonoma) or later. The download is universal for Apple silicon and Intel.</p></details>
+      <details><summary><span data-i18n="updatesQ">How do I update Cala?</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary><p data-i18n="updatesA">Run the install command again, or download the new DMG and replace Cala in Applications. Your settings and permissions are kept.</p></details>
+      <details><summary><span data-i18n="uninstallQ">How do I uninstall it?</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary><p data-i18n="uninstallA">In Cala, go to Settings → Advanced → Uninstall Cala. It restores the Dock and menu bar, removes the login item, deletes Cala’s settings and moves it to the Trash. You can remove its permissions in System Settings → Privacy &amp; Security.</p></details>
+      <details><summary><span data-i18n="blockQ">Why does macOS block the DMG install?</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary><p data-i18n="blockA">Cala is distributed without an Apple Developer ID signature. macOS asks for your approval the first time you open it from Applications.</p><p><a href="#unlock" data-i18n="unlockLink">See the steps for your version of macOS</a></p></details>
+      <details id="license"><summary><span data-i18n="licenseQ">What does the license allow?</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary><p data-i18n="licenseA">PolyForm Noncommercial 1.0.0 allows personal and other noncommercial use, changes and redistribution under its terms. Selling Cala or using its code commercially requires the author’s permission.</p></details>
+    </div>
+  </section>
+</main>
+<!-- component: SiteFooter -->
+<footer class="site-footer" id="footer">
+  <div class="wrap footer-inner">
+    <a class="brand" href="#top"><svg class="brand-mark" aria-hidden="true"><use href="#cala-logo"/></svg>Cala</a>
+    <nav class="footer-nav" data-i18n-label="footerNav" aria-label="Project links">
+      <a id="repo-link" href="https://github.com/MineiToshio/cala-taskbar">GitHub</a>
+      <a href="https://github.com/MineiToshio/cala-taskbar/blob/main/LICENSE" data-i18n="licenseLink">License</a>
+      <a href="https://github.com/MineiToshio/cala-taskbar/issues" data-i18n="issuesLink">Issues</a>
+    </nav>
+  </div>
+</footer>
+<p id="copy-status" class="copy-status" role="status" aria-live="polite" aria-atomic="true"></p>
+<template id="preview-template">
+  <div class="preview-card">
+    <div class="preview-title"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span></span></div>
+    <div class="preview-art" data-art="files" aria-hidden="true"><span class="art-sidebar"><i></i><i></i><i></i></span><span class="art-content"><b></b><i class="fake-line"></i><i class="fake-line"></i><span class="tiny-blocks"><i><svg class="icon"><use href="#i-folder"/></svg></i><i><svg class="icon"><use href="#i-folder"/></svg></i><i><svg class="icon"><use href="#i-notes"/></svg></i></span></span></div>
+  </div>
+</template>
+<template id="sound-template"><div class="mock-panel">
+              <div class="mock-panel-title"><span data-i18n="sound">Sound</span></div>
+              <div class="mock-row volume-row"><svg class="icon" aria-hidden="true"><use href="#i-sound"/></svg><span class="mock-slider"><i style="width:63%"></i></span><span>63%</span></div>
+              <div class="mock-divider"></div>
+              <div class="mock-row"><span data-i18n="soundSettings">Sound settings</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></div>
+            </div></template>
+<template id="system-template"><div class="mock-panel">
+            <div class="mock-panel-title"><span data-i18n="system">System</span><small class="check-reading"><span data-i18n="normal">Check this</span></small></div>
+            <div class="health-grid">
+              <div class="health-stat"><span data-i18n="processor">CPU</span><strong>78%</strong><svg class="spark" viewBox="0 0 110 22" preserveAspectRatio="none"><path d="M0 18 10 17 16 13 22 15 28 7 33 10 41 5 48 8 54 5 62 7 69 3 73 6 80 4 88 5 94 2 101 5 110 4"/></svg></div>
+              <div class="health-stat"><span data-i18n="memory">Memory</span><strong>12 / 16 GB</strong><svg class="spark" viewBox="0 0 110 22" preserveAspectRatio="none"><path d="M0 13 9 12 18 11 23 13 32 9 44 8 52 9 63 7 75 6 84 7 94 6 104 7 110 6"/></svg></div>
+            </div>
+            <div class="load-top"><b data-i18n="topUsage">Top usage</b><div class="segmented"><span data-i18n="processor">CPU</span><span data-i18n="memory">Memory</span></div></div>
+            <div class="load-row"><div class="mock-row"><span data-i18n="browser">Browser</span><span>45%</span></div><div class="meter"><i style="width:58%"></i></div></div><div class="load-row"><div class="mock-row"><span data-i18n="notes">Notes</span><span>11%</span></div><div class="meter"><i style="width:14%"></i></div></div><div class="load-row"><div class="mock-row"><span data-i18n="systemOther">System and other</span><span>22%</span></div><div class="meter"><i style="width:28%"></i></div></div>
+            <div class="maintenance"><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg><span data-i18n="maintenance">macOS update pending</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></div>
+          </div></template>
+<template id="calendar-template"><div class="mock-panel">
+            <time class="calendar-time" data-calendar-time>--:--:--</time><div class="calendar-date" data-calendar-date></div>
+            <div class="mock-divider"></div>
+            <div class="mock-panel-title"><span data-calendar-month></span><small>‹ &nbsp; ›</small></div>
+            <div class="month-grid" data-example-calendar></div>
+            <div class="mock-divider"></div>
+            <b data-i18n="upcoming">Upcoming</b>
+            <div class="calendar-event"><svg class="icon" aria-hidden="true"><use href="#i-video"/></svg><div><b data-i18n="designReview">Design review</b><small><span data-i18n="calEventTime">Example · 10:30–11:00</span></small></div><span class="mock-action"><span data-i18n="join">Join</span></span></div>
+          </div></template>
+<script>
+/* translations */
+const strings = {
+  "title": ["Cala · A taskbar for your Mac", "Cala · Una barra de tareas para tu Mac"],
+  "skip": ["Skip to content", "Saltar al contenido"],
+  "navLabel": ["Main navigation", "Navegación principal"],
+  "navFeatures": ["Features", "Funciones"],
+  "navInstall": ["Install", "Instalar"],
+  "navFaq": ["FAQ", "Preguntas"],
+  "language": ["Language", "Idioma"],
+  "heroTitle": ["A taskbar", "Una barra de tareas"],
+  "heroAccent": ["for your Mac.", "para tu Mac."],
+  "heroLead": ["Your apps and window previews below. Wi-Fi, sound and calendar on the right.", "Tus apps y las miniaturas de sus ventanas, abajo. Wi-Fi, sonido y calendario, a la derecha."],
+  "copyCommand": ["Copy command", "Copiar comando"],
+  "copyLink": ["Copy GitHub link", "Copiar enlace de GitHub"],
+  "copied": ["Copied", "Copiado"],
+  "copyError": ["Couldn’t copy automatically. Select and copy the text manually.", "No se pudo copiar automáticamente. Selecciona y copia el texto."],
+  "download": ["Download DMG", "Descargar DMG"],
+  "specs": ["Free · macOS 14+ · Apple silicon and Intel", "Gratis · macOS 14+ · Apple silicon e Intel"],
+  "mobileLead": ["Cala is for Mac. Open this on your Mac or copy the GitHub link.", "Cala es para Mac. Abre esta página en tu Mac o copia el enlace de GitHub."],
+  "installGuide": ["Installation guide", "Ver la instalación"],
+  "demoTitle": ["Try the taskbar", "Prueba la barra"],
+  "demoHint": ["Hover, tap or use Tab on an app icon.", "Pasa el mouse, toca un icono o llega a él con Tab."],
+  "filePreviewHeading": ["Name", "Nombre"],
+  "notesPreviewHeading": ["Checklist", "Pendientes"],
+  "browserPreviewHeading": ["Reading list", "Lista de lectura"],
+  "themeLabel": ["Nine themes for your taskbar", "Nueve temas para tu barra"],
+  "theme-system": ["System", "Sistema"],
+  "theme-graphite": ["Graphite", "Grafito"],
+  "theme-midnight": ["Midnight", "Medianoche"],
+  "theme-ocean": ["Ocean", "Océano"],
+  "theme-sunset": ["Sunset", "Atardecer"],
+  "theme-forest": ["Forest", "Bosque"],
+  "theme-lavender": ["Lavender", "Lavanda"],
+  "theme-candy": ["Candy", "Chicle"],
+  "theme-snow": ["Snow", "Nieve"],
+  "demoBar": ["Demo taskbar", "Barra de tareas de demostración"],
+  "files": ["Files", "Archivos"],
+  "notes": ["Notes", "Notas"],
+  "browser": ["Browser", "Navegador"],
+  "terminal": ["Terminal", "Terminal"],
+  "folders": ["Folders", "Carpetas"],
+  "project": ["Atlas project", "Proyecto Atlas"],
+  "downloads": ["Downloads", "Descargas"],
+  "designNotes": ["Design notes", "Notas de diseño"],
+  "meetingNotes": ["Meeting notes", "Notas de reunión"],
+  "reference": ["References", "Referencias"],
+  "shellWindow": ["Shell session", "Sesión de Terminal"],
+  "wifi": ["Wi-Fi", "Wi-Fi"],
+  "bluetooth": ["Bluetooth", "Bluetooth"],
+  "brightness": ["Brightness", "Brillo"],
+  "sound": ["Sound", "Sonido"],
+  "system": ["System", "Sistema"],
+  "disk": ["Disk", "Disco"],
+  "battery": ["Battery", "Batería"],
+  "calendar": ["Calendar", "Calendario"],
+  "demoWifi": ["Home network · Connected", "Red de casa · Conectado"],
+  "demoBluetooth": ["Headphones · Connected", "Auriculares · Conectados"],
+  "demoBrightness": ["Display brightness", "Brillo de la pantalla"],
+  "demoDisk": ["31% free", "31 % libre"],
+  "demoBattery": ["84% · On battery power", "84 % · En batería"],
+  "featuresTitle": ["Your windows and controls, close at hand.", "Tus ventanas y controles, a mano."],
+  "switcherTitle": ["Switch windows with Option + Tab", "Cambia de ventana con Opción + Tab"],
+  "switcherText": ["Choose from up to 20 windows, including minimized ones. Hover over an app for up to six previews. A minimized window may show its app icon when a thumbnail is unavailable.", "Elige entre hasta 20 ventanas, incluidas las minimizadas. Al pasar el mouse por una app, ves hasta seis vistas previas. Si falta una miniatura de una ventana minimizada, Cala muestra el icono de la app."],
+  "optionKey": ["⌥ Option", "⌥ Opción"],
+  "trayTitle": ["Your Mac’s controls", "Los controles de tu Mac"],
+  "trayText": ["Open Wi-Fi, Bluetooth, sound, brightness, battery or disk space from the tray. Choose which icons stay visible.", "Abre Wi-Fi, Bluetooth, sonido, brillo, batería o espacio en disco desde la bandeja. Elige qué iconos quedan a la vista."],
+  "soundSettings": ["Sound settings", "Ajustes de sonido"],
+  "performanceTitle": ["Why is my Mac slow?", "¿Por qué mi Mac va lento?"],
+  "performanceText": ["See what uses the most CPU and memory, and why a restart might help.", "Mira qué usa más procesador y memoria, y por qué puede convenir reiniciar."],
+  "normal": ["Check this", "Revisa esto"],
+  "processor": ["CPU", "Procesador"],
+  "memory": ["Memory", "Memoria"],
+  "topUsage": ["Top usage", "Lo que más usa"],
+  "systemOther": ["System and other", "Sistema y otros"],
+  "maintenance": ["macOS update pending", "macOS pendiente de actualizar"],
+  "eventsTitle": ["Your next video call", "Tu próxima videollamada"],
+  "eventsText": ["Open the clock for upcoming events. When a call is about to start, join from the bar.", "Abre el reloj para ver tus próximos eventos. Cuando esté por empezar una llamada, únete desde la barra."],
+  "upcoming": ["Upcoming", "Próximos"],
+  "designReview": ["Design review", "Revisión de diseño"],
+  "calEventTime": ["Example · 10:30–11:00", "Ejemplo · 10:30–11:00"],
+  "join": ["Join", "Unirse"],
+  "installTitle": ["Install Cala", "Instala Cala"],
+  "installIntro": ["The same universal app runs on Apple silicon and Intel Macs with macOS 14 or later.", "La misma app universal funciona en Macs con Apple silicon o Intel y macOS 14 o posterior."],
+  "terminalTitle": ["One command", "Con un comando"],
+  "recommended": ["Recommended", "Recomendada"],
+  "terminalInstruction": ["Open Terminal with Spotlight (⌘ + Space), paste this command and press Return.", "Abre Terminal con Spotlight (⌘ + Espacio), pega este comando y pulsa Intro."],
+  "terminalResult": ["It downloads the latest release, checks its SHA-256 checksum, installs Cala in Applications and opens it. This method skips the one-time macOS prompt. Run it again to update and keep your settings.", "Descarga la última versión, verifica su suma SHA-256, instala Cala en Aplicaciones y la abre. Con este método te saltas el aviso de macOS. Repite el comando para actualizar y conservar tus ajustes."],
+  "readScript": ["Read the install script", "Leer el script de instalación"],
+  "dmgTitle": ["Download the disk image", "Con una imagen de disco"],
+  "dmgStep1": ["Download Cala-x.y.z.dmg from GitHub.", "Descarga Cala-x.y.z.dmg desde GitHub."],
+  "dmgStep2": ["Open the DMG and drag Cala into Applications.", "Abre el DMG y arrastra Cala a Aplicaciones."],
+  "dmgStep3": ["Allow Cala to open once. After that it opens normally.", "Autoriza la apertura de Cala una vez. Después se abre con normalidad."],
+  "orLater": ["or later", "o posterior"],
+  "newStep1": ["Double-click Cala in Applications. When you see the verification message, click Done.", "Haz doble clic en Cala en Aplicaciones. Cuando aparezca el aviso de verificación, pulsa Listo."],
+  "newStep2": ["In System Settings, open Privacy & Security and scroll to the bottom.", "En Ajustes del Sistema, abre Privacidad y seguridad y baja hasta el final."],
+  "newStep3": ["Click Open Anyway next to the Cala notice and enter your password.", "Pulsa Abrir igualmente junto al aviso de Cala y escribe tu contraseña."],
+  "newStep4": ["Open Cala again and choose Open Anyway.", "Vuelve a abrir Cala y elige Abrir igualmente."],
+  "sonoma": ["In Applications, right-click Cala, choose Open, then confirm with Open again.", "En Aplicaciones, haz clic derecho sobre Cala, elige Abrir y confirma pulsando Abrir otra vez."],
+  "unlockTerminal": ["Allow it from Terminal", "Autorizar desde Terminal"],
+  "welcome": ["Follow Cala’s four short welcome steps. You can skip any of them.", "Sigue los cuatro pasos breves de la bienvenida de Cala. Puedes saltarte cualquiera."],
+  "permissionsTitle": ["Permissions, one at a time", "Permisos, uno por uno"],
+  "permissionsLead": ["Cala explains each request and takes you to the right place in System Settings. You can skip any permission and still use the rest of the app.", "Cala explica para qué pide cada permiso y te lleva al apartado correspondiente de Ajustes del Sistema. Puedes omitir cualquiera y seguir usando el resto de la app."],
+  "permissionsLater": ["To grant them later, right-click an empty part of the bar and open Settings → Permissions.", "Para activarlos después, haz clic derecho en un espacio vacío de la barra y abre Configuración → Permisos."],
+  "permission": ["Permission", "Permiso"],
+  "purpose": ["What it does", "Para qué sirve"],
+  "without": ["If you skip it", "Si lo omites"],
+  "access": ["Accessibility", "Accesibilidad"],
+  "accessPurpose": ["See, focus, minimize and close windows. It also enables Option + Tab.", "Ver, enfocar, minimizar y cerrar ventanas. También activa Opción + Tab."],
+  "accessWithout": ["The bar still opens apps, without window controls.", "La barra sigue abriendo apps, sin manejar ventanas."],
+  "record": ["Screen Recording", "Grabación de pantalla"],
+  "recordPurpose": ["Shows window thumbnails. Cala never saves a recording or sends your screen.", "Muestra miniaturas de las ventanas. Cala no guarda grabaciones ni envía tu pantalla."],
+  "recordWithout": ["Window thumbnails stay off.", "No se muestran miniaturas."],
+  "calendarPurpose": ["Shows upcoming events and the Join button.", "Muestra próximos eventos y el botón Unirse."],
+  "calendarWithout": ["The clock opens without events.", "El reloj se abre sin eventos."],
+  "location": ["Location", "Ubicación"],
+  "locationPurpose": ["macOS needs it to show Wi-Fi network names.", "macOS lo exige para mostrar los nombres de las redes Wi-Fi."],
+  "locationWithout": ["Network names stay hidden.", "No se ven los nombres de red."],
+  "bluetoothPurpose": ["Lists and connects paired devices.", "Lista y conecta tus dispositivos vinculados."],
+  "bluetoothWithout": ["Devices aren’t listed.", "No se listan los dispositivos."],
+  "finder": ["Control Finder", "Controlar Finder"],
+  "finderPurpose": ["Counts and empties the Trash, and restarts your Mac on request.", "Cuenta y vacía la Papelera, y reinicia el Mac cuando lo pides."],
+  "finderWithout": ["Those actions are unavailable in Cala.", "Esas acciones no están disponibles en Cala."],
+  "notifications": ["Notifications", "Notificaciones"],
+  "notificationsPurpose": ["Shows Claude or Codex quota alerts.", "Muestra avisos de cuota de Claude o Codex."],
+  "notificationsWithout": ["You won’t see quota alerts.", "No verás avisos de cuota."],
+  "permissionNote": ["For Accessibility and Screen Recording, turn on Cala in the list macOS opens using Touch ID or your password. If macOS offers Quit & Reopen after Screen Recording, accept it.", "Para Accesibilidad y Grabación de pantalla, activa Cala en la lista de macOS con Touch ID o tu contraseña. Si macOS te ofrece Salir y volver a abrir tras activar Grabación de pantalla, acéptalo."],
+  "privacyTitle": ["Privacy and security", "Privacidad y seguridad"],
+  "privacySummary": ["Cala requires no account and uses no analytics. Window previews and calendar events are processed on your Mac.", "Cala no requiere cuenta y no usa analítica. Las miniaturas y los eventos del calendario se procesan en tu Mac."],
+  "privacyDataTitle": ["What leaves your Mac and when", "Qué sale de tu Mac y cuándo"],
+  "privacyUsageTitle": ["Claude and Codex quotas", "Cuotas de Claude y Codex"],
+  "privacyUsageText": ["On by default, the indicator uses your existing Claude Code and Codex credentials. It checks Claude’s quota with Anthropic. For Codex it uses the local codex app-server process or contacts OpenAI directly through ChatGPT.", "El indicador está activo por defecto y usa tus credenciales de Claude Code y Codex. Consulta la cuota de Claude a Anthropic. Para Codex usa el proceso local codex app-server o consulta directamente a OpenAI a través de ChatGPT."],
+  "privacyUsageControl": ["Claude Code can send Haiku a short “ok” prompt to renew an expired token, using a little quota. Turn off the Usage switch in Cala’s Settings → Usage.", "Para renovar un token caducado, Claude Code puede enviar un «ok» a Haiku y consumir un poco de cuota. Desactiva el interruptor Uso en Configuración → Uso de Cala."],
+  "privacyReportsTitle": ["Reports", "Informes"],
+  "privacyReportsText": ["If reporting is configured, Cala sends reports to Sentry. You can review your message, optional email and attachments before sending. Even with “Include technical information” off, reports include your Mac model, macOS version, permission status and some settings. The detailed diagnostic attachment is optional.", "Con el envío configurado, Cala usa Sentry. Puedes revisar el mensaje, el correo opcional y los adjuntos antes de enviar. Aunque desmarques «Incluir información técnica», se envían el modelo del Mac, la versión de macOS, los estados de permisos y algunos ajustes. El diagnóstico detallado es opcional."],
+  "privacyCrashText": ["Cala asks before sending crash reports by default. With automatic sending enabled, Cala sends the .ips file and diagnostics the next time it opens.", "Tras un fallo, Cala pregunta por defecto. Si activas el envío automático, la próxima vez que abra envía el archivo .ips y el diagnóstico."],
+  "privacyActionsTitle": ["Actions you start", "Acciones que tú inicias"],
+  "privacyActionsText": ["Join opens the video call link. The Terminal installer downloads Cala from GitHub and verifies the published SHA-256 checksum.", "Unirse abre el enlace de la videollamada. El instalador de Terminal descarga Cala de GitHub y verifica la suma SHA-256 publicada."],
+  "privacySourceTitle": ["Is it safe to install?", "¿Es seguro instalarla?"],
+  "privacySourceText": ["The source is public. You can read it, inspect the installer and build Cala yourself.", "El código está disponible. Puedes leerlo, revisar el instalador y compilar Cala por tu cuenta."],
+  "privacySignText": ["Cala is distributed without an Apple Developer ID signature. The Apple Developer Program costs 99 USD a year. If you use the DMG, macOS asks you to allow Cala to open once.", "Cala se distribuye sin firma de Apple Developer ID. El programa de desarrolladores de Apple cuesta 99 USD al año. Si usas el DMG, macOS te pide autorizar la apertura una vez."],
+  "readSource": ["View the source on GitHub", "Ver el código en GitHub"],
+  "faqTitle": ["Frequently asked questions", "Preguntas frecuentes"],
+  "requirementsQ": ["What Macs can run Cala?", "¿En qué Macs funciona Cala?"],
+  "requirementsA": ["Cala runs on macOS 14 (Sonoma) or later. The download is universal for Apple silicon and Intel.", "Cala funciona en macOS 14 (Sonoma) o posterior. La descarga es universal para Apple silicon e Intel."],
+  "updatesQ": ["How do I update Cala?", "¿Cómo actualizo Cala?"],
+  "updatesA": ["Run the install command again, or download the new DMG and replace Cala in Applications. Your settings and permissions are kept.", "Vuelve a ejecutar el comando de instalación o descarga el nuevo DMG y reemplaza Cala en Aplicaciones. Tus ajustes y permisos se conservan."],
+  "uninstallQ": ["How do I uninstall it?", "¿Cómo la desinstalo?"],
+  "uninstallA": ["In Cala, go to Settings → Advanced → Uninstall Cala. It restores the Dock and menu bar, removes the login item, deletes Cala’s settings and moves it to the Trash. You can remove its permissions in System Settings → Privacy & Security.", "En Cala, abre Configuración → Avanzado → Desinstalar Cala. Se restauran el Dock y la barra de menús, se quita el ítem de inicio, se borran los ajustes y Cala pasa a la Papelera. Puedes quitar sus permisos en Ajustes del Sistema → Privacidad y seguridad."],
+  "blockQ": ["Why does macOS block the DMG install?", "¿Por qué macOS bloquea Cala si uso el DMG?"],
+  "blockA": ["Cala is distributed without an Apple Developer ID signature. macOS asks for your approval the first time you open it from Applications.", "Cala se distribuye sin firma de Apple Developer ID. macOS pide tu autorización la primera vez que abres Cala desde Aplicaciones."],
+  "unlockLink": ["See the steps for your version of macOS", "Ver los pasos para tu versión de macOS"],
+  "licenseQ": ["What does the license allow?", "¿Qué permite la licencia?"],
+  "licenseA": ["PolyForm Noncommercial 1.0.0 allows personal and other noncommercial use, changes and redistribution under its terms. Selling Cala or using its code commercially requires the author’s permission.", "PolyForm Noncommercial 1.0.0 permite el uso personal y otros usos no comerciales, modificar Cala y redistribuirla según sus términos. Venderla o usar su código con fines comerciales requiere permiso del autor."],
+  "licenseLink": ["License", "Licencia"],
+  "issuesLink": ["Issues", "Reportar un problema"],
+  "footerNav": ["Project links", "Enlaces del proyecto"]
+};
+/* end translations */
+
+const languageSelect = document.querySelector('#language');
+const languageKey = 'cala-website-language';
+const copyStatus = document.querySelector('#copy-status');
+const demo = document.querySelector('[data-demo]');
+const popover = document.querySelector('#demo-popover');
+const displayStage = demo.querySelector('.desktop');
+const palettePicker = document.querySelector('.theme-picker');
+const themeChoices = [...palettePicker.querySelectorAll('input[type="radio"]')];
+const motionPreference = matchMedia('(prefers-reduced-motion: reduce)');
+const demoButtons = [...demo.querySelectorAll('.task-button')];
+const featureCalendar = document.querySelector('.features [data-calendar-time]').closest('.mock-panel');
+const appWindows = {
+  files: { icon: 'folder', heading: 'filePreviewHeading', titles: ['project', 'downloads'] },
+  notes: { icon: 'notes', heading: 'notesPreviewHeading', titles: ['designNotes', 'meetingNotes'] },
+  browser: { icon: 'window', heading: 'browserPreviewHeading', titles: ['reference', 'project'] },
+  terminal: { icon: 'terminal', titles: ['shellWindow'] }
+};
+let language = /^es/i.test(navigator.language) ? 'es' : 'en';
+try {
+  const saved = localStorage.getItem(languageKey);
+  if (saved === 'en' || saved === 'es') language = saved;
+} catch {}
+let current = demoButtons[0];
+let dismissal;
+let copyTimer;
+let clockFormats;
+let shownTime;
+
+function t(key) {
+  return strings[key][language === 'es' ? 1 : 0];
+}
+
+function translate(root) {
+  for (const node of root.querySelectorAll('[data-i18n]')) node.textContent = t(node.dataset.i18n);
+  for (const node of root.querySelectorAll('[data-i18n-label]')) node.setAttribute('aria-label', t(node.dataset.i18nLabel));
+}
+
+function renderCalendar(root, now) {
+  const clock = root.querySelector('[data-calendar-time]');
+  clock.textContent = clockFormats.seconds.format(now);
+  clock.dateTime = now.toISOString();
+
+  const grid = root.querySelector('[data-example-calendar]');
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const today = now.getDate();
+  const dayKey = [language, year, month, today].join('/');
+  if (grid.dataset.dayKey === dayKey) return;
+  grid.dataset.dayKey = dayKey;
+
+  root.querySelector('[data-calendar-date]').textContent = clockFormats.fullDate.format(now);
+  root.querySelector('[data-calendar-month]').textContent = clockFormats.month.format(now);
+  const weekdays = language === 'es' ? ['L', 'M', 'X', 'J', 'V', 'S', 'D'] : ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  const firstWeekday = new Date(year, month, 1).getDay();
+  const leading = (firstWeekday + (language === 'es' ? 6 : 0)) % 7;
+  const monthLength = new Date(year, month + 1, 0).getDate();
+  const days = [...weekdays, ...Array(leading).fill(''), ...Array.from({length: monthLength}, (_, index) => index + 1)];
+  grid.replaceChildren(...days.map((day, index) => {
+    const cell = document.createElement('span');
+    cell.textContent = day;
+    if (index < 7) cell.className = 'weekday';
+    if (day === today) cell.className = 'today';
+    return cell;
+  }));
+}
+
+function previewFor(app) {
+  const { icon, heading, titles } = appWindows[app];
+  const grid = document.createElement('div');
+  grid.className = 'preview-grid';
+  for (const title of titles) {
+    const card = document.querySelector('#preview-template').content.cloneNode(true);
+    card.querySelector('.preview-title span').textContent = t(title);
+    card.querySelector('use').setAttribute('href', '#i-' + icon);
+    card.querySelector('.preview-art').dataset.art = app;
+    card.querySelector('.art-content b').textContent = heading ? t(heading) : '$ ls';
+    grid.append(card);
+  }
+  return grid;
+}
+
+function trayFor(kind) {
+  const template = document.querySelector('#' + kind + '-template');
+  if (template) {
+    const panel = template.content.cloneNode(true);
+    translate(panel);
+    if (kind === 'calendar') renderCalendar(panel, shownTime);
+    return panel;
+  }
+  const panel = document.createElement('div');
+  panel.className = 'demo-panel';
+  const title = document.createElement('strong');
+  title.textContent = t(kind);
+  const detail = document.createElement('p');
+  detail.textContent = t('demo' + kind[0].toUpperCase() + kind.slice(1));
+  panel.append(title, detail);
+  if (kind === 'brightness') {
+    const row = document.createElement('div');
+    row.className = 'mock-row volume-row';
+    const slider = document.createElement('span');
+    slider.className = 'mock-slider';
+    const fill = document.createElement('i');
+    fill.style.width = '63%';
+    slider.append(fill);
+    row.append(slider);
+    panel.append(row);
+  }
+  return panel;
+}
+
+function renderPopover(animate = false) {
+  for (const button of demoButtons) button.setAttribute('aria-expanded', String(button === current));
+  popover.hidden = !current;
+  if (!current) return;
+  popover.dataset.kind = current.dataset.tray || current.dataset.app;
+  popover.dataset.side = current.dataset.app ? 'apps' : 'tray';
+  popover.replaceChildren(current.dataset.app ? previewFor(current.dataset.app) : trayFor(current.dataset.tray));
+  popover.classList.remove('is-opening');
+  if (animate) {
+    void popover.offsetWidth;
+    popover.classList.add('is-opening');
+  }
+}
+
+function openDemo(button, announce = false) {
+  clearTimeout(dismissal);
+  if (current !== button) {
+    current = button;
+    renderPopover(true);
+  }
+  if (announce) {
+    const summary = button.dataset.app ? appWindows[button.dataset.app].titles.map(t).join(', ') : '';
+    document.querySelector('#demo-announcement').textContent = summary;
+  }
+}
+
+function closeDemo() {
+  clearTimeout(dismissal);
+  current = null;
+  document.querySelector('#demo-announcement').textContent = '';
+  renderPopover();
+}
+
+function updateClock() {
+  const now = new Date();
+  shownTime = now;
+  const time = document.querySelector('#live-clock');
+  time.textContent = clockFormats.minutes.format(now);
+  time.dateTime = now.toISOString();
+  document.querySelector('#live-date').textContent = clockFormats.shortDate.format(now);
+  renderCalendar(featureCalendar, now);
+  if (current?.dataset.tray === 'calendar') renderCalendar(popover, now);
+}
+
+function setLanguage(next, remember = false) {
+  language = next;
+  languageSelect.value = language;
+  document.documentElement.lang = language;
+  document.title = t('title');
+  translate(document);
+  const browserLanguage = navigator.language.toLowerCase();
+  const locale = browserLanguage.split('-')[0] === language ? navigator.language : language === 'es' ? 'es-PE' : 'en-US';
+  const timeOptions = {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'};
+  clockFormats = {
+    minutes: new Intl.DateTimeFormat(locale, timeOptions),
+    seconds: new Intl.DateTimeFormat(locale, {...timeOptions, second: '2-digit'}),
+    shortDate: new Intl.DateTimeFormat(locale, {day: 'numeric', month: 'short'}),
+    fullDate: new Intl.DateTimeFormat(locale, {dateStyle: 'full'}),
+    month: new Intl.DateTimeFormat(locale, {month: 'long', year: 'numeric'})
+  };
+  updateClock();
+  renderPopover();
+  copyStatus.textContent = '';
+  if (remember) {
+    try { localStorage.setItem(languageKey, language); } catch {}
+  }
+}
+
+function applyTheme(theme) {
+  displayStage.dataset.palette = theme;
+  for (const choice of themeChoices) choice.checked = choice.value === theme;
+}
+
+let tourTimers = [];
+function stopThemeTour() {
+  tourTimers.forEach(clearTimeout);
+  tourTimers = [];
+}
+function finishThemeTour() {
+  stopThemeTour();
+  applyTheme('system');
+}
+
+palettePicker.addEventListener('change', (event) => {
+  clearTimeout(dismissal);
+  stopThemeTour();
+  applyTheme(event.target.value);
+  if (!current) openDemo(demoButtons[0]);
+});
+
+if (!motionPreference.matches) {
+  tourTimers = ['ocean', 'sunset', 'system'].map((theme, index) =>
+    setTimeout(() => {
+      applyTheme(theme);
+      if (theme === 'system') stopThemeTour();
+    }, 850 + index * 640)
+  );
+  // Capture first so cancelling a tour never overwrites a radio's native selection.
+  for (const type of ['pointerdown', 'keydown', 'focusin', 'wheel', 'touchstart']) {
+    document.addEventListener(type, () => {
+      if (tourTimers.length) finishThemeTour();
+    }, {capture: true, passive: true, once: true});
+  }
+  for (const control of [demo, palettePicker]) {
+    control.addEventListener('pointerenter', () => {
+      if (tourTimers.length) finishThemeTour();
+    }, {once: true});
+  }
+  motionPreference.addEventListener('change', () => {
+    if (motionPreference.matches && tourTimers.length) finishThemeTour();
+  });
+}
+
+if (!motionPreference.matches && 'IntersectionObserver' in window) {
+  const sections = [...document.querySelectorAll('main > .section')];
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      entry.target.classList.add('section-entering');
+      observer.unobserve(entry.target);
+    }
+  }, {threshold: .06});
+  sections.forEach(section => observer.observe(section));
+}
+
+languageSelect.addEventListener('change', () => setLanguage(languageSelect.value, true));
+setLanguage(language);
+setInterval(updateClock, 1000);
+
+function scheduleDismissal() {
+  clearTimeout(dismissal);
+  dismissal = setTimeout(() => {
+    if (!current?.dataset.app || current === document.activeElement || popover.matches(':hover')) return;
+    closeDemo();
+  }, 160);
+}
+
+for (const button of demoButtons) {
+  if (button.dataset.app) {
+    button.addEventListener('pointerenter', (event) => {
+      if (event.pointerType === 'mouse') openDemo(button);
+    });
+    button.addEventListener('pointerleave', scheduleDismissal);
+    button.addEventListener('focus', () => openDemo(button, true));
+    button.addEventListener('blur', scheduleDismissal);
+    button.addEventListener('click', () => openDemo(button, true));
+  } else {
+    button.addEventListener('click', () => current === button ? closeDemo() : openDemo(button));
+  }
+}
+popover.addEventListener('pointerenter', () => clearTimeout(dismissal));
+popover.addEventListener('pointerleave', scheduleDismissal);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && current) closeDemo();
+});
+document.addEventListener('pointerdown', (event) => {
+  if (!demo.contains(event.target) && !palettePicker.contains(event.target) && current) closeDemo();
+});
+
+function fallbackCopy(value) {
+  const before = document.activeElement;
+  const field = document.createElement('textarea');
+  field.className = 'clipboard-fallback';
+  field.value = value;
+  field.readOnly = true;
+  field.tabIndex = -1;
+  document.body.append(field);
+  try {
+    field.select();
+    field.setSelectionRange(0, field.value.length);
+    return document.execCommand('copy');
+  } finally {
+    field.remove();
+    before?.focus({preventScroll: true});
+  }
+}
+
+async function copyText(value) {
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    try { return fallbackCopy(value); } catch { return false; }
+  }
+}
+
+for (const button of document.querySelectorAll('[data-copy]')) {
+  button.addEventListener('click', async () => {
+    const source = document.querySelector(button.dataset.copy);
+    clearTimeout(copyTimer);
+    copyStatus.textContent = '';
+    const copied = await copyText(source.getAttribute('href') ?? source.textContent);
+    copyStatus.textContent = t(copied ? 'copied' : 'copyError');
+    copyTimer = setTimeout(() => { copyStatus.textContent = ''; }, 3500);
+  });
+}
+</script>
+</body>
+</html>

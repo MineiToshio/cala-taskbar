@@ -1,0 +1,93 @@
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="logo-navy" x2="1" y2="1"><stop stop-color="#1C2944"/><stop offset="1" stop-color="#10192B"/></linearGradient>
+    <symbol id="cala-logo" viewBox="0 0 1024 1024">
+      <rect x="32" y="32" width="960" height="960" rx="215" fill="url(#logo-navy)"/>
+      <path d="M237 369c0-46 37-83 83-83h384c46 0 83 37 83 83v184c0 46-37 83-83 83H320c-46 0-83-37-83-83z" fill="#8DE4CD"/>
+      <path d="M326 741h372" stroke="#F2FCF8" stroke-width="86" stroke-linecap="round"/>
+      <path d="M386 461h252" stroke="#1C2944" stroke-width="64" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m5 6 6 6-6 6m8 0h6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-notes" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8m-8 4h8m-8 4h5"/></symbol>
+    <symbol id="i-window" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M6 7h.1m3 0h.1"/></symbol>
+    <symbol id="i-windows" viewBox="0 0 24 24"><rect x="3" y="8" width="13" height="12" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-3M3 12h13"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path stroke-width="1.9" d="M2.5 8.5a14.7 14.7 0 0 1 19 0M5.9 12a9.5 9.5 0 0 1 12.2 0m-8.8 3.5a4.2 4.2 0 0 1 5.4 0"/><circle cx="12" cy="18.8" r="1.35" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-bluetooth" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" d="m7 6.4 10.4 10.8L11 22V2l6.4 4.8L7 17.6"/></symbol>
+    <symbol id="i-sound" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M3 8.8h3.7l4.5-3.7a.8.8 0 0 1 1.3.6v12.6a.8.8 0 0 1-1.3.6l-4.5-3.7H3c-.9 0-1.5-.7-1.5-1.5v-3.4c0-.8.6-1.5 1.5-1.5z"/><path d="M15.5 8.3a5.4 5.4 0 0 1 0 7.4m3-10.4a9.6 9.6 0 0 1 0 13.4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.7" fill="currentColor" stroke="none"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5"/></symbol>
+    <symbol id="i-battery" viewBox="0 0 24 24"><rect x="1.3" y="6.5" width="19.4" height="11" rx="2.7"/><path d="M23 10v4"/><rect x="4" y="9" width="11" height="6" rx="1.1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-disk" viewBox="0 0 24 24"><path d="M2 14.1 5.2 7a2.4 2.4 0 0 1 2.2-1.4h9.3a2.3 2.3 0 0 1 2.1 1.4l3.2 7.1"/><rect x="2" y="13" width="20" height="6" rx="2.3"/><path stroke-width="2.1" d="M17.8 16h.1m-3 .0h.1"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4 18a9 9 0 1 1 16 0zM12 13l4-4m-9 4-.9-.5m5.9-5V6m5.2 7.3.9-.5"/><circle cx="12" cy="13" r="1"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 10h18m-13 4h.1m3.9 0h.1m3.9 0h.1m-8.1 3h.1m3.9 0h.1"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M4.4 5.7h9.5a2.5 2.5 0 0 1 2.5 2.5v.9l4.1-3a1.1 1.1 0 0 1 1.7.9v10a1.1 1.1 0 0 1-1.7.9l-4.1-3v.9a2.5 2.5 0 0 1-2.5 2.5H4.4A2.4 2.4 0 0 1 2 15.9V8.1a2.4 2.4 0 0 1 2.4-2.4z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 6-5 6 5 6m8-12 5 6-5 6m-2-15-4 18"/></symbol>
+    <symbol id="i-pointer" viewBox="0 0 24 24"><path d="m5 3 14 10-7 1-3 7z"/></symbol>
+    <symbol id="i-screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><circle cx="12" cy="10.5" r="2.5"/><path d="M8 21h8m-4-4v4"/></symbol>
+    <symbol id="i-location" viewBox="0 0 24 24"><path d="m4 10 16-6-6 16-3-7z"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M5 17h14l-2-3v-4a5 5 0 0 0-10 0v4zm5 3a2 2 0 0 0 4 0"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M4 3h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm10 0h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM4 13h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1zm10 0h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.1M4 12h.1M4 18h.1"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 5 5"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1"/><path d="m3 16 5-4 4 3 4-5 5 5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m7 7 10 10m0-10L7 17"/></symbol>
+    <symbol id="cala-landscape" viewBox="0 0 1440 840">
+      <defs>
+    <linearGradient id="ridge-back" x1="0" x2=".82" y1="0" y2="1">
+      <stop stop-color="var(--ridge-light)"/><stop offset=".52" stop-color="var(--ridge-mid)"/><stop offset="1" stop-color="var(--ridge-dark)"/>
+    </linearGradient>
+    <linearGradient id="ridge-front" x1="0" x2=".8" y1="0" y2="1">
+      <stop stop-color="var(--ridge-mid)"/><stop offset=".64" stop-color="var(--ridge-dark)"/><stop offset="1" stop-color="var(--ridge-deep)"/>
+    </linearGradient>
+    <linearGradient id="shore-light" x1="0" x2="1" y1="0" y2="0">
+      <stop stop-color="var(--wall-haze)" stop-opacity="0"/><stop offset=".42" stop-color="var(--wall-haze)" stop-opacity=".48"/><stop offset=".73" stop-color="var(--wall-haze)"/><stop offset="1" stop-color="var(--wall-haze)" stop-opacity=".08"/>
+    </linearGradient>
+      </defs>
+      <path d="M0 561C180 585 333 524 456 471C576 418 644 411 751 425C896 445 965 482 1117 437C1266 393 1337 320 1440 262V840H0Z" fill="url(#ridge-back)"/>
+      <path d="M0 561C180 585 333 524 456 471C576 418 644 411 751 425C896 445 965 482 1117 437C1266 393 1337 320 1440 262" stroke="url(#shore-light)" fill="none" stroke-width="1.5" style="opacity:var(--shore-opacity, 1)"/>
+      <path d="M0 677C228 646 354 731 563 687C795 639 919 582 1117 603C1263 618 1374 554 1440 503V840H0Z" fill="url(#ridge-front)"/>
+      <path d="M0 677C228 646 354 731 563 687C795 639 919 582 1117 603C1263 618 1374 554 1440 503" stroke="url(#shore-light)" stroke-width="1" fill="none" style="opacity:calc(.78 * var(--shore-opacity, 1))"/>
+      <path d="M0 794C224 738 378 811 620 789C868 766 1020 688 1204 711C1318 725 1391 682 1440 652V840H0Z" fill="var(--ridge-deep)" opacity=".54"/>
+      <g fill="none" stroke="url(#shore-light)" stroke-width=".85" style="opacity:var(--shore-opacity, 1)">
+        <path d="M0 584C182 606 346 548 481 489C617 430 688 443 775 455C900 472 990 509 1140 455C1274 407 1375 330 1440 298" opacity=".28"/>
+        <path d="M0 611C169 631 363 569 506 511C633 459 723 474 793 486C923 508 1010 536 1159 482C1300 431 1393 368 1440 339" opacity=".18"/>
+        <path d="M0 638C176 651 398 590 531 538C665 485 737 506 821 520C980 547 1041 551 1179 507C1310 465 1405 399 1440 377" opacity=".12"/>
+        <path d="M0 698C236 666 360 752 570 708C801 660 933 600 1131 623C1278 640 1386 574 1440 530" opacity=".45"/>
+        <path d="M0 721C224 686 364 774 577 730C806 682 946 618 1147 646C1287 665 1396 598 1440 558" opacity=".27"/>
+        <path d="M0 745C212 705 367 793 584 752C813 710 954 641 1165 670C1299 688 1413 624 1440 588" opacity=".19"/>
+        <path d="M0 794C224 738 378 811 620 789C868 766 1020 688 1204 711C1318 725 1391 682 1440 652" opacity=".49"/>
+        <path d="M0 814C227 757 382 831 627 808C872 785 1022 709 1208 731C1319 744 1393 703 1440 673" opacity=".28"/>
+      </g>
+    </symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.7"/><rect x="8.5" y="8.5" width="7" height="7" rx="1"/><path d="M8 2.5v2.4m4-2.4v2.4m4-2.4v2.4M8 19.1v2.4m4-2.4v2.4m4-2.4v2.4M2.5 8h2.4m-2.4 4h2.4m-2.4 4h2.4m14.2-8h2.4m-2.4 4h2.4m-2.4 4h2.4"/></symbol>
+    <symbol id="i-person" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><circle cx="12" cy="9.6" r="3.1" fill="currentColor" stroke="none"/><path fill="currentColor" stroke="none" d="M5.5 17.8c.9-5.2 12.1-5.2 13 0a9 9 0 0 1-13 0z"/></symbol>
+    <symbol id="i-leaf" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M20.8 3.6c.8 6.6-1.4 14.4-8.5 15.7-2.6.5-4.8-.4-6.3-1.9l-2.7 3-1.3-1.2L14.3 8.4 5 15.8C2.3 10 7.4 6.7 12 6.2c3.7-.4 6.4-.7 8.8-2.6z"/></symbol>
+    <symbol id="i-display" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2.5"/><path d="M12 17v3m-5 1h10"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2.3"/><path d="M6 9h1m3 0h1m3 0h1m3 0h.2M6 12h1m3 0h1m3 0h1m3 0h.2M8 15h8"/></symbol>
+    <symbol id="i-provider-prompt" viewBox="0 0 24 24"><path d="M5.52 20.4C-.72 19.92-.24 10.56 4.8 9.12 3.84.96 15.12.48 17.28 7.2 24.96 6 26.4 19.92 19.2 20.4Z M6.96 10.32l3.36 3.12-3.36 3.12m6.24 0h4.08"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><path d="m6.5 14.5 5.5-5 5.5 5"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6h16m-13 0 .7 14h8.6L17 6M9 6V3.5h6V6m-4.5 4v6m3-6v6"/></symbol>
+    <symbol id="i-download-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 6v10m-4-4 4 4 4-4"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 10a8 8 0 1 0-.6 5.9M20 4v6h-6"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m9 5 10 7-10 7z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M4 2.5 19 13.2l-7.2.8-3.3 6.5z" fill="#f7fbff" stroke="#142238" stroke-width="1.5"/></symbol>
+    <symbol id="i-provider-spark" viewBox="0 0 24 24"><polygon fill="currentColor" stroke="none" points="10.21,7.84 10.80,0.54 12.89,7.56 13.14,7.62 15.91,5.75 15.43,9.05 15.91,9.71 21.65,9.77 16.51,12.34 16.49,12.60 19.52,15.51 15.34,15.05 14.87,15.50 16.14,22.25 12.37,16.51 11.79,16.52 9.64,18.50 9.25,15.60 8.88,15.28 3.64,16.64 7.57,12.91 7.48,12.19 0.87,9.02 8.18,9.58 8.42,9.24 7.37,5.39 10.63,7.69"/></symbol>
+    <symbol id="i-sun.min" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.3"/><path d="M12 4v2m0 12v2M4 12h2m12 0h2M6.4 6.4l1.5 1.5m8.2 8.2 1.5 1.5m0-11.2-1.5 1.5m-8.2 8.2-1.5 1.5"/></symbol>
+    <symbol id="i-speaker.fill" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M6 9h3l5.8-5v16L9 15H6a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2z"/></symbol>
+    <symbol id="i-speaker.wave.1.fill" viewBox="0 0 24 24"><use href="#i-speaker.fill"/><path d="M18 8.5a5.4 5.4 0 0 1 0 7"/></symbol>
+    <symbol id="i-speaker.wave.3.fill" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M2 9h3l5-4v14l-5-4H2a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z"/><path d="M12.8 9.5a4.2 4.2 0 0 1 0 5m2.4-7.5a7.7 7.7 0 0 1 0 10m2.5-12.5a11 11 0 0 1 0 15"/></symbol>
+    <symbol id="i-app.fill" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="5" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-tray.full.fill" viewBox="0 0 24 24"><path d="M7 4h10m-13 4h16m-17 4 2.5-2h13l2.5 2v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path fill="currentColor" stroke="none" d="M3 13h5l2 2h4l2-2h5v6H3z"/></symbol>
+    <symbol id="i-gearshape.2.fill" viewBox="0 0 24 24"><path d="m11 4 2-1 2 2 2-.3 1.5 2.8-1.2 1.6.4 2.5-2.7 1.4-1.4-1-2.2.5-2-2 .5-2.2L9 6zM5 15l2-1 2 1v2l1 1-1 2H7l-1 1-2-1v-2l-1-1 1-2z"/><circle cx="13.7" cy="8" r="1.45"/><path d="M6.6 17.7h.1"/></symbol>
+    <symbol id="i-battery.100" viewBox="0 0 24 24"><rect x="1.3" y="6.5" width="19.4" height="11" rx="2.7"/><path d="M23 10v4"/><rect x="3.8" y="9" width="14.6" height="6" rx="1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-chevron.down" viewBox="0 0 24 24"><path d="m6.5 9.5 5.5 5 5.5-5"/></symbol>
+  </defs>
+</svg>

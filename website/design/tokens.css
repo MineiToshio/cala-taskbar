@@ -1,0 +1,1154 @@
+/* Cala · v7 aprobada. Inventario de index.html, sin dependencias del prototipo.
+   CSS literal por contexto y nombres para reutilizar tamaños y movimiento en Next.js. */
+
+/* Marca, fondos, superficies, texto y estados para toda la página. */
+
+:root {
+  --navy: #1c2944;
+  --navy-deep: #10192b;
+  --mint: #8de4cd;
+  --bg: #0d1421;
+  --surface: #131e2f;
+  --card: #19263a;
+  --raised: #223148;
+  --text: #f2f7ff;
+  --muted: #b6c5d9;
+  --accent: var(--mint);
+  --accent-ink: #102a25;
+  --accent-surface: #1e3e3c;
+  --line: #324157;
+  --control-line: #647997;
+  --scene: #1b2b42;
+  --scene-line: #253750;
+  --material: rgba(17, 27, 44, .91);
+  --warm: #ffca8b;
+  --warm-surface: #392f28;
+  --sky-top: #10192b;
+  --sky-bottom: #1c2944;
+  --ridge-light: #305363;
+  --ridge-mid: #233d55;
+  --ridge-dark: #16273f;
+  --ridge-deep: #101b31;
+  --window-base: #172234;
+  --window-side: #1e2d43;
+  --window-line: #3e5068;
+  --window-ink: #edf4ff;
+  --window-muted: #b2c3da;
+  --window-border: #8299b366;
+}
+
+/* Pilas tipográficas locales. Sin descargas de fuentes. */
+
+:root {
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* Escala de espacios y límites de la rejilla. */
+
+:root {
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+  --s8: 64px;
+  --s9: 96px;
+  --wrap: 1232px;
+  --gutter: clamp(16px, 4vw, 48px);
+  --section: clamp(64px, 8vw, 120px);
+}
+
+/* Radios base para controles, tarjetas y ventanas. */
+
+:root {
+  --r-control: 8px;
+  --r-card: 12px;
+  --r-window: 20px;
+}
+
+/* Sombras de página y escritorio. */
+
+:root {
+  --shadow: 0 14px 38px #080e1990;
+  --desktop-shadow: 0 1px 1px #02081278, 0 18px 36px #060d22a0, 0 44px 90px #060d2260;
+}
+
+/* Sobrescrituras del esquema claro · color. */
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f7fb;
+    --surface: #eaf0f7;
+    --card: #fff;
+    --raised: #e1eaf4;
+    --text: #142238;
+    --muted: #425570;
+    --accent: #146753;
+    --accent-ink: #fff;
+    --accent-surface: #d7efe7;
+    --line: #bdccdf;
+    --control-line: #7186a0;
+    --scene: #d6e3f2;
+    --scene-line: #c9d9ec;
+    --material: rgba(243, 248, 254, .93);
+    --warm: #783e08;
+    --warm-surface: #faecda;
+    --sky-top: #e9f0fa;
+    --sky-bottom: #dce7f4;
+    --ridge-light: #b9ddd9;
+    --ridge-mid: #b2c8dd;
+    --ridge-dark: #a7bbd2;
+    --ridge-deep: #9bb0c7;
+    --window-base: #f8fbff;
+    --window-side: #e8eff8;
+    --window-line: #d0dceb;
+    --window-ink: #182940;
+    --window-muted: #455a73;
+    --window-border: #718aaf9c;
+  }
+}
+
+/* Sobrescrituras del esquema claro · elevation. */
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --shadow: 0 14px 38px #425e8533;
+    --desktop-shadow: 0 1px 1px #23395633, 0 18px 36px #3d5d7d4d, 0 44px 90px #3d5d7d35;
+  }
+}
+
+/* Contextos del escritorio, temas y escenas. Mantener el orden de cascada. */
+
+[data-theme="system"] {
+  --bar-start: #344257;
+  --bar-end: #182438;
+  --theme-accent: #0A84FF;
+}
+
+[data-theme="graphite"] {
+  --bar-start: #2B2D31;
+  --bar-end: #1E1F22;
+  --theme-accent: #5B9DFF;
+}
+
+[data-theme="midnight"] {
+  --bar-start: #141B3A;
+  --bar-end: #0B1026;
+  --theme-accent: #7C9CFF;
+}
+
+[data-theme="ocean"] {
+  --bar-start: #0E7490;
+  --bar-end: #1D4ED8;
+  --theme-accent: #7DF9FF;
+}
+
+[data-theme="sunset"] {
+  --bar-start: #F97316;
+  --bar-end: #DB2777;
+  --theme-accent: #FFF1B8;
+}
+
+[data-theme="forest"] {
+  --bar-start: #14532D;
+  --bar-end: #365314;
+  --theme-accent: #A3E635;
+}
+
+[data-theme="lavender"] {
+  --bar-start: #7C3AED;
+  --bar-end: #C026D3;
+  --theme-accent: #F5D0FE;
+}
+
+[data-theme="candy"] {
+  --bar-start: #FBCFE8;
+  --bar-end: #BAE6FD;
+  --theme-accent: #DB2777;
+}
+
+[data-theme="snow"] {
+  --bar-start: #F8FAFC;
+  --bar-end: #E2E8F0;
+  --theme-accent: #2563EB;
+}
+
+:is(.desktop, .feature-stage) {
+  --bar-text: #fcfdff;
+  --bar-subtle: #e9f1ff;
+  --bar-hover: #ffffff1f;
+  --bar-start-ink: var(--theme-accent);
+}
+
+.desktop {
+  --wall-haze: var(--mint);
+  --bar-height: 48px;
+  --bar-gutter: clamp(12px, 2.4vw, 40px);
+}
+
+.tile-files {
+  --tile-top: #3d9dd2;
+  --tile-bottom: #195881;
+}
+
+.tile-notes {
+  --tile-top: #ffe29d;
+  --tile-bottom: #e4b45e;
+}
+
+.tile-browser {
+  --tile-top: #758dec;
+  --tile-bottom: #364a8b;
+}
+
+.tile-terminal {
+  --tile-top: #3b5263;
+  --tile-bottom: #182834;
+}
+
+[data-theme="system"] {
+  --bar-paint: linear-gradient(90deg, #142033eb, #1c2a3beb);
+  --bar-start-ink: #63b2ff;
+}
+
+[data-theme="system"].desktop {
+  --wall-haze: var(--mint);
+}
+
+.desktop:not([data-theme="system"]), .feature-stage {
+  --wall-haze: var(--theme-accent);
+}
+
+[data-theme="ocean"] {
+  --bar-paint: linear-gradient(#071a2c24,#071a2c24), linear-gradient(90deg, var(--bar-start), var(--bar-end));
+}
+
+[data-theme="sunset"] {
+  --bar-paint: linear-gradient(90deg,#29122669 20%,transparent 34% 66%,#29122669 78%), linear-gradient(90deg, var(--bar-start), var(--bar-end));
+  --bar-subtle: #fff5f2;
+}
+
+[data-theme="lavender"] {
+  --bar-paint: linear-gradient(#21123829, #21123829), linear-gradient(90deg,var(--bar-start),var(--bar-end));
+}
+
+:is([data-theme="candy"], [data-theme="snow"]) {
+  --bar-text: #17233a;
+  --bar-subtle: #30445d;
+  --bar-hover: #12254014;
+  --panel-base: #fff;
+  --panel-ink: #17233a;
+  --panel-muted: #43546d;
+  --panel-surface-ink: #1e2f48;
+  --panel-accent-ink: #1b48ac;
+  --panel-warm-ink: #783e08;
+  --panel-warm-bg: #f8e8d3;
+}
+
+[data-theme="candy"] {
+  --panel-accent-ink: #9d174d;
+  --bar-start-ink: #881146;
+}
+
+[data-theme="snow"] {
+  --bar-start-ink: #1b47a0;
+}
+
+@media (prefers-color-scheme: light) {
+  [data-theme="system"] {
+    --bar-start: #f4f8ff;
+    --bar-end: #d4e0ee;
+    --theme-accent: #007aff;
+    --bar-paint: linear-gradient(90deg, #f5f8fdeb, #e4edf7ed);
+    --bar-text: #142238;
+    --bar-subtle: #3c4e66;
+    --bar-hover: #26395715;
+    --bar-start-ink: #0a56b7;
+    --panel-base: #fff;
+    --panel-ink: #17233a;
+    --panel-muted: #43546d;
+    --panel-surface-ink: #1e2f48;
+    --panel-accent-ink: #174cab;
+    --panel-warm-ink: #783e08;
+    --panel-warm-bg: #f8e8d3;
+  }
+}
+
+.demo-popover, .feature-stage {
+  --text: var(--panel-ink, #f5f7ff);
+  --muted: var(--panel-muted, #c2cddd);
+  --accent: var(--panel-accent-ink, color-mix(in srgb, var(--theme-accent) 68%, #fff));
+  --card: color-mix(in srgb, var(--panel-base, #25272d) 92%, var(--bar-start));
+  --surface: color-mix(in srgb, var(--card) 92%, var(--text));
+  --raised: color-mix(in srgb, var(--card) 84%, var(--text));
+  --accent-surface: color-mix(in srgb, var(--card) 84%, var(--theme-accent));
+  --line: color-mix(in srgb, var(--card) 76%, var(--text));
+  --control-line: color-mix(in srgb, var(--card) 54%, var(--text));
+  --warm: var(--panel-warm-ink, #ffd18f);
+  --warm-surface: var(--panel-warm-bg, #42332a);
+  --shadow: var(--desktop-shadow);
+}
+
+.preview-art[data-art="terminal"] {
+  --text: #f1faf6;
+  --muted: #b4efdb;
+  --line: #466270;
+}
+
+.mock-slider i, .mock-slider::after, .meter i, .spark {
+  --accent: var(--theme-accent);
+}
+
+.taskbar .task-app:nth-child(3) {
+  --sequence: 35ms;
+}
+
+.taskbar .task-app:nth-child(4) {
+  --sequence: 70ms;
+}
+
+.taskbar .task-app:nth-child(5) {
+  --sequence: 105ms;
+}
+
+@media (max-width: 767px) {
+  .desktop-background .landscape {
+    --shore-opacity: .25;
+  }
+}
+
+@media (max-width: 640px) {
+  .desktop {
+    --bar-height: 85px;
+  }
+}
+
+@media (max-width: 640px) {
+  .desktop[data-theme="sunset"] {
+    --bar-paint: linear-gradient(#29122669,#29122669), linear-gradient(90deg,var(--bar-start),var(--bar-end));
+  }
+}
+
+.desktop {
+  --bar-height: 66px;
+  --dock-ink: #fff;
+}
+
+.demo-dock {
+  --dock-edge: var(--bar-gutter);
+  --dock-pane: color-mix(in srgb,var(--sky-top) 94%,var(--window-base));
+}
+
+:is(.desktop, .feature-stage) {
+  --quota-ok: #65d5aa;
+  --quota-warn: #ffb340;
+  --quota-low: #ff6961;
+  --quota-warn-ink: #ffb340;
+  --quota-low-ink: #ff8580;
+  --status-surface: #2f2326;
+  --disk-free: #728197;
+  --disk-purgeable: color-mix(in srgb,var(--accent) 48%, var(--card));
+  --bar-focus: var(--mint);
+}
+
+:is(.desktop, .feature-stage):is([data-theme="candy"], [data-theme="snow"]) {
+  --quota-ok: #147d59;
+  --quota-warn: #c77700;
+  --quota-low: #d70015;
+  --quota-warn-ink: #824800;
+  --quota-low-ink: #b01322;
+  --status-surface: #fff2dc;
+  --disk-free: #9aa8bb;
+  --bar-focus: #146753;
+}
+
+@media (prefers-color-scheme: light) {
+  :is(.desktop, .feature-stage)[data-theme="system"] {
+    --quota-ok: #147d59;
+    --quota-warn: #c77700;
+    --quota-low: #d70015;
+    --quota-warn-ink: #824800;
+    --quota-low-ink: #b01322;
+    --status-surface: #fff2dc;
+    --disk-free: #9aa8bb;
+    --bar-focus: #146753;
+  }
+}
+
+.state-ok {
+  --state-paint: var(--quota-ok);
+  --state-ink: var(--text);
+}
+
+:is(.state-warning, .status-warning) {
+  --state-paint: var(--quota-warn);
+  --state-ink: var(--quota-warn-ink);
+}
+
+:is(.state-critical, .status-critical) {
+  --state-paint: var(--quota-low);
+  --state-ink: var(--quota-low-ink);
+}
+
+.demo-dock {
+  --panel-gap: 6px;
+}
+
+.desktop[data-theme="sunset"] {
+  --bar-paint: linear-gradient(#29122679,#29122679), linear-gradient(90deg,var(--bar-start),var(--bar-end));
+}
+
+.desktop[data-theme="lavender"] {
+  --bar-hover: #ffffff0e;
+}
+
+@media (min-width: 1350px) {
+  .desktop[data-theme="sunset"] {
+    --bar-paint: linear-gradient(90deg,#29122679 22%,transparent 28% 43%,#29122679 55%), linear-gradient(90deg,var(--bar-start),var(--bar-end));
+  }
+}
+
+@media (max-width: 820px) and (min-width: 768px) {
+  .taskbar {
+    --bar-gutter: 12px;
+  }
+}
+
+@media (max-width: 767px) {
+  .desktop {
+    --bar-height: 99px;
+    --bar-gutter: 10px;
+  }
+}
+
+@media (min-width: 768px) {
+  .desktop {
+    --dock-gap: clamp(9px,calc(2vh - 5px),13px);
+  }
+}
+
+.desktop {
+  --bar-warn-paint: #ffcc72;
+  --bar-warn-ink: #fff0c9;
+  --bar-low-paint: #ffb5ae;
+  --bar-low-ink: #ffe2df;
+}
+
+.desktop:is([data-theme="candy"], [data-theme="snow"]) {
+  --bar-warn-paint: #754200;
+  --bar-warn-ink: #673600;
+  --bar-low-paint: #a30c20;
+  --bar-low-ink: #a30c20;
+}
+
+@media (prefers-color-scheme: light) {
+  .desktop[data-theme="system"] {
+    --bar-warn-paint: #754200;
+    --bar-warn-ink: #673600;
+    --bar-low-paint: #a30c20;
+    --bar-low-ink: #a30c20;
+  }
+}
+
+.taskbar :is(.state-warning, .status-warning) {
+  --state-paint: var(--bar-warn-paint);
+  --state-ink: var(--bar-warn-ink);
+}
+
+.taskbar :is(.state-critical, .status-critical) {
+  --state-paint: var(--bar-low-paint);
+  --state-ink: var(--bar-low-ink);
+}
+
+@media (max-width: 767px) {
+  .desktop {
+    --bar-gutter: 8px;
+  }
+}
+
+@media (max-width: 767px) {
+  .demo-popover[data-side="apps"] {
+    --panel-width: 390px;
+  }
+}
+
+@media (max-width: 767px) {
+  .demo-popover[data-side="switcher"] {
+    --panel-width: 420px;
+  }
+}
+
+.hero-windows .mock-window {
+  --demo-window-width: min(85cqw, 420px);
+  --demo-window-max-x: max(0px, calc(100cqw - var(--demo-window-width)));
+}
+
+.hero-windows .mock-window[data-maximized] {
+  --demo-window-width: 100cqw;
+}
+
+@media (max-width: 767px) {
+  .hero-windows .mock-window {
+    --demo-window-width: 100cqw;
+  }
+}
+
+.lower-scene.feature-stage {
+  --lower-desk: color-mix(in srgb, var(--bar-start) 54%, var(--sky-top));
+}
+
+.lower-terminal-window {
+  --lower-console: #111a29;
+  --lower-console-chrome: #223148;
+  --lower-console-ink: #f0f6ff;
+  --lower-console-accent: #8de4cd;
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="system"] {
+  --theme-name-en: "System";
+  --theme-name-es: "Sistema";
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="graphite"] {
+  --theme-name-en: "Graphite";
+  --theme-name-es: "Grafito";
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="midnight"] {
+  --theme-name-en: "Midnight";
+  --theme-name-es: "Medianoche";
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="ocean"] {
+  --theme-name-en: "Ocean";
+  --theme-name-es: "Océano";
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="sunset"] {
+  --theme-name-en: "Sunset";
+  --theme-name-es: "Atardecer";
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="forest"] {
+  --theme-name-en: "Forest";
+  --theme-name-es: "Bosque";
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="lavender"] {
+  --theme-name-en: "Lavender";
+  --theme-name-es: "Lavanda";
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="candy"] {
+  --theme-name-en: "Candy";
+  --theme-name-es: "Chicle";
+}
+
+/* Etiquetas localizadas del diccionario. */
+
+[data-theme="snow"] {
+  --theme-name-en: "Snow";
+  --theme-name-es: "Nieve";
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+:root {
+  --layout-body-background: var(--bg);
+  --layout-body-color: var(--text);
+  --layout-heading-color: var(--text);
+  --layout-focus-outline: 2px solid var(--accent);
+  --layout-focus-outline-offset: 4px;
+  --layout-header-inner-min-height: 64px;
+  --layout-header-inner-row-gap: clamp(16px, 3vw, 36px);
+  --layout-header-inner-column-gap: clamp(16px, 3vw, 36px);
+  --layout-specs-color: var(--muted);
+  --layout-button-gap: var(--s2);
+  --layout-button-min-height: 42px;
+  --layout-button-border: 1px solid var(--control-line);
+  --layout-button-background: var(--raised);
+  --layout-button-color: var(--text);
+  --layout-demo-caption-row-gap: 8px;
+  --layout-demo-caption-column-gap: 8px;
+  --layout-demo-caption-color: var(--text);
+  --layout-window-title-row-gap: 8px;
+  --layout-window-title-column-gap: 8px;
+  --layout-window-title-min-height: 36px;
+  --layout-window-title-background: var(--window-side);
+  --layout-window-title-color: var(--window-ink);
+  --layout-bar-row-gap: 8px;
+  --layout-bar-column-gap: 8px;
+  --layout-bar-border-top: 1px solid var(--control-line);
+  --layout-bar-background: var(--material);
+  --layout-bar-backdrop-filter: blur(18px);
+  --layout-tray-reading-color: inherit;
+  --layout-flyout-max-width: calc(100% - 2 * var(--bar-gutter));
+  --layout-flyout-border: 1px solid var(--line);
+  --layout-flyout-background: var(--card);
+  --layout-flyout-backdrop-filter: none;
+  --layout-flyout-box-shadow: 0 1px 0 #f4f9ff1f inset, var(--shadow);
+  --layout-flyout-tray-width: min(382px,calc(100% - 2 * var(--bar-gutter)));
+  --layout-panel-width: min(100%, 350px);
+  --layout-panel-min-width: 0px;
+  --layout-panel-color: var(--text);
+  --layout-panel-border: 1px solid var(--control-line);
+  --layout-panel-background: var(--card);
+  --layout-panel-box-shadow: var(--shadow);
+  --layout-copy-feedback-max-width: calc(100% - 2 * var(--gutter));
+  --layout-copy-feedback-background: var(--card);
+  --layout-copy-feedback-color: var(--text);
+  --layout-copy-feedback-border: 1px solid var(--accent);
+  --layout-copy-feedback-box-shadow: var(--shadow);
+  --layout-header-background: var(--sky-top);
+  --layout-hero-grid-grid-template-columns: minmax(0px, 1fr) minmax(0px, 1.04fr);
+  --layout-hero-grid-grid-template-rows: auto;
+  --layout-hero-grid-column-gap: clamp(24px, 4vw, 68px);
+  --layout-hero-h1-max-width: 13ch;
+  --layout-hero-h1-es-first-max-width: 4.95em;
+  --layout-hero-lead-max-width: 39ch;
+  --layout-terminal-title-grid-template-columns: 1fr auto 1fr;
+  --layout-terminal-title-min-height: 28px;
+  --layout-terminal-title-background: var(--surface);
+  --layout-terminal-title-color: var(--muted);
+  --layout-terminal-prompt-color: var(--accent);
+  --layout-theme-choice-width: 26px;
+  --layout-theme-choice-height: 26px;
+  --layout-theme-input-width: 100%;
+  --layout-theme-input-height: 100%;
+  --layout-theme-input-opacity: 0;
+  --layout-theme-dot-width: 12px;
+  --layout-theme-dot-height: 12px;
+  --layout-theme-dot-border: 1px solid color-mix(in srgb, var(--text) 56%, transparent);
+  --layout-theme-dot-background: linear-gradient(135deg, var(--bar-start), var(--bar-end));
+  --layout-theme-tooltip-border: 1px solid var(--window-border);
+  --layout-theme-tooltip-background: var(--window-base);
+  --layout-theme-tooltip-color: var(--window-ink);
+  --layout-window-space-min-height: 430px;
+  --layout-demo-window-background: var(--window-base);
+  --layout-demo-window-color: var(--window-ink);
+  --layout-demo-window-border: 1px solid var(--window-border);
+  --layout-demo-window-box-shadow: rgba(7, 21, 38, 0.282) 0px 12px 25px;
+  --layout-window-title-grid-template-columns: 1fr auto 1fr;
+  --layout-demo-caption-max-width: none;
+  --layout-bar-min-height: var(--bar-height);
+  --layout-tray-control-min-width: 39px;
+  --layout-mobile-install-text-color: var(--text);
+  --layout-dock-grid-template-columns: minmax(0px, 1fr) auto;
+  --layout-dock-column-gap: 12px;
+  --layout-demo-caption-width: fit-content;
+  --layout-demo-action-min-height: 32px;
+  --layout-demo-action-background: var(--dock-pane);
+  --layout-tour-cta-color: rgb(16, 25, 43);
+  --layout-tour-cta-background-image: initial;
+  --layout-tour-cta-background-color: rgb(141, 228, 205);
+  --layout-tour-cta-min-height: 42px;
+  --layout-tour-cta-halo-box-shadow: rgba(141, 228, 205, 0.44) 0px 0px 16px;
+  --layout-tour-caption-color: var(--text);
+  --layout-bar-box-shadow: rgba(12, 22, 44, 0.5) 0px -1px 0px, rgba(13, 22, 41, 0.255) 0px -12px 35px;
+  --layout-dock-app-min-width: 52px;
+  --layout-dock-app-min-height: 59px;
+  --layout-dock-start-width: 42px;
+  --layout-dock-tile-width: 34px;
+  --layout-dock-tile-height: 34px;
+  --layout-tray-clock-min-width: 79px;
+  --layout-tray-quota-icon-width: 18px;
+  --layout-tray-quota-icon-height: 18px;
+  --layout-flyout-max-height: min(590px, var(--popover-room, 590px));
+  --layout-flyout-switcher-width: min(568px,calc(100% - 2 * var(--bar-gutter)));
+  --layout-show-desktop-width: 24px;
+  --layout-show-desktop-min-width: 24px;
+  --layout-demo-window-width: var(--demo-window-width);
+  --layout-demo-window-max-height: 100%;
+  --layout-window-ghost-color: var(--window-ink);
+  --layout-window-ghost-background: var(--window-base);
+  --layout-window-ghost-border: 1px solid var(--window-border);
+  --layout-window-ghost-box-shadow: var(--desktop-shadow);
+  --layout-tray-tooltip-max-width: calc(100% - 16px);
+  --layout-tray-tooltip-border: 1px solid var(--line);
+  --layout-tray-tooltip-color: var(--text);
+  --layout-tray-tooltip-background: var(--card);
+  --layout-feature-grid-grid-template-columns: repeat(2, minmax(0px, 1fr));
+  --layout-feature-grid-row-gap: clamp(14px, 2vw, 26px);
+  --layout-feature-grid-column-gap: clamp(14px, 2vw, 26px);
+  --layout-feature-card-grid-template-rows: 1fr auto;
+  --layout-feature-card-min-width: 0px;
+  --layout-feature-card-border: 1px solid var(--line);
+  --layout-feature-card-background: var(--card);
+  --layout-feature-copy-color: var(--muted);
+  --layout-feature-copy-max-width: 48ch;
+  --layout-themes-card-grid-template-rows: auto;
+  --layout-themes-card-grid-template-columns: minmax(0px, 1fr) minmax(0px, 1fr);
+  --layout-install-grid-grid-template-columns: minmax(0px, 2fr) minmax(0px, 1fr);
+  --layout-install-grid-row-gap: 18px;
+  --layout-install-grid-column-gap: 18px;
+  --layout-install-light-width: 44px;
+  --layout-install-light-height: 44px;
+  --layout-install-light-border-top-width: 0px;
+  --layout-install-light-background-image: initial;
+  --layout-install-light-background-color: transparent;
+  --layout-install-light-disabled-background-image: initial;
+  --layout-install-light-disabled-background-color: rgb(160, 175, 192);
+  --layout-dmg-grid-grid-template-columns: repeat(3, minmax(0px, 1fr));
+  --layout-dmg-grid-row-gap: 18px;
+  --layout-dmg-grid-column-gap: 18px;
+  --layout-permission-grid-grid-template-columns: minmax(0px, 2fr) minmax(0px, 1fr);
+  --layout-permission-grid-row-gap: 17px;
+  --layout-permission-grid-column-gap: 17px;
+  --layout-permission-copy-color: var(--muted);
+  --layout-faq-grid-grid-template-columns: repeat(2, minmax(0px, 1fr));
+  --layout-faq-grid-row-gap: clamp(14px, 2vw, 24px);
+  --layout-faq-grid-column-gap: clamp(14px, 2vw, 24px);
+}
+
+/* Escala tipográfica extraída de elementos y componentes. */
+
+:root {
+  --type-body-font: 16px/1.55 var(--font);
+  --type-heading-line-height: 1.1;
+  --type-h2-font-size: clamp(32px, 4.1vw, 54px);
+  --type-h2-font-weight: 720;
+  --type-h2-letter-spacing: -0.05em;
+  --type-h3-font-size: 22px;
+  --type-h3-letter-spacing: -0.025em;
+  --type-specs-font-size: 14px;
+  --type-button-font-size: 14px;
+  --type-button-font-weight: 680;
+  --type-button-line-height: 1.2;
+  --type-demo-caption-font-size: 12px;
+  --type-window-title-font-size: 11px;
+  --type-window-title-font-weight: 650;
+  --type-tray-reading-font: 650 11px/1 var(--mono);
+  --type-panel-font-size: 12px;
+  --type-copy-feedback-font-size: 14px;
+  --type-hero-h1-font-size: clamp(54px, 6.4vw, 94px);
+  --type-hero-h1-font-weight: 735;
+  --type-hero-h1-letter-spacing: -0.052em;
+  --type-hero-h1-line-height: 0.97;
+  --type-hero-h1-es-font-size: clamp(50px, 5.7vw, 82px);
+  --type-hero-lead-font-size: clamp(17px, 1.47vw, 21px);
+  --type-hero-lead-line-height: 1.45;
+  --type-terminal-title-font-size: 11px;
+  --type-terminal-title-font-weight: 650;
+  --type-terminal-prompt-font: 700 12px/1.55 var(--mono);
+  --type-theme-tooltip-font-size: 11px;
+  --type-theme-tooltip-line-height: 1.4;
+  --type-tray-control-font-size: 18px;
+  --type-demo-action-font-size: 11px;
+  --type-tour-cta-font-size: 14px;
+  --type-tour-cta-font-weight: 760;
+  --type-tour-caption-font-size: 12px;
+  --type-tour-caption-font-weight: 650;
+  --type-tour-caption-line-height: 1.35;
+  --type-dock-tile-font-size: 19px;
+  --type-tray-clock-font-size: 13px;
+  --type-tray-tooltip-font-size: 11px;
+  --type-feature-copy-font-size: 15px;
+  --type-command-font: 13px/1.55 var(--mono);
+  --type-permission-copy-font-size: 14px;
+}
+
+/* Capas locales. Respetar los contextos de apilamiento. */
+
+:root {
+  --layer-skip-z-index: 5;
+  --layer-bar-z-index: 4;
+  --layer-flyout-z-index: 6;
+  --layer-copy-feedback-z-index: 4;
+  --layer-desktop-background-z-index: -1;
+  --layer-hero-copy-z-index: 1;
+  --layer-hero-actions-terminal-shell-button-z-index: 1;
+  --layer-theme-picker-z-index: 5;
+  --layer-dock-z-index: 2;
+  --layer-tour-cta-halo-z-index: -1;
+  --layer-desktop-data-tour-step-demo-caption-z-index: 7;
+  --layer-tour-cursor-z-index: 9;
+  --layer-bar-fade-z-index: -1;
+  --layer-window-ghost-z-index: 5;
+  --layer-tray-tooltip-z-index: 7;
+  --layer-lower-scene-desk-z-index: -1;
+  --layer-lower-demo-pointer-z-index: 2;
+}
+
+/* Tiempos y curvas declaradas en CSS. */
+
+:root {
+  --motion-bar-animation-duration: 0.4s;
+  --motion-bar-animation-timing-function: ease-out;
+  --motion-bar-animation-delay: 0s;
+  --motion-demo-popover-is-opening-animation-duration: 0.22s;
+  --motion-demo-popover-is-opening-animation-timing-function: cubic-bezier(0.22, 0.8, 0.28, 1);
+  --motion-demo-popover-is-opening-animation-delay: 0s;
+  --motion-button-transition-duration: 0.18s, 0.18s, 0.16s, 0.18s;
+  --motion-button-transition-timing-function: ease, ease, ease, ease;
+  --motion-desktop-transition-duration: 0s;
+  --motion-desktop-transition-timing-function: ease;
+  --motion-dock-app-animation: icon-rise .46s calc(90ms + var(--sequence, 0ms)) cubic-bezier(.22,.8,.28,1) both;
+  --motion-demo-popover-data-initial-is-opening-animation-delay: 260ms;
+  --motion-tour-cta-halo-animation-duration: 4s;
+  --motion-tour-cta-halo-animation-timing-function: ease-in-out;
+  --motion-tour-cta-halo-animation-delay: 1s;
+  --motion-tour-cursor-transition-duration: 0.55s;
+  --motion-tour-cursor-transition-timing-function: cubic-bezier(0.25, 0.8, 0.32, 1);
+  --motion-desktop-data-tour-step-1-tour-cursor-animation-duration: 0.5s;
+  --motion-desktop-data-tour-step-1-tour-cursor-animation-timing-function: cubic-bezier(0.24, 0.76, 0.3, 1);
+  --motion-desktop-data-tour-step-1-tour-cursor-animation-delay: 0s;
+  --motion-theme-picker-transition-duration: 0.16s;
+  --motion-theme-picker-transition-timing-function: ease;
+  --motion-v3-wall-fade-animation-duration: 0.42s;
+  --motion-v3-wall-fade-animation-timing-function: ease;
+  --motion-v3-wall-fade-animation-delay: 0s;
+  --motion-bar-fade-animation-duration: 0.36s;
+  --motion-bar-fade-animation-timing-function: ease;
+  --motion-bar-fade-animation-delay: 0s;
+  --motion-copy-confirmed-icon-animation-duration: 0.24s;
+  --motion-copy-confirmed-icon-animation-timing-function: ease-out;
+  --motion-copy-confirmed-icon-animation-delay: 0s;
+  --motion-hero-copy-animation-duration: 0.54s;
+  --motion-hero-copy-animation-timing-function: cubic-bezier(0.22, 0.72, 0.29, 1);
+  --motion-hero-copy-animation-delay: 0.04s;
+  --motion-window-space-animation-duration: 0.65s;
+  --motion-window-space-animation-timing-function: cubic-bezier(0.22, 0.72, 0.29, 1);
+  --motion-window-space-animation-delay: 0.14s;
+  --motion-demo-dock-demo-caption-animation-duration: 0.48s;
+  --motion-demo-dock-demo-caption-animation-timing-function: ease;
+  --motion-demo-dock-demo-caption-animation-delay: 0.21s;
+  --motion-lower-disclosure-summary-icon-last-child-transition-duration: 0.2s;
+  --motion-lower-disclosure-summary-icon-last-child-transition-timing-function: ease;
+  --motion-lower-disclosure-open-not-summary-animation-duration: 0.24s;
+  --motion-lower-disclosure-open-not-summary-animation-timing-function: ease-out;
+  --motion-lower-disclosure-open-not-summary-animation-delay: 0s;
+  --motion-lower-scene-data-playing-mock-panel-animation-duration: 0.42s;
+  --motion-lower-scene-data-playing-mock-panel-animation-timing-function: cubic-bezier(0.2, 0.7, 0.25, 1);
+  --motion-lower-scene-data-playing-mock-panel-animation-delay: 0.24s;
+  --motion-lower-scene-data-playing-not-data-lower-demo-thumbnails-lower-bar-target-lower-scene-data-playing-data-lower-demo-thumbnails-lower-mini-app-data-lower-app-folder-animation-duration: 0.46s;
+  --motion-lower-scene-data-playing-not-data-lower-demo-thumbnails-lower-bar-target-lower-scene-data-playing-data-lower-demo-thumbnails-lower-mini-app-data-lower-app-folder-animation-timing-function: ease-out;
+  --motion-lower-scene-data-playing-not-data-lower-demo-thumbnails-lower-bar-target-lower-scene-data-playing-data-lower-demo-thumbnails-lower-mini-app-data-lower-app-folder-animation-delay: 0.13s;
+  --motion-lower-scene-data-playing-lower-demo-pointer-animation-duration: 0.6s;
+  --motion-lower-scene-data-playing-lower-demo-pointer-animation-timing-function: ease-out;
+  --motion-lower-scene-data-playing-lower-demo-pointer-animation-delay: 0s;
+  --motion-lower-scene-data-playing-is-meter-i-lower-meter-i-disk-stack-spark-animation-duration: 0.65s;
+  --motion-lower-scene-data-playing-is-meter-i-lower-meter-i-disk-stack-spark-animation-timing-function: cubic-bezier(0.2, 0.7, 0.25, 1);
+  --motion-lower-scene-data-playing-is-meter-i-lower-meter-i-disk-stack-spark-animation-delay: 0.48s;
+  --motion-lower-scene-data-playing-switcher-card-selected-animation-duration: 0.55s;
+  --motion-lower-scene-data-playing-switcher-card-selected-animation-timing-function: ease-out;
+  --motion-lower-scene-data-playing-switcher-card-selected-animation-delay: 0.75s;
+  --motion-lower-scene-data-playing-switcher-card-nth-child-2-animation-duration: 0.27s;
+  --motion-lower-scene-data-playing-switcher-card-nth-child-2-animation-timing-function: ease-out;
+  --motion-lower-scene-data-playing-switcher-card-nth-child-2-animation-delay: 0.5s;
+  --motion-lower-scene-data-playing-is-mock-action-lower-disk-action-animation-duration: 0.7s;
+  --motion-lower-scene-data-playing-is-mock-action-lower-disk-action-animation-timing-function: ease-out;
+  --motion-lower-scene-data-playing-is-mock-action-lower-disk-action-animation-delay: 0.8s;
+  --motion-lower-scene-data-playing-lower-theme-strip-animation-duration: 0.48s;
+  --motion-lower-scene-data-playing-lower-theme-strip-animation-timing-function: ease-out;
+  --motion-lower-scene-data-playing-lower-theme-strip-animation-delay: 0.12s;
+  --motion-lower-scene-data-playing-lower-theme-strip-nth-child-2-animation-delay: 0.3s;
+  --motion-lower-scene-data-playing-lower-theme-strip-nth-child-3-animation-delay: 0.48s;
+  --motion-lower-switch-span-after-transition-duration: 0.18s;
+  --motion-lower-switch-span-after-transition-timing-function: ease;
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (max-width: 767px) {
+  :root {
+    --layout-header-inner-grid-template-columns: 1fr auto;
+    --layout-header-inner-min-height: 0px;
+    --layout-header-inner-gap: var(--s2) var(--s4);
+    --layout-hero-h1-mobile-max-width: none;
+    --layout-hero-lead-max-width: 45ch;
+    --layout-demo-caption-row-gap: 0px;
+    --layout-demo-caption-column-gap: 0px;
+    --layout-demo-caption-max-width: 100%;
+    --layout-window-space-min-height: 292px;
+    --layout-window-title-min-height: 26px;
+    --layout-hero-h1-es-first-max-width: 100%;
+    --layout-window-space-width: calc(100% - 2 * var(--gutter));
+    --layout-dock-grid-template-columns: minmax(0px, 1fr);
+    --layout-demo-action-min-height: 28px;
+    --layout-mobile-install-link-border: 1px solid var(--control-line);
+    --layout-mobile-install-link-background: var(--sky-top);
+    --layout-bar-row-gap: 0px;
+    --layout-bar-column-gap: 0px;
+    --layout-dock-app-min-height: 49px;
+    --layout-dock-app-min-width: 45px;
+    --layout-dock-tile-width: 29px;
+    --layout-dock-tile-height: 29px;
+    --layout-dock-start-min-height: 44px;
+    --layout-dock-start-width: 36px;
+    --layout-tray-control-min-width: 0px;
+    --layout-tray-control-min-height: 41px;
+    --layout-tray-clock-min-width: 0px;
+    --layout-tray-quota-icon-width: 13px;
+    --layout-tray-quota-icon-height: 13px;
+    --layout-flyout-max-height: min(302px, var(--popover-room, 302px), calc(100svh - 445px));
+  }
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (max-width: 640px) {
+  :root {
+    --layout-bar-row-gap: 0px;
+    --layout-bar-column-gap: 0px;
+    --layout-tray-control-min-width: 32px;
+  }
+}
+
+/* Tiempos y curvas declaradas en CSS. */
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-before-after-animation-duration: auto;
+    --motion-before-after-animation-timing-function: ease;
+    --motion-before-after-animation-delay: 0s;
+    --motion-before-after-transition-duration: 0s;
+    --motion-before-after-transition-timing-function: ease;
+  }
+}
+
+/* Escala tipográfica extraída de elementos y componentes. */
+
+@media (min-width: 768px) and (max-width: 1120px) {
+  :root {
+    --type-hero-h1-mobile-font-size: clamp(48px, 6.6vw, 72px);
+  }
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (min-width: 768px) and (max-width: 1120px) {
+  :root {
+    --layout-hero-grid-row-gap: 0px;
+    --layout-hero-grid-column-gap: 25px;
+  }
+}
+
+/* Escala tipográfica extraída de elementos y componentes. */
+
+@media (max-width: 767px) {
+  :root {
+    --type-hero-h1-mobile-font-size: clamp(43px, 9.2vw, 58px);
+    --type-hero-lead-font-size: 14px;
+    --type-demo-caption-font-size: 11px;
+    --type-window-title-font-size: 10px;
+    --type-hero-h1-es-first-font-size: 0.9em;
+    --type-hero-lead-line-height: 1.4;
+    --type-dock-tile-font-size: 16px;
+    --type-tray-control-font-size: 14px;
+    --type-tray-clock-font-size: 11px;
+    --type-tray-reading-font-size: 9px;
+  }
+}
+
+/* Escala tipográfica extraída de elementos y componentes. */
+
+@media (max-width: 640px) {
+  :root {
+    --type-tray-control-font-size: 16px;
+  }
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --layout-mobile-install-text-color: rgb(38, 59, 87);
+  }
+}
+
+/* Escala tipográfica extraída de elementos y componentes. */
+
+@media (max-width: 1050px) and (min-width: 768px) {
+  :root {
+    --type-hero-h1-mobile-font-size: clamp(40px, 6vw, 63px);
+  }
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (max-width: 1050px) and (min-width: 768px) {
+  :root {
+    --layout-tray-control-min-width: 31px;
+    --layout-dock-app-min-width: 43px;
+  }
+}
+
+/* Escala tipográfica extraída de elementos y componentes. */
+
+@media (min-width: 768px) {
+  :root {
+    --type-hero-h1-font-size: clamp(43px, min(6.4vw, -32px + 14vh), 94px);
+    --type-hero-h1-es-font-size: clamp(41px, min(5.7vw, -42.2px + 13.8vh), 82px);
+    --type-hero-lead-font-size: clamp(15px, min(1.47vw, -7.25px + 3.25vh), 21px);
+  }
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (min-width: 768px) {
+  :root {
+    --layout-window-space-min-height: clamp(364px, 133px + 33vh, 430px);
+    --layout-demo-caption-row-gap: clamp(4px, -3px + 1vh, 6px);
+    --layout-demo-caption-column-gap: clamp(4px, -3px + 1vh, 6px);
+  }
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (max-width: 700px) {
+  :root {
+    --layout-feature-grid-grid-template-columns: minmax(0px, 1fr);
+    --layout-themes-card-grid-template-rows: 1fr auto;
+    --layout-themes-card-grid-template-columns: minmax(0px, 1fr);
+  }
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (max-width: 710px) {
+  :root {
+    --layout-permission-grid-grid-template-columns: minmax(0px, 1fr);
+  }
+}
+
+/* Medidas y composición declaradas en CSS. */
+
+@media (max-width: 670px) {
+  :root {
+    --layout-faq-grid-grid-template-columns: minmax(0px, 1fr);
+  }
+}
+
+/* Dimensiones efectivas de la barra y sus paneles. Usar al componer el escritorio. */
+
+:root {
+  --layout-taskbar-desktop-height: 66px;
+  --layout-taskbar-mobile-height: 99px;
+  --layout-flyout-gap: 6px;
+}
+
+/* Umbrales de las media queries. El CSS nativo no admite var() en su condición. */
+
+:root {
+  --breakpoint-max-375: 375px;
+  --breakpoint-max-520: 520px;
+  --breakpoint-max-560: 560px;
+  --breakpoint-max-640: 640px;
+  --breakpoint-max-670: 670px;
+  --breakpoint-max-700: 700px;
+  --breakpoint-max-710: 710px;
+  --breakpoint-max-767: 767px;
+  --breakpoint-max-820: 820px;
+  --breakpoint-max-850: 850px;
+  --breakpoint-max-1050: 1050px;
+  --breakpoint-max-1120: 1120px;
+  --breakpoint-min-768: 768px;
+  --breakpoint-min-1350: 1350px;
+}
+
+/* Comportamientos y umbrales del JavaScript. Los umbrales son porcentajes enteros. */
+
+:root {
+  --behavior-minimize-duration: 400ms;
+  --behavior-minimize-easing: cubic-bezier(.55,.02,.41,1);
+  --behavior-flyout-duration: 190ms;
+  --behavior-flyout-tour-delay: 220ms;
+  --behavior-cursor-press-duration: 230ms;
+  --behavior-tour-approach: 530ms;
+  --behavior-tour-hold: 2300ms;
+  --behavior-tour-mobile-claude: 1000ms;
+  --behavior-tour-mobile-codex: 1300ms;
+  --behavior-tooltip-delay: 250ms;
+  --behavior-disk-warning-threshold: 20;
+  --behavior-disk-critical-threshold: 10;
+  --behavior-quota-warning-threshold: 25;
+  --behavior-quota-critical-threshold: 10;
+}
+
+/* Fotogramas y propiedad interpolable del fondo. */
+
+@property --wall-haze { syntax: "<color>"; inherits: true; initial-value: #8de4cd; }
+
+@keyframes taskbar-in { 
+  0% { opacity: 0.65; transform: translateY(5px); }
+  100% { opacity: 1; transform: translateY(0px); }
+}
+
+@keyframes reveal { 
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0px); }
+}
+
+@keyframes icon-rise { 
+  0% { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes panel-rise { 
+  0% { opacity: 0; transform: translateY(8px); }
+}
+
+@keyframes tour-invite { 
+  0%, 100% { opacity: 0.15; transform: scale(1); }
+  42% { opacity: 0.9; transform: scale(1.022); }
+}
+
+@keyframes theme-fade { 
+  100% { opacity: 0; }
+}
+
+@keyframes check-in { 
+  0% { opacity: 0; transform: scale(0.65); }
+}
+
+@keyframes cursor-approach { 
+  0% { opacity: 0; transform: translate3d(calc(var(--cursor-x) + 44px),calc(var(--cursor-y) - 46px),0); }
+}
+
+@keyframes hero-rise { 
+  0% { opacity: 0; transform: translateY(10px); }
+}
+
+@keyframes task-invite { 
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-4px) scale(1.15); }
+}
+
+@keyframes lower-disclose { 
+  0% { opacity: 0; translate: 0px -4px; }
+}
+
+@keyframes lower-panel { 
+  0% { opacity: 0; translate: 0px 9px; }
+}
+
+@keyframes lower-pointer { 
+  0% { opacity: 0; translate: 36px -38px; }
+  50% { opacity: 1; translate: 0px; }
+}
+
+@keyframes lower-measure { 
+  0% { scale: 0 1; }
+}
+
+@keyframes lower-highlight { 
+  35% { box-shadow: currentcolor 0px 0px 0px 2px inset; }
+}
