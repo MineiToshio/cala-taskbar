@@ -32,7 +32,8 @@ struct Config: Codable, Equatable {
     var barEnabled = true
     var trayEnabled = true
     var zonesEnabled = false
-    var zonesActivation = "rightClick"
+    /// How zones mode starts during a window drag: "rightClick", "shift" or "both" (default: both, so Shift always works).
+    var zonesActivation = "both"
     var zonesGap: Double = 8
     var zonesEditorGrid = false
 
@@ -138,7 +139,7 @@ extension Config {
         trayEnabled = field(Bool.self, .trayEnabled) ?? trayEnabled
         zonesEnabled = field(Bool.self, .zonesEnabled) ?? zonesEnabled
         zonesActivation = field(String.self, .zonesActivation) ?? zonesActivation
-        if !["rightClick", "shift", "both"].contains(zonesActivation) { zonesActivation = "rightClick"; invalid = true }
+        if !["rightClick", "shift", "both"].contains(zonesActivation) { zonesActivation = "both"; invalid = true }
         zonesGap = clamped(field(Double.self, .zonesGap) ?? zonesGap, 0...40, 8)
         zonesEditorGrid = field(Bool.self, .zonesEditorGrid) ?? zonesEditorGrid
         restoreDockOnQuit = field(Bool.self, .restoreDockOnQuit) ?? restoreDockOnQuit

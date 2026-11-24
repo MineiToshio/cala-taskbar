@@ -7,6 +7,7 @@ final class ModuleRegistry {
 
     let bar: BarModule
     let tray: TrayModule
+    let zones: ZonesModule
     private let store = ConfigStore.shared
     private let thumbnails = ThumbnailWatch()
     private let statusItem = StatusItemController()
@@ -21,9 +22,11 @@ final class ModuleRegistry {
         let bar = BarModule(store: store)
         let tray = TrayModule(store: store, bar: bar)
         bar.tray = tray
+        let zones = ZonesModule(store: store, bar: bar)
         self.bar = bar
         self.tray = tray
-        modules = [.bar: bar, .tray: tray, .switcher: WindowSwitcher.shared]
+        self.zones = zones
+        modules = [.bar: bar, .tray: tray, .switcher: WindowSwitcher.shared, .zones: zones]
     }
 
     func launch(onboardingCompleted: Bool, axTrusted: Bool) {

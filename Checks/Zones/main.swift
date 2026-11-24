@@ -352,6 +352,124 @@ expect("A drag that began after a manual move clears the old snap record",
        records.restoreOnDrag(window, current: snapped, cursorX: 350, initialFrameAX: translated) == nil
        && records.restoreOnDrag(window, current: snapped, cursorX: 350) == nil)
 
+// MARK: Drag gesture state machine
+
+do {
+    let p = CGPoint(x: 100, y: 100)
+    var m = ZoneDragMachine()
+    expect("Activation: unknown config falls back to both",
+           ZoneActivation(config: "nonsense") == .both && ZoneActivation(config: "shift") == .shift)
+    expect("Activation: right-click and Shift permissions per mode",
+           ZoneActivation.rightClick.allowsRightClick && !ZoneActivation.rightClick.allowsShift
+               && ZoneActivation.shift.allowsShift && !ZoneActivation.shift.allowsRightClick
+               && ZoneActivation.both.allowsShift && ZoneActivation.both.allowsRightClick)
+
+    expect("Right click with no press passes through", !m.rightDown() && !m.rightUp())
+    let g1 = m.leftDown(at: p, shift: false, command: false)
+    expect("Left down asks the worker to probe a new generation", g1 == 1 && m.phase == .pressed)
+    expect("Dragging while pressed asks for a move check", m.leftDragged(to: p, shift: false, command: false))
+    expect("Right click before the drag is confirmed passes (text selection, sliders)", !m.rightDown() && !m.rightUp())
+    expect("A stale generation never confirms", !m.confirmDrag(generation: 99) && m.phase == .pressed)
+    expect("Worker confirmation starts the drag", m.confirmDrag(generation: 1) && m.phase == .dragging && !m.zonesMode)
+    expect("Dragging while dragging needs no move check", !m.leftDragged(to: p, shift: false, command: false))
+    expect("First right click is swallowed and turns zones mode on", m.rightDown() && m.zonesMode)
+    expect("Its matching right up is swallowed too", m.rightUp())
+    expect("A later right up without a swallowed down passes", !m.rightUp())
+    expect("Second right click is swallowed and turns zones mode off", m.rightDown() && !m.zonesMode && m.rightUp())
+    _ = m.rightDown(); _ = m.rightUp()
+    let r1 = m.leftUp(at: CGPoint(x: 5, y: 6), shift: false, command: true)
+    expect("Release in zones mode reports a snap with the final point and ⌘",
+           r1 == ZoneDragMachine.Release(generation: 1, point: CGPoint(x: 5, y: 6), zonesMode: true, command: true)
+               && m.phase == .idle && !m.zonesMode)
+
+    _ = m.leftDown(at: p, shift: false, command: false)
+    _ = m.confirmDrag(generation: m.generation)
+    _ = m.rightDown()
+    _ = m.rightDown()
+    let r2 = m.leftUp(at: p, shift: false, command: false)
+    expect("Release after the second right click does not snap", r2?.zonesMode == false)
+    expect("Swallowed right up survives the left release (no orphan up)", m.rightUp())
+
+    _ = m.leftDown(at: p, shift: false, command: false)
+    let r3 = m.leftUp(at: p, shift: false, command: false)
+    expect("Release before the drag was confirmed reports nothing", r3 == nil && !m.confirmDrag(generation: m.generation))
+
+    m.activation = .shift
+    _ = m.leftDown(at: p, shift: false, command: false)
+    _ = m.confirmDrag(generation: m.generation)
+    expect("Shift mode: right click passes through", !m.rightDown() && !m.rightUp())
+    _ = m.leftDragged(to: p, shift: true, command: false)
+    expect("Shift mode: on while Shift is held", m.zonesMode)
+    _ = m.leftDragged(to: p, shift: false, command: false)
+    expect("Shift mode: off when Shift is released", !m.zonesMode)
+    _ = m.leftDragged(to: p, shift: true, command: false)
+    expect("Shift mode: release with Shift held snaps", m.leftUp(at: p, shift: true, command: false)?.zonesMode == true)
+
+    m.activation = .rightClick
+    _ = m.leftDown(at: p, shift: true, command: false)
+    _ = m.confirmDrag(generation: m.generation)
+    expect("Right-click mode: Shift alone does nothing", !m.zonesMode)
+    m.cancel(resetButtons: true)
+
+    m.activation = .both
+    _ = m.leftDown(at: p, shift: true, command: false)
+    _ = m.confirmDrag(generation: m.generation)
+    expect("Both: Shift held at confirmation turns zones mode on", m.zonesMode)
+    _ = m.rightDown(); _ = m.rightUp()
+    _ = m.leftDragged(to: p, shift: false, command: false)
+    expect("Both: the right-click toggle holds after Shift is released", m.zonesMode)
+
+    _ = m.rightDown()
+    m.cancel(resetButtons: false)
+    expect("Cancel goes idle, keeps the pending swallowed right up", m.phase == .idle && !m.zonesMode && m.rightUp())
+    _ = m.leftDown(at: p, shift: false, command: false)
+    _ = m.confirmDrag(generation: m.generation)
+    _ = m.rightDown()
+    m.cancel(resetButtons: true)
+    expect("Cancel after a tap timeout forgets the pending right up", !m.rightUp())
+
+    m.ignoring = true
+    expect("Editor open: presses are ignored", m.leftDown(at: p, shift: false, command: false) == nil && m.phase == .idle)
+    m.ignoring = false
+    let g = m.leftDown(at: p, shift: false, command: false)!
+    m.ignoring = true
+    expect("Editor opening mid-press cancels and blocks confirmation", !m.confirmDrag(generation: g) && m.phase == .idle)
+    m.ignoring = false
+
+    var a = ZoneSpanAnchor()
+    let z1 = UUID(), z2 = UUID()
+    expect("Span: no anchor without ⌘", a.update(command: false, screen: 0, single: z1) == nil)
+    expect("Span: ⌘ anchors the zone chosen then", a.update(command: true, screen: 0, single: z1) == z1)
+    expect("Span: the anchor stays while ⌘ is held", a.update(command: true, screen: 0, single: z2) == z1)
+    expect("Span: the anchor waits for a zone when ⌘ went down outside",
+           { var b = ZoneSpanAnchor(); return b.update(command: true, screen: 0, single: nil) == nil
+               && b.update(command: true, screen: 0, single: z2) == z2 }())
+    expect("Span: another screen re-anchors", a.update(command: true, screen: 1, single: z2) == z2)
+    expect("Span: releasing ⌘ clears it", a.update(command: false, screen: 1, single: z1) == nil)
+
+    let start = CGRect(x: 100, y: 100, width: 800, height: 600)
+    expect("Drag detection: a 3 pt move with the same size is a window move",
+           ZoneWindowFit.isMove(from: start, to: start.offsetBy(dx: 3, dy: 0)))
+    expect("Drag detection: under 3 pt is not",
+           !ZoneWindowFit.isMove(from: start, to: start.offsetBy(dx: 2, dy: 1)))
+    expect("Drag detection: a left-edge resize (origin and size change) is not",
+           !ZoneWindowFit.isMove(from: start, to: CGRect(x: 60, y: 100, width: 840, height: 600)))
+
+    let usableAX = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    let zoneAX = CGRect(x: 720, y: 25, width: 720, height: 875)
+    expect("Fit: a window bigger than the zone starts at the zone's corner, kept inside the screen",
+           near(ZoneWindowFit.place(size: CGSize(width: 900, height: 500), in: zoneAX, usable: usableAX, centered: false),
+                CGRect(x: 540, y: 25, width: 900, height: 500)))
+    expect("Fit: a non-resizable window is centred in the zone",
+           near(ZoneWindowFit.place(size: CGSize(width: 400, height: 300), in: zoneAX, usable: usableAX, centered: true),
+                CGRect(x: 880, y: 312.5, width: 400, height: 300)))
+    expect("Fit: a window taller than the screen keeps its top visible",
+           ZoneWindowFit.place(size: CGSize(width: 400, height: 2000), in: zoneAX, usable: usableAX, centered: true).minY == 25)
+    expect("Fit: app rounding within 2 pt is accepted",
+           ZoneWindowFit.matches(CGRect(x: 720, y: 25, width: 718.5, height: 874), zoneAX)
+               && !ZoneWindowFit.matches(CGRect(x: 720, y: 25, width: 700, height: 875), zoneAX))
+}
+
 // MARK: Store and displays
 
 func checkStore() throws {
