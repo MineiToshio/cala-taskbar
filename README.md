@@ -26,7 +26,7 @@ Free · Source available · No accounts · Nothing leaves your Mac · macOS 14 o
 
 **Your apps, at the bottom.** Click to switch apps, hover to see each window, right-click to pin, open a new window or quit.
 
-**Option + Tab** shows all your windows, not just your apps.
+**Option + Tab** shows all your windows, not just your apps. Type to search them, press W to close one, Q to quit its app, M to minimize or restore it.
 
 **The tray on the right** has Wi‑Fi, Bluetooth, sound, brightness, battery, disk, keyboard, Downloads, Trash, and a clock with your upcoming events and a button to join the video call.
 

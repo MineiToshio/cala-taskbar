@@ -4,11 +4,26 @@ import AppKit
 // MARK: - UI
 
 final class SwitcherModel: ObservableObject {
+    /// Everything collected; `windows` is what the current search shows.
+    @Published var all: [WinRef] = []
     @Published var windows: [WinRef] = []
+    @Published var query = ""
+    /// Once true, letters (including W/Q/M) go to the search instead of acting on the selection.
+    @Published var searching = false
     @Published var images: [CGWindowID: NSImage] = [:]
     @Published var selected = 0
     var icons: [pid_t: NSImage] = [:]
     var onPick: ((Int) -> Void)?
+
+    func refilter(keeping id: CGWindowID? = nil) {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        windows = q.isEmpty ? all : all.filter {
+            $0.title.lowercased().contains(q) || (appNames[$0.pid]?.lowercased().contains(q) ?? false)
+        }
+        if let id, let i = windows.firstIndex(where: { $0.id == id }) { selected = i }
+        else { selected = 0 }
+    }
+    var appNames: [pid_t: String] = [:]
 }
 
 struct SwitcherCard: View {
@@ -17,6 +32,7 @@ struct SwitcherCard: View {
     let image: NSImage?
     let icon: NSImage?
     let selected: Bool
+    var width: CGFloat = SwitcherLayout.maxCardWidth
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -25,12 +41,12 @@ struct SwitcherCard: View {
                 Text(w.title.isEmpty ? tx("Untitled", "Sin título") : w.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
                 Spacer(minLength: 0)
             }
-            .frame(width: 196)
+            .frame(width: width)
             ZStack {
                 if let image { Image(nsImage: image).resizable().scaledToFit().opacity(w.minimized ? 0.55 : 1) }
                 else if let icon { Image(nsImage: icon).resizable().frame(width: 36, height: 36).opacity(0.45) }
             }
-            .frame(width: 196, height: 122)
+            .frame(width: width, height: width * SwitcherLayout.aspect)
             .background(Color.black.opacity(0.12))
             .clipShape(RoundedRectangle(cornerRadius: 7))
         }
@@ -41,19 +57,64 @@ struct SwitcherCard: View {
     }
 }
 
+/// Card sizing: big previews, shrunk only as far as needed to keep the grid inside the screen.
+enum SwitcherLayout {
+    static let maxCardWidth: CGFloat = 360
+    static let aspect: CGFloat = 0.625
+    static let chrome: CGFloat = 16 + 6 + 18   // card padding + header spacing + header height
+    static let footer: CGFloat = 34
+    static let gap: CGFloat = 8
+
+    static func layout(count n: Int, screen: CGSize) -> (cols: Int, width: CGFloat) {
+        let count = max(n, 1)
+        let availW = screen.width * 0.92 - 28, availH = screen.height * 0.85 - 28 - footer
+        var best: (cols: Int, width: CGFloat) = (1, 120)
+        for cols in 1...min(count, 6) {
+            let rows = (count + cols - 1) / cols
+            let byW = (availW - CGFloat(cols - 1) * gap) / CGFloat(cols) - 16
+            let byH = (availH - CGFloat(rows - 1) * gap) / CGFloat(rows) - chrome - 16 + 16
+            let w = min(maxCardWidth, byW, byH / aspect)
+            if w > best.width || (w == best.width && cols > best.cols) { best = (cols, w) }
+        }
+        return best
+    }
+}
+
 struct SwitcherView: View {
     @ObservedObject var sm: SwitcherModel
     var body: some View {
-        let cols = Array(repeating: GridItem(.fixed(214), spacing: 8), count: min(max(sm.windows.count, 1), 5))
-        LazyVGrid(columns: cols, spacing: 8) {
+        let size = (NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main)?.frame.size ?? CGSize(width: 1440, height: 900)
+        let lay = SwitcherLayout.layout(count: sm.windows.count, screen: size)
+        let cols = Array(repeating: GridItem(.fixed(lay.width + 16), spacing: SwitcherLayout.gap), count: lay.cols)
+        LazyVGrid(columns: cols, spacing: SwitcherLayout.gap) {
             ForEach(Array(sm.windows.enumerated()), id: \.offset) { i, w in
-                SwitcherCard(w: w, image: sm.images[w.id], icon: sm.icons[w.pid], selected: i == sm.selected)
+                SwitcherCard(w: w, image: sm.images[w.id], icon: sm.icons[w.pid], selected: i == sm.selected, width: lay.width)
                     .onTapGesture { sm.onPick?(i) }
             }
         }
         .padding(14)
+        .padding(.bottom, SwitcherLayout.footer)
+        .overlay(alignment: .bottom) { SwitcherFooter(sm: sm).padding(.bottom, 10).padding(.horizontal, 14) }
         .themedPanel(radius: 18)
         .fixedSize()
+    }
+}
+
+struct SwitcherFooter: View {
+    @ObservedObject var sm: SwitcherModel
+    var body: some View {
+        HStack(spacing: 8) {
+            if sm.searching || !sm.query.isEmpty {
+                Image(systemName: "magnifyingglass").font(.system(size: 11))
+                Text(sm.query.isEmpty ? tx("Type to search…", "Escribe para buscar…") : sm.query).font(.system(size: 12, weight: .medium))
+                if sm.windows.isEmpty { Text(tx("No matches", "Sin resultados")).font(.system(size: 11)).opacity(0.6) }
+            } else {
+                Text(tx("W close · Q quit app · M minimize/restore · type to search", "W cerrar · Q salir de la app · M minimizar/restaurar · escribe para buscar"))
+                    .font(.system(size: 11)).opacity(0.6)
+            }
+        }
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 
@@ -162,15 +223,28 @@ final class WindowSwitcher {
             if active {
                 // Only navigation with the trigger modifier still held belongs to the switcher; after its
                 // release (commit pending while the list is collected) every key reaches the app.
-                guard !pendingCommit, flags.contains(trigger), [48, 53, 36, 123, 124, 125, 126].contains(key) else { return false }
+                guard !pendingCommit, flags.contains(trigger) else { return false }
+                let nav = [48, 53, 36, 123, 124, 125, 126].contains(key)
+                // Typed characters (letters, digits, space) and Backspace belong to the switcher too.
+                let typed: String? = nav || key == 51 ? nil : NSEvent(cgEvent: e)?.charactersIgnoringModifiers?.lowercased()
+                let isTyped = typed.map { $0.count == 1 && ($0.first!.isLetter || $0.first!.isNumber || $0 == " " || $0 == "/") } ?? false
+                guard nav || key == 51 || isTyped else { return false }
                 if e.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return true }
                 swallowedKeys.insert(key)
                 let token = generation
+                if key == 51 || isTyped {
+                    let ch = typed
+                    DispatchQueue.main.async {
+                        guard self.active, self.generation == token else { return }
+                        if key == 51 { self.backspace() } else if let ch { self.type(ch) }
+                    }
+                    return true
+                }
                 DispatchQueue.main.async {
                     guard self.active, self.generation == token else { return }
                     switch key {
                     case 48: self.move(flags.contains(.maskShift) ? -1 : 1)
-                    case 53: self.cancel()
+                    case 53: if self.sm.query.isEmpty && !self.sm.searching { self.cancel() } else { self.clearSearch() }
                     case 36: self.commit()
                     case 123, 126: self.move(-1)
                     case 124, 125: self.move(1)
@@ -258,10 +332,14 @@ final class WindowSwitcher {
                 self.collecting = false
                 guard !list.isEmpty else { self.cancel(); return }
                 log("switcher: open with \(list.count) windows")
+                self.sm.query = ""; self.sm.searching = false
+                self.sm.all = list
                 self.sm.windows = list
                 self.sm.selected = list.count > 1 ? (backwards ? list.count - 1 : 1) : 0
                 self.move(self.pendingMove)
                 self.sm.images = list.reduce(into: [:]) { if let i = ThumbCache.shared.cached($1.id) { $0[$1.id] = i } }
+                self.sm.appNames = Dictionary(list.map { $0.pid }.reduce(into: Set<pid_t>()) { $0.insert($1) }.compactMap { pid in
+                    NSRunningApplication(processIdentifier: pid)?.localizedName.map { (pid, $0) } }, uniquingKeysWith: { a, _ in a })
                 self.sm.icons = Dictionary(list.map { $0.pid }.reduce(into: Set<pid_t>()) { $0.insert($1) }.compactMap { pid in
                     NSRunningApplication(processIdentifier: pid)?.icon.map { (pid, $0) } }, uniquingKeysWith: { a, _ in a })
                 if self.pendingCommit { self.commit(); return }
@@ -291,6 +369,75 @@ final class WindowSwitcher {
         panel.orderOut(nil)
         log("switcher: pick #\(sm.selected)")
         if sm.windows.indices.contains(sm.selected) { WindowService.raise(sm.windows[sm.selected]) }
+    }
+
+    // MARK: search and window actions
+
+    private func type(_ ch: String) {
+        if ch == "/" { if sm.query.isEmpty { sm.searching = true; resizeSoon() }; return }
+        if !sm.searching && sm.query.isEmpty, let cmd = ["w": Action.close, "q": .quit, "m": .minimize][ch] {
+            perform(cmd); return
+        }
+        sm.searching = true
+        sm.query += ch
+        sm.refilter()
+        resizeSoon()
+    }
+
+    private func backspace() {
+        guard !sm.query.isEmpty else { return }
+        sm.query.removeLast()
+        if sm.query.isEmpty { sm.searching = false }
+        sm.refilter()
+        resizeSoon()
+    }
+
+    private func clearSearch() {
+        sm.query = ""; sm.searching = false
+        sm.refilter()
+        resizeSoon()
+    }
+
+    private enum Action { case close, quit, minimize }
+
+    private func perform(_ a: Action) {
+        guard sm.windows.indices.contains(sm.selected) else { return }
+        let w = sm.windows[sm.selected]
+        switch a {
+        case .close:
+            DispatchQueue.global(qos: .userInitiated).async { WindowService.close(w) }
+            remove { $0.id == w.id }
+        case .quit:
+            NSRunningApplication(processIdentifier: w.pid)?.terminate()
+            remove { $0.pid == w.pid }
+        case .minimize:
+            guard let ax = w.ax else { return }
+            let flipped = WinRef(id: w.id, title: w.title, minimized: !w.minimized, ax: ax, pid: w.pid)
+            if w.minimized {
+                AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            } else {
+                WindowService.minimize(w)
+            }
+            if let i = sm.all.firstIndex(where: { $0.id == w.id }) { sm.all[i] = flipped }
+            if let i = sm.windows.firstIndex(where: { $0.id == w.id }) { sm.windows[i] = flipped }
+        }
+    }
+
+    /// Drops windows from the list right away; the selection stays on the next card.
+    private func remove(_ gone: (WinRef) -> Bool) {
+        let at = sm.selected
+        sm.all.removeAll(where: gone)
+        sm.windows.removeAll(where: gone)
+        if sm.windows.isEmpty && sm.query.isEmpty { cancel(); return }
+        sm.selected = min(at, max(sm.windows.count - 1, 0))
+        resizeSoon()
+    }
+
+    private func resizeSoon() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.active else { return }
+            self.show()
+        }
     }
 
     private func cancel() {

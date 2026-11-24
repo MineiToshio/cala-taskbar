@@ -50,6 +50,7 @@ Nine themes: System (translucent material), Graphite, Midnight, Ocean, Sunset, F
 Like Cmd+Tab, but **per window instead of per app**: two windows of the same editor appear as two cards.
 - Hold **Option** and press **Tab**: a panel with one thumbnail card per window (app icon + title), most recently used first, minimized windows included. The first Tab selects the previous window.
 - Tab / right / down = next; Shift+Tab / left / up = previous; click a card to pick it; Esc cancels; releasing Option opens the selected window. These keys belong to the switcher only while Option is held: plain Tab and anything typed after releasing Option go to the app, even if the window list is still loading.
+- While the switcher is open: **W** closes the selected window, **Q** quits its app, **M** minimizes or restores it (the card stays in the list). **Type** any letters to filter by window title or app name (Backspace edits, Esc clears the search first, then cancels); once a search has started W/Q/M are just letters, and `/` starts a search explicitly so you can look for a name that begins with w, q or m.
 - Optional **Cmd+Tab replacement** (Settings → General → Cambiar de ventana): the app intercepts Cmd+Tab before macOS and shows this switcher instead.
 - Uses the active theme. Needs Accessibility. Up to 20 windows: current-Space windows in front-to-back order first, followed by other windows reported by Accessibility, including minimized windows and windows on other Spaces. Picking one on another Space can switch Spaces.
 

@@ -26,7 +26,7 @@ Gratis · Código visible · Sin cuentas · Nada sale de tu Mac · macOS 14 o m�
 
 **Tus apps, abajo.** Un clic para cambiar de app, pasa el mouse para ver cada ventana y clic derecho para anclar, abrir otra ventana o cerrarla.
 
-**Opción + Tab** te muestra todas tus ventanas, no solo las apps.
+**Opción + Tab** te muestra todas tus ventanas, no solo las apps. Escribe para buscarlas, W para cerrar una, Q para salir de su app, M para minimizar o restaurar.
 
 **La bandeja de la derecha** tiene Wi‑Fi, Bluetooth, sonido, brillo, batería, disco, teclado, descargas, papelera y un reloj con tus próximos eventos y un botón para unirte a la videollamada.
 
