@@ -200,6 +200,19 @@ expect("Editor body moves the smallest zone outside its edge band",
 expect("Editor hits the exposed lower right corner and ignores excluded space",
        editorHit(editArea.maxX, editArea.minY)?.edges == [.right, .bottom]
        && editorHit(editArea.maxX + 1, editArea.midY) == nil)
+let crossing = Zone(rect: rect(0.32, 0.21, 0.08, 0.08), seq: 3)
+let overlapZones = [whole, smaller, crossing]
+let visibleGrip = CGPoint(x: smallFrame.maxX + 6, y: smallFrame.midY)
+let beyondGrip = CGPoint(x: smallFrame.maxX + 7, y: smallFrame.midY)
+expect("Selected handle beats the zone underneath its outer half, within six points only",
+       ZonePicking.editorHit(at: visibleGrip, zones: overlapZones, usable: editArea)?.zone.id == crossing.id
+       && ZonePicking.editorHit(at: visibleGrip, zones: overlapZones, usable: editArea, selectedID: smaller.id)?.edges == .right
+       && ZonePicking.editorHit(at: visibleGrip, zones: overlapZones, usable: editArea, selectedID: smaller.id)?.zone.id == smaller.id
+       && ZonePicking.editorHit(at: beyondGrip, zones: overlapZones, usable: editArea, selectedID: smaller.id)?.zone.id == crossing.id)
+let offCanvasGrip = CGPoint(x: editArea.minX - 5, y: editArea.maxY + 5)
+expect("Selected screen-corner handle works from its part outside the usable area",
+       ZonePicking.editorHit(at: offCanvasGrip, zones: [whole], usable: editArea, selectedID: whole.id)?.edges == [.left, .top]
+       && ZonePicking.editorHit(at: offCanvasGrip, zones: [whole], usable: editArea) == nil)
 let (offsetResize, _) = ZoneSnapping.resize(editable, edges: [.left, .bottom], by: (0.02, 0.04), others: [],
     grid: false, snapping: false, threshold: threshold, minSize: minimum)
 expect("Handle-band resize applies pointer delta from the original edge",
@@ -288,6 +301,9 @@ expect("Resize accepts a guide exactly one minimum width from the anchor",
 
 let seeded = ZoneTemplates.seedState()
 let newGrid = ZoneTemplates.makeLayout("grid-2x2", name: "Cuadrícula")
+expect("Template names share one English and Spanish table",
+       ZoneTemplates.ids.allSatisfy { ZoneTemplates.name($0) != ZoneTemplates.name($0, localizedWith: { _, spanish in spanish }) }
+       && ZoneTemplates.name("grid-2x2", localizedWith: { _, spanish in spanish }) == "Cuadrícula 2 × 2")
 expect("A new template layout gets independent IDs, a localized name and complete creation order",
        newGrid.name == "Cuadrícula" && newGrid.template == "grid-2x2" && newGrid.nextSeq == 4
        && newGrid.zones.map(\.rect) == ZoneTemplates.zones("grid-2x2")
@@ -500,17 +516,51 @@ func checkStore() throws {
     let savedEditor = try ZonesStore(fileURL: editorURL)
     expect("Editor save writes the layout and display assignment together",
            savedEditor.state == editorDraft && savedEditor.layout(forDisplay: "editor-monitor")?.id == newID)
-    let savedBytes = try Data(contentsOf: editorURL)
-    do {
-        var stale = editorBase
-        stale.layouts[0].name = "Stale edit"
-        try editorStore.saveEditorDraft(stale, basedOn: editorBase)
-        expect("Editor save rejects a stale draft", false)
-    } catch ZonesStore.SaveError.editorDraftOutdated {
-        let afterRejectedSave = try Data(contentsOf: editorURL)
-        expect("Editor save rejects a stale draft without writing",
-               afterRejectedSave == savedBytes && editorStore.state == editorDraft)
-    }
+    let deletedLayoutID = editorBase.layouts[0].id
+    let editedLayoutID = editorBase.layouts[1].id
+    let externallyEditedID = editorBase.layouts[2].id
+    let externallyDeletedID = editorBase.layouts[3].id
+    try editorStore.setActiveLayout(deletedLayoutID, forDisplay: "externally-reassigned")
+    try editorStore.setActiveLayout(deletedLayoutID, forDisplay: "deleted-layout")
+    try editorStore.setActiveLayout(externallyEditedID, forDisplay: "editor-cleared")
+    let mergeBase = editorStore.state
+    var mergeDraft = mergeBase
+    mergeDraft.layouts[1].name = "Editor rename"
+    mergeDraft.layouts[1].addZone(rect(0.2, 0.2, 0.1, 0.1))
+    let editorNew = ZoneLayout(name: "Editor addition")
+    mergeDraft.layouts.append(editorNew)
+    mergeDraft.delete(deletedLayoutID)
+    mergeDraft.activeByDisplay["editor-monitor"] = editedLayoutID.uuidString
+    mergeDraft.activeByDisplay.removeValue(forKey: "editor-cleared")
+
+    var external = mergeBase.layouts[2]
+    external.name = "External rename"
+    try editorStore.save(external)
+    var sameLayout = mergeBase.layouts[1]
+    sameLayout.name = "Conflicting external rename"
+    try editorStore.save(sameLayout)
+    let externalNew = ZoneLayout(name: "External addition")
+    try editorStore.save(externalNew)
+    try editorStore.delete(externallyDeletedID)
+    try editorStore.setDefaultLayout(externallyEditedID)
+    try editorStore.setActiveLayout(externallyEditedID, forDisplay: "externally-reassigned")
+    try editorStore.setActiveLayout(externallyEditedID, forDisplay: "editor-monitor")
+    try editorStore.setActiveLayout(nil, forDisplay: "external-off")
+    try editorStore.saveEditorDraft(mergeDraft, basedOn: mergeBase)
+
+    let merged = try ZonesStore(fileURL: editorURL).state
+    expect("Editor save merges layout edits, additions and removals against the live state",
+           merged.layouts.first { $0.id == editedLayoutID } == mergeDraft.layouts.first { $0.id == editedLayoutID }
+           && merged.layouts.contains(external) && merged.layouts.contains(externalNew) && merged.layouts.contains(editorNew)
+           && merged.layouts.allSatisfy { $0.id != deletedLayoutID && $0.id != externallyDeletedID })
+    expect("Editor save preserves external assignments except where the editor changed them",
+           merged.defaultLayout == externallyEditedID
+           && merged.activeByDisplay["externally-reassigned"] == externallyEditedID.uuidString
+           && merged.activeByDisplay["editor-monitor"] == editedLayoutID.uuidString
+           && merged.activeByDisplay["external-off"] == ZonesState.off
+           && merged.activeByDisplay["editor-cleared"] == nil && merged.activeByDisplay["deleted-layout"] == nil)
+    try editorStore.saveEditorDraft(mergeBase, basedOn: mergeBase)
+    expect("An unchanged editor draft preserves the live state", editorStore.state == merged)
     let leftDisplay = ZoneDisplayKeys.Display(id: 200, frame: left, key: "display-uuid")
     let rightDisplay = ZoneDisplayKeys.Display(id: 100, frame: right, key: "display-uuid")
     let keys = ZoneDisplayKeys.keys(for: [rightDisplay, leftDisplay])

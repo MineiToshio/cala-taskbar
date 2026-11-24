@@ -4,16 +4,18 @@ enum ZoneTemplates {
     static let ids = ["two-columns", "three-columns", "grid-2x2", "main-side", "side-main", "two-rows",
                       "main-two-stacked", "wide-center"]
 
-    static func name(_ id: String) -> String {
+    static func name(_ id: String) -> String { name(id, localizedWith: { english, _ in english }) }
+
+    static func name(_ id: String, localizedWith localize: (String, String) -> String) -> String {
         switch id {
-        case "two-columns": return "Two columns"
-        case "three-columns": return "Three columns"
-        case "grid-2x2": return "2 × 2 grid"
-        case "main-side": return "Main + side"
-        case "side-main": return "Side + main"
-        case "two-rows": return "Two rows"
-        case "main-two-stacked": return "Main + two stacked"
-        case "wide-center": return "Wide center"
+        case "two-columns": return localize("Two columns", "Dos columnas")
+        case "three-columns": return localize("Three columns", "Tres columnas")
+        case "grid-2x2": return localize("2 × 2 grid", "Cuadrícula 2 × 2")
+        case "main-side": return localize("Main + side", "Principal + lateral")
+        case "side-main": return localize("Side + main", "Lateral + principal")
+        case "two-rows": return localize("Two rows", "Dos filas")
+        case "main-two-stacked": return localize("Main + two stacked", "Principal + dos apiladas")
+        case "wide-center": return localize("Wide center", "Centro ancho")
         default: return id
         }
     }

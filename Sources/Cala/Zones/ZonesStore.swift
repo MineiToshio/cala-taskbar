@@ -2,7 +2,7 @@ import Foundation
 
 /// Owned by the Zones module on its main thread. Each edit is written before it becomes live.
 final class ZonesStore {
-    enum SaveError: Error { case recoveryFailed, editorDraftOutdated }
+    enum SaveError: Error { case recoveryFailed }
 
     let fileURL: URL
     private(set) var state: ZonesState
@@ -41,11 +41,35 @@ final class ZonesStore {
         state.layout(forDisplay: key)
     }
 
-    /// Commits layout edits and display assignments together, without replacing a newer store state.
+    /// Applies only editor changes to the live state, committing layouts and assignments together.
     func saveEditorDraft(_ draft: ZonesState, basedOn original: ZonesState) throws {
         guard draft != original else { return }
-        guard original == state else { throw SaveError.editorDraftOutdated }
-        try commit(draft)
+        let originalLayouts = Dictionary(uniqueKeysWithValues: original.layouts.map { ($0.id, $0) })
+        let draftIDs = Set(draft.layouts.map(\.id))
+        let deleted = Set(originalLayouts.keys).subtracting(draftIDs)
+        let edited = draft.layouts.filter { $0 != originalLayouts[$0.id] }
+        let editsByID = Dictionary(uniqueKeysWithValues: edited.map { ($0.id, $0) })
+
+        var updated = state
+        let currentIDs = Set(state.layouts.map(\.id))
+        updated.layouts = state.layouts.filter { !deleted.contains($0.id) }.map { editsByID[$0.id] ?? $0 }
+        updated.layouts.append(contentsOf: edited.filter { !currentIDs.contains($0.id) })
+
+        let assignmentKeys = Set(original.activeByDisplay.keys).union(draft.activeByDisplay.keys)
+        for key in assignmentKeys where draft.activeByDisplay[key] != original.activeByDisplay[key] {
+            // Layout deletion clears dangling assignments during repair. An external reassignment survives.
+            if draft.activeByDisplay[key] == nil,
+               let originalID = original.activeByDisplay[key].flatMap(UUID.init(uuidString:)),
+               deleted.contains(originalID) { continue }
+            updated.activeByDisplay[key] = draft.activeByDisplay[key]
+        }
+        if draft.defaultLayout != original.defaultLayout {
+            let deletedDefault = original.defaultLayout.map(deleted.contains) ?? false
+            if !deletedDefault || state.defaultLayout == original.defaultLayout {
+                updated.defaultLayout = draft.defaultLayout
+            }
+        }
+        try commit(updated)
     }
 
     @discardableResult

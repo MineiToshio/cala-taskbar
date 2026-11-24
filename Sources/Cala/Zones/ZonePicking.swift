@@ -24,7 +24,41 @@ enum ZonePicking {
         var edges: ZoneSnapping.Edges
     }
 
-    static func editorHit(at point: CGPoint, zones: [Zone], usable: CGRect) -> EditorHit? {
+    struct EditorHandle {
+        static let side: CGFloat = 8
+        static let hitRadius: CGFloat = 6
+        let center: CGPoint
+        let edges: ZoneSnapping.Edges
+    }
+
+    static func editorHandles(in frame: CGRect) -> [EditorHandle] {
+        let positions: [(CGFloat, CGFloat, ZoneSnapping.Edges)] = [
+            (frame.minX, frame.maxY, [.left, .top]),
+            (frame.midX, frame.maxY, .top),
+            (frame.maxX, frame.maxY, [.right, .top]),
+            (frame.minX, frame.midY, .left),
+            (frame.maxX, frame.midY, .right),
+            (frame.minX, frame.minY, [.left, .bottom]),
+            (frame.midX, frame.minY, .bottom),
+            (frame.maxX, frame.minY, [.right, .bottom])
+        ]
+        return positions.map { x, y, edges in
+            EditorHandle(center: CGPoint(x: x, y: y), edges: edges)
+        }
+    }
+
+    static func editorHit(at point: CGPoint, zones: [Zone], usable: CGRect, selectedID: UUID? = nil) -> EditorHit? {
+        if let selectedID, let selected = zones.first(where: { $0.id == selectedID }) {
+            let handles = editorHandles(in: ZoneGeometry.frame(for: selected.rect, in: usable))
+            let nearby = handles.filter {
+                abs(point.x - $0.center.x) <= EditorHandle.hitRadius && abs(point.y - $0.center.y) <= EditorHandle.hitRadius
+            }
+            if let closest = nearby.min(by: {
+                hypot(point.x - $0.center.x, point.y - $0.center.y) < hypot(point.x - $1.center.x, point.y - $1.center.y)
+            }) {
+                return EditorHit(zone: selected, edges: closest.edges)
+            }
+        }
         // Preserve the regular picker at shared edges. Include exposed right and bottom
         // boundaries so handles centered on those edges can still be grabbed.
         let zone = chosen(point, zones: zones, usable: usable) ?? winner(in: zones.filter {
