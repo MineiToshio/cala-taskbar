@@ -109,20 +109,40 @@ final class CalendarService: ObservableObject {
     private var revision = 0            // main only
     private var config: Config?         // main only
     private var observers: [NSObjectProtocol] = []
+    private var runID: UUID? // main only
     private let preview: Bool
 
     init(preview: Bool = false, permission: CalendarPermission = .notRequested,
          calendars: [CalendarChoice] = [], events: [UpcomingEvent] = [], makeStore: @escaping () -> EKEventStore = { EKEventStore() }) {
         self.makeStore = makeStore
         self.preview = preview; self.permission = permission; self.calendars = calendars; self.events = events
-        guard !preview else { return }
+    }
+
+    func start() {
+        guard !preview, runID == nil else { return }
+        let run = UUID()
+        runID = run
         for name in [Notification.Name.EKEventStoreChanged, NSApplication.didBecomeActiveNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.refresh()
+                guard let self, self.runID == run else { return }
+                self.refresh()
             })
         }
     }
-    deinit { observers.forEach { NotificationCenter.default.removeObserver($0) } }
+    func stop() {
+        runID = nil
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+        revision += 1
+        config = nil
+        permission = .notRequested
+        events = []; calendars = []; loading = false; error = nil
+        queue.async {
+            self.eventStore = nil
+            self.requesting = false
+            self.requestError = nil
+        }
+    }
 
     /// Called only from the calendar flyout or its Settings section, including enabling it there.
     func open(config: Config) { load(config: config, mayRequest: true) }
@@ -139,7 +159,7 @@ final class CalendarService: ObservableObject {
     }
     private func load(config: Config, mayRequest: Bool) {
         precondition(Thread.isMainThread)
-        guard !preview else { return }
+        guard let runID else { return }
         self.config = config; revision += 1
         let token = revision
         guard config.calendarEnabled else { events = []; calendars = []; loading = false; error = nil; return }
@@ -157,16 +177,17 @@ final class CalendarService: ObservableObject {
                 self.publish(.requesting, token: token)
                 DispatchQueue.main.async {
                     // Admission is checked on main immediately before the system prompt.
-                    guard self.config?.calendarEnabled == true else {
-                        self.queue.async { self.requesting = false }
+                    guard self.runID == runID, self.config?.calendarEnabled == true else {
+                        self.queue.async { if self.eventStore === store { self.requesting = false } }
                         return
                     }
                     store.requestFullAccessToEvents { [weak self] granted, failure in
                         guard let self else { return }
                         self.queue.async {
+                            guard self.eventStore === store else { return }
                             if granted { store.reset() }
                             self.requesting = false; self.requestError = failure?.localizedDescription
-                            DispatchQueue.main.async { self.refresh() }
+                            DispatchQueue.main.async { if self.runID == runID { self.refresh() } }
                         }
                     }
                 }

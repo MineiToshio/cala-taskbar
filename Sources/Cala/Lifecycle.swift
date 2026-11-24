@@ -145,9 +145,12 @@ enum Uninstaller {
         let fm = FileManager.default
         // 1. Give back what Cala changed in the system.
         if store.config.hideNativeDock { DockControl.setHidden(false, store) }
-        if store.config.hideMenuBar { MenuBarControl.setHidden(false, store) }
-        if !store.config.menuBarHiddenIcons.isEmpty { store.config.menuBarHiddenIcons = []; MenuBarIcons.apply(store) }
-        if store.config.usageClaudeStatusLine { UsageService.shared.removeStatusLineNow() }
+        if store.config.hideMenuBar {
+            if !ModuleRegistry.shared.isRunning(.bar) { MenuBarControl.onBarStop(store) }
+            MenuBarControl.setHidden(false, store)
+        }
+        MenuBarIcons.restoreForTrayStop(store)
+        if store.config.usageClaudeStatusLine { UsageService.shared.removeStatusLineNow(config: store.config) }
         // 2. Stop starting at login and stop the crash watchdog.
         LoginItem.set(false)
         LoginItem.migrateLegacy()

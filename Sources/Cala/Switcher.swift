@@ -121,11 +121,15 @@ struct SwitcherFooter: View {
 // MARK: - Controller + key interception
 
 /// Window switcher (Option+Tab, optionally Cmd+Tab): one card per WINDOW, not per app.
-final class WindowSwitcher {
+final class WindowSwitcher: CalaModule {
     static let shared = WindowSwitcher()
     let sm = SwitcherModel()
-    private let panel: NSPanel
-    private let host: NSHostingView<SwitcherView>
+    let id = ModuleID.switcher
+    private(set) var isRunning = false
+    private var retryTimer: Timer?
+    private var run: ModuleCancellation?
+    private var panel: NSPanel?
+    private var captureTask: Task<Void, Never>?
     private var tap: CFMachPort?
     private var tapSource: CFRunLoopSource?
     private var swallowedKeys = Set<Int64>()
@@ -139,18 +143,53 @@ final class WindowSwitcher {
     private var trigger: CGEventFlags = .maskAlternate
 
     private init() {
-        panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        sm.onPick = { [weak self] i in self?.sm.selected = i; self?.commit() }
+    }
+
+    func start() {
+        guard !isRunning else { return }
+        isRunning = true
+        run = ModuleCancellation()
+        ensureTap()
+        retryTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.ensureTap() }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        run?.cancel()
+        run = nil
+        retryTimer?.invalidate()
+        retryTimer = nil
+        removeTap()
+        panel?.close()
+        panel?.contentView = nil
+        panel = nil
+        sm.all = []; sm.windows = []; sm.images = [:]; sm.appNames = [:]; sm.icons = [:]
+    }
+
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        host = NSHostingView(rootView: SwitcherView(sm: sm))
-        panel.contentView = host
-        sm.onPick = { [weak self] i in self?.sm.selected = i; self?.commit() }
+        panel.contentView = NSHostingView(rootView: SwitcherView(sm: sm))
+        return panel
+    }
+
+    private func removeTap() {
+        cancel()
+        if let tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes) }
+        if let tap { CFMachPortInvalidate(tap) }
+        tapSource = nil; tap = nil
+        swallowedKeys.removeAll()
     }
 
     /// Creates the event tap once the needed permissions exist; cheap to call repeatedly.
-    func ensureTap() {
+    private func ensureTap() {
+        guard isRunning else { return }
         if let t = tap {
             if CFMachPortIsValid(t) {
                 if !CGEvent.tapIsEnabled(tap: t) {
@@ -160,11 +199,7 @@ final class WindowSwitcher {
                 }
                 if CGEvent.tapIsEnabled(tap: t) { return }
             }
-            cancel()
-            if let source = tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
-            CFMachPortInvalidate(t)
-            tapSource = nil; tap = nil
-            swallowedKeys.removeAll()
+            removeTap()
         }
         guard AXIsProcessTrusted() else { return }
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
@@ -180,9 +215,10 @@ final class WindowSwitcher {
         guard let t = CGEvent.tapCreate(tap: .cghidEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: cb, userInfo: nil) else {
             log("switcher: event tap could not be created (permissions?)"); return
         }
+        guard let source = CFMachPortCreateRunLoopSource(nil, t, 0) else { CFMachPortInvalidate(t); return }
         tap = t
-        tapSource = CFMachPortCreateRunLoopSource(nil, t, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), tapSource, .commonModes)
+        tapSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         log("switcher: event tap active")
     }
 
@@ -191,6 +227,7 @@ final class WindowSwitcher {
 
     /// Returns true when the event must be swallowed.
     fileprivate func handle(_ type: CGEventType, _ e: CGEvent) -> Bool {
+        guard isRunning else { return false }
         if e.getIntegerValueField(.eventSourceUserData) == Self.repostMarker { return false }
         let key = e.getIntegerValueField(.keyboardEventKeycode)
         if type == .keyUp { return swallowedKeys.remove(key) != nil }
@@ -205,7 +242,7 @@ final class WindowSwitcher {
 
     private func decide(_ type: CGEventType, _ e: CGEvent, _ key: Int64) -> Bool {
         let cfg = ConfigStore.shared.config
-        guard cfg.switcherEnabled else { if active { cancel() }; return false }
+        guard let run, !run.isCancelled else { return false }
         // Cmd+M: swallow it and minimize off the callback (snapshot first: video layers vanish once minimizing starts).
         // If the window turns out not to be minimizable, the original Cmd+M is re-posted to the app instead.
         // Repeats never start an interception: the app already received that press.
@@ -214,7 +251,7 @@ final class WindowSwitcher {
            let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
            pid != ProcessInfo.processInfo.processIdentifier {
             swallowedKeys.insert(key)
-            DispatchQueue.global(qos: .userInitiated).async { Self.minimizeFocusedWindow(pid: pid) }
+            DispatchQueue.global(qos: .userInitiated).async { Self.minimizeFocusedWindow(pid: pid, cancel: run) }
             return true
         }
         let flags = e.flags
@@ -286,41 +323,48 @@ final class WindowSwitcher {
     /// Runs on a background queue. Until the minimize is issued, a failed or timed-out check hands the key back to
     /// the app (re-posted Cmd+M, the native behavior). Once issued, nothing is re-posted, whatever the result
     /// (a timeout is unknown, not failed), so one Cmd+M never acts twice.
-    private static func minimizeFocusedWindow(pid: pid_t) {
+    private static func minimizeFocusedWindow(pid: pid_t, cancel: ModuleCancellation) {
+        guard !cancel.isCancelled else { return }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
-        guard let value = WindowService.attr(app, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return repostCmdM(pid) }
+        guard let value = WindowService.attr(app, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return repostCmdM(pid, run: cancel) }
         let window = value as! AXUIElement
         AXUIElementSetMessagingTimeout(window, 0.25)
         guard (WindowService.attr(window, "AXFullScreen") as? Bool) == false,
-              let value = WindowService.attr(window, kAXMinimizeButtonAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return repostCmdM(pid) }
+              let value = WindowService.attr(window, kAXMinimizeButtonAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return repostCmdM(pid, run: cancel) }
         let button = value as! AXUIElement
         AXUIElementSetMessagingTimeout(button, 0.25)
-        guard (WindowService.attr(button, kAXEnabledAttribute) as? Bool) == true else { return repostCmdM(pid) }
+        guard (WindowService.attr(button, kAXEnabledAttribute) as? Bool) == true else { return repostCmdM(pid, run: cancel) }
         var id: CGWindowID = 0
-        if _AXUIElementGetWindow(window, &id) == .success, id != 0 {
-            WindowService.minimize(WinRef(id: id, title: "", minimized: false, ax: window, pid: pid))
+        let found = _AXUIElementGetWindow(window, &id) == .success && id != 0
+        guard !cancel.isCancelled else { return }
+        if found {
+            WindowService.minimize(WinRef(id: id, title: "", minimized: false, ax: window, pid: pid), run: cancel)
         } else {
             _ = AXUIElementPerformAction(button, kAXPressAction as CFString)
         }
     }
 
-    private static func repostCmdM(_ pid: pid_t) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        for down in [true, false] {
-            let e = CGEvent(keyboardEventSource: src, virtualKey: 46, keyDown: down)
-            e?.flags = .maskCommand
-            e?.setIntegerValueField(.eventSourceUserData, value: repostMarker)
-            e?.postToPid(pid)
+    private static func repostCmdM(_ pid: pid_t, run: ModuleCancellation) {
+        DispatchQueue.main.async {
+            guard !run.isCancelled else { return }
+            let src = CGEventSource(stateID: .hidSystemState)
+            for down in [true, false] {
+                let e = CGEvent(keyboardEventSource: src, virtualKey: 46, keyDown: down)
+                e?.flags = .maskCommand
+                e?.setIntegerValueField(.eventSourceUserData, value: repostMarker)
+                e?.postToPid(pid)
+            }
         }
     }
 
     private func begin(backwards: Bool) {
+        guard let run else { return }
         let token = generation
         let pids = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier)
         collectionInFlight = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let list = Self.collect(pids: pids)
+            let list = Self.collect(pids: pids, cancel: run)
             DispatchQueue.main.async {
                 self.collectionInFlight = false
                 if let back = self.queuedBegin {
@@ -344,12 +388,12 @@ final class WindowSwitcher {
                     NSRunningApplication(processIdentifier: pid)?.icon.map { (pid, $0) } }, uniquingKeysWith: { a, _ in a })
                 if self.pendingCommit { self.commit(); return }
                 self.show()
+                self.captureTask?.cancel()
                 let ids = list.filter { !$0.minimized }.map(\.id)
-                Task {
+                self.captureTask = Task { @MainActor [weak self] in
                     let all = await ThumbCache.shared.capture(ids: ids)
-                    await MainActor.run {
-                        if self.active, self.generation == token { self.sm.images.merge(all) { $1 } }
-                    }
+                    guard !Task.isCancelled, let self, self.active, self.generation == token else { return }
+                    self.sm.images.merge(all) { $1 }
                 }
             }
         }
@@ -366,7 +410,7 @@ final class WindowSwitcher {
         guard active else { return }
         if collecting { pendingCommit = true; return }
         active = false
-        panel.orderOut(nil)
+        panel?.orderOut(nil)
         log("switcher: pick #\(sm.selected)")
         if sm.windows.indices.contains(sm.selected) { WindowService.raise(sm.windows[sm.selected]) }
     }
@@ -401,11 +445,11 @@ final class WindowSwitcher {
     private enum Action { case close, quit, minimize }
 
     private func perform(_ a: Action) {
-        guard sm.windows.indices.contains(sm.selected) else { return }
+        guard let run, !run.isCancelled, sm.windows.indices.contains(sm.selected) else { return }
         let w = sm.windows[sm.selected]
         switch a {
         case .close:
-            DispatchQueue.global(qos: .userInitiated).async { WindowService.close(w) }
+            DispatchQueue.global(qos: .userInitiated).async { WindowService.close(w, run: run) }
             remove { $0.id == w.id }
         case .quit:
             NSRunningApplication(processIdentifier: w.pid)?.terminate()
@@ -416,7 +460,7 @@ final class WindowSwitcher {
             if w.minimized {
                 AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
             } else {
-                WindowService.minimize(w)
+                WindowService.minimize(w, run: run)
             }
             if let i = sm.all.firstIndex(where: { $0.id == w.id }) { sm.all[i] = flipped }
             if let i = sm.windows.firstIndex(where: { $0.id == w.id }) { sm.windows[i] = flipped }
@@ -434,8 +478,9 @@ final class WindowSwitcher {
     }
 
     private func resizeSoon() {
+        let token = generation
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.active else { return }
+            guard let self, self.active, self.generation == token else { return }
             self.show()
         }
     }
@@ -445,31 +490,39 @@ final class WindowSwitcher {
         collecting = false
         queuedBegin = nil
         active = false
-        panel.orderOut(nil)
+        captureTask?.cancel()
+        captureTask = nil
+        panel?.orderOut(nil)
     }
 
     private func show() {
-        host.layoutSubtreeIfNeeded()
-        let s = host.fittingSize
+        guard isRunning, active else { return }
         let m = NSEvent.mouseLocation
         guard let sc = NSScreen.screens.first(where: { $0.frame.contains(m) }) ?? NSScreen.main ?? NSScreen.screens.first else { cancel(); return }
+        let panel = self.panel ?? makePanel()
+        self.panel = panel
+        guard let host = panel.contentView else { return }
+        host.layoutSubtreeIfNeeded()
+        let s = host.fittingSize
         let f = sc.frame
         panel.setFrame(NSRect(x: f.midX - s.width / 2, y: f.midY - s.height / 2, width: s.width, height: s.height), display: true)
         panel.orderFrontRegardless()
     }
 
     /// Windows in most-recently-used order (on-screen z-order), then minimized / other ones.
-    private static func collect(pids: [pid_t]) -> [WinRef] {
+    private static func collect(pids: [pid_t], cancel: ModuleCancellation) -> [WinRef] {
+        guard !cancel.isCancelled else { return [] }
         let me = ProcessInfo.processInfo.processIdentifier
         var cache: [pid_t: [WinRef]] = [:]
         func wins(_ pid: pid_t) -> [WinRef] {
             if let c = cache[pid] { return c }
-            let w = WindowService.windows(for: pid); cache[pid] = w; return w
+            let w = WindowService.windows(for: pid, run: cancel); cache[pid] = w; return w
         }
         var out: [WinRef] = []
         var seen = Set<CGWindowID>()
         let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         for d in info {
+            guard !cancel.isCancelled else { return [] }
             guard (d[kCGWindowLayer as String] as? Int) == 0,
                   let pid = d[kCGWindowOwnerPID as String] as? pid_t, pid != me,
                   let num = d[kCGWindowNumber as String] as? CGWindowID,
@@ -477,6 +530,7 @@ final class WindowSwitcher {
             out.append(w); seen.insert(num)
         }
         for pid in pids where pid != me {
+            guard !cancel.isCancelled else { return [] }
             for w in wins(pid) where !seen.contains(w.id) { out.append(w); seen.insert(w.id) }
         }
         return Array(out.prefix(20))

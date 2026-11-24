@@ -13,6 +13,7 @@ final class PreviewModel: ObservableObject {
 
 struct PreviewView: View {
     @ObservedObject var pm: PreviewModel
+    let run: ModuleCancellation
     var onAction: () -> Void
 
     var body: some View {
@@ -31,7 +32,7 @@ struct PreviewView: View {
             } else {
                 HStack(alignment: .top, spacing: 0) {
                     ForEach(pm.windows.prefix(6)) { w in
-                        WindowCard(w: w, width: pm.cardWidth, image: pm.images[w.id], icon: pm.icon, onPeek: { pm.onPeek?($0 ? w : nil, nil) }, onCommit: { pm.onCommit?() }, onAction: onAction)
+                        WindowCard(w: w, width: pm.cardWidth, image: pm.images[w.id], icon: pm.icon, run: run, onPeek: { pm.onPeek?($0 ? w : nil, nil) }, onCommit: { pm.onCommit?() }, onAction: onAction)
                     }
                 }
             }
@@ -50,6 +51,7 @@ struct WindowCard: View {
     let width: CGFloat
     let image: NSImage?
     let icon: NSImage
+    let run: ModuleCancellation
     var onPeek: (Bool) -> Void
     var onCommit: () -> Void
     var onAction: () -> Void
@@ -70,7 +72,7 @@ struct WindowCard: View {
                     .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(overClose ? 0.16 : 0.06)))
                     .contentShape(Rectangle())
                     .onHover { overClose = $0 }
-                    .onTapGesture { WindowService.close(w); onAction() }
+                    .onTapGesture { WindowService.close(w, run: run); onAction() }
             }
             .frame(width: W, height: 28).padding(.horizontal, 0)
             ZStack {
@@ -89,31 +91,48 @@ struct WindowCard: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(hovering ? 0.1 : 0)))
         .contentShape(Rectangle())
         .onHover { hovering = $0; onPeek($0) }
-        .onTapGesture { onCommit(); WindowService.raise(w); onAction() }
+        .onTapGesture {
+            guard !run.isCancelled else { return }
+            onCommit(); WindowService.raise(w); onAction()
+        }
     }
 }
 
 final class PreviewController {
-    let panel: NSPanel
+    private(set) var panel: NSPanel?
     let pm = PreviewModel()
+    private let run: ModuleCancellation
     private(set) var shownID: String?
-    private var host: NSHostingView<PreviewView>!
+    private var isRunning = true
     private var captureTask: Task<Void, Never>?
     private var captureGeneration = UUID()
 
-    init() {
-        panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
-                        backing: .buffered, defer: false)
+    init(run: ModuleCancellation) {
+        self.run = run
+        pm.onPeek = { [weak self] w, img in self?.peek(w, img) }
+        pm.onCommit = { [weak self] in self?.commitPeek() }
+    }
+
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
-        host = NSHostingView(rootView: PreviewView(pm: pm, onAction: { [weak self] in self?.hide() }))
-        panel.contentView = host
-        pm.onPeek = { [weak self] w, img in self?.peek(w, img) }
-        pm.onCommit = { [weak self] in self?.commitPeek() }
+        panel.contentView = NSHostingView(rootView: PreviewView(pm: pm, run: run, onAction: { [weak self] in self?.hide() }))
+        return panel
+    }
+
+    func stop() {
+        isRunning = false
+        commitPeek()
+        hide()
+        panel?.close()
+        panel?.contentView = nil
+        panel = nil
     }
 
     // MARK: Peek: temporarily bring the real window to the front, restore on leave
@@ -122,6 +141,7 @@ final class PreviewController {
     private var saved: (app: NSRunningApplication?, win: AXUIElement?, peekedPID: pid_t, peekedWin: AXUIElement?)?
 
     func peek(_ w: WinRef?, _ img: NSImage?) {
+        guard isRunning else { return }
         peekWork?.cancel()
         guard let w, !w.minimized, w.ax != nil, onScreen(w.id) else { scheduleRestore(); return }
         restoreWork?.cancel()
@@ -137,6 +157,7 @@ final class PreviewController {
     }
 
     private func startPeek(_ w: WinRef) {
+        guard isRunning else { return }
         if saved == nil {
             let front = NSWorkspace.shared.frontmostApplication
             saved = (front, front.flatMap { WindowService.focusedWindow(pid: $0.processIdentifier) },
@@ -154,7 +175,7 @@ final class PreviewController {
     }
 
     private func restore() {
-        guard let s = saved else { return }
+        guard isRunning, let s = saved else { return }
         saved = nil
         if let pw = s.peekedWin, s.app?.processIdentifier != s.peekedPID {
             AXUIElementPerformAction(pw, kAXRaiseAction as CFString)
@@ -167,7 +188,8 @@ final class PreviewController {
 
     /// The user clicked a thumbnail: keep the peeked window.
     func commitPeek() {
-        peekWork?.cancel(); restoreWork?.cancel(); saved = nil
+        peekWork?.cancel(); restoreWork?.cancel()
+        peekWork = nil; restoreWork = nil; saved = nil
     }
 
     func hidePeek() {
@@ -177,22 +199,26 @@ final class PreviewController {
 
     /// Middle click on a thumbnail closes that window.
     func middleClick(_ m: NSPoint) {
-        guard panel.isVisible, panel.frame.contains(m) else { return }
+        guard let panel, panel.isVisible, panel.frame.contains(m) else { return }
         let col = pm.cardWidth + 16
         let i = Int((m.x - panel.frame.minX) / col)
         let wins = Array(pm.windows.prefix(6))
         guard i >= 0, i < wins.count else { return }
-        WindowService.close(wins[i])
+        WindowService.close(wins[i], run: run)
         hide()
     }
 
-    var isVisible: Bool { panel.isVisible }
+    var isVisible: Bool { panel?.isVisible == true }
 
     func contains(_ p: NSPoint) -> Bool {
-        panel.isVisible && panel.frame.insetBy(dx: -6, dy: -14).contains(p)
+        guard let panel, panel.isVisible else { return false }
+        return panel.frame.insetBy(dx: -6, dy: -14).contains(p)
     }
 
     func show(item: AppItem, barTop: CGFloat, mouseX: CGFloat, screen: NSScreen) {
+        guard isRunning else { return }
+        let panel = self.panel ?? makePanel()
+        self.panel = panel
         captureTask?.cancel()
         captureGeneration = UUID()
         let generation = captureGeneration
@@ -207,7 +233,7 @@ final class PreviewController {
         var imgs: [CGWindowID: NSImage] = [:]
         for w in wins { if let i = ThumbCache.shared.cached(w.id) { imgs[w.id] = i } }
         pm.images = imgs
-        place(barTop: barTop, mouseX: mouseX, screen: screen)
+        place(panel, barTop: barTop, mouseX: mouseX, screen: screen)
         panel.orderFrontRegardless()
 
         // Live view: resolve the windows once, then keep re-capturing the visible ones while the preview is open.
@@ -233,7 +259,8 @@ final class PreviewController {
         }
     }
 
-    private func place(barTop: CGFloat, mouseX: CGFloat, screen: NSScreen) {
+    private func place(_ panel: NSPanel, barTop: CGFloat, mouseX: CGFloat, screen: NSScreen) {
+        guard let host = panel.contentView else { return }
         host.layoutSubtreeIfNeeded()
         var size = host.fittingSize
         let visible = screen.visibleFrame
@@ -249,6 +276,6 @@ final class PreviewController {
         captureGeneration = UUID()
         hidePeek()
         shownID = nil
-        panel.orderOut(nil)
+        panel?.orderOut(nil)
     }
 }

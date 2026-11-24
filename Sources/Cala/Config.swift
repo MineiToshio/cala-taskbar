@@ -28,6 +28,17 @@ struct Config: Codable, Equatable {
     var switcherEnabled = true
     /// Also take over Cmd+Tab.
     var switcherReplaceCmdTab = false
+    var modulesChosen = false
+    var barEnabled = true
+    var trayEnabled = true
+    var zonesEnabled = false
+    var zonesActivation = "rightClick"
+    var zonesGap: Double = 8
+    var zonesEditorGrid = false
+
+    var modules: ModuleSet {
+        ModuleSet(bar: barEnabled, switcher: switcherEnabled, tray: trayEnabled, zones: zonesEnabled)
+    }
     /// Give the Dock back when the bar quits (so nobody is left without one).
     var restoreDockOnQuit = true
     /// Hide the macOS menu bar (auto-hide everywhere) while the app runs.
@@ -47,6 +58,8 @@ struct Config: Codable, Equatable {
     var menuBarBackupHide: Bool?
     var menuBarBackupFullscreen: Bool?
     var dockBackupSaved = false
+    /// Whether Cala wrote the hidden Dock values. Absent in configs from before ownership was recorded.
+    var dockOverridePending: Bool?
     var dockBackupAutohide: Bool?
     var dockBackupDelay: Double?
     var usageEnabled = true
@@ -84,10 +97,12 @@ struct Config: Codable, Equatable {
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, monitorBarMetric, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
+        case dockOverridePending
         case crashReports, relaunchOnCrash, restartAdvice, menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
         case mailLoadsRemoteImages
+        case modulesChosen, barEnabled, trayEnabled, zonesEnabled, zonesActivation, zonesGap, zonesEditorGrid
     }
 }
 
@@ -118,8 +133,17 @@ extension Config {
         hideNativeDock = field(Bool.self, .hideNativeDock) ?? hideNativeDock
         switcherEnabled = field(Bool.self, .switcherEnabled) ?? switcherEnabled
         switcherReplaceCmdTab = field(Bool.self, .switcherReplaceCmdTab) ?? switcherReplaceCmdTab
+        modulesChosen = field(Bool.self, .modulesChosen) ?? modulesChosen
+        barEnabled = field(Bool.self, .barEnabled) ?? barEnabled
+        trayEnabled = field(Bool.self, .trayEnabled) ?? trayEnabled
+        zonesEnabled = field(Bool.self, .zonesEnabled) ?? zonesEnabled
+        zonesActivation = field(String.self, .zonesActivation) ?? zonesActivation
+        if !["rightClick", "shift", "both"].contains(zonesActivation) { zonesActivation = "rightClick"; invalid = true }
+        zonesGap = clamped(field(Double.self, .zonesGap) ?? zonesGap, 0...40, 8)
+        zonesEditorGrid = field(Bool.self, .zonesEditorGrid) ?? zonesEditorGrid
         restoreDockOnQuit = field(Bool.self, .restoreDockOnQuit) ?? restoreDockOnQuit
         dockBackupSaved = field(Bool.self, .dockBackupSaved) ?? dockBackupSaved
+        dockOverridePending = field(Bool.self, .dockOverridePending)
         hideMenuBar = field(Bool.self, .hideMenuBar) ?? hideMenuBar
         crashReports = field(String.self, .crashReports) ?? crashReports
         relaunchOnCrash = field(Bool.self, .relaunchOnCrash) ?? relaunchOnCrash

@@ -79,7 +79,8 @@ struct UsageState: Identifiable {
 enum UsageProcess {
     struct Result { var data: Data; var status: Int32; var timedOut: Bool }
     static func run(_ executable: String, _ args: [String], timeout: TimeInterval,
-                    environment: [String: String]? = nil, rpc: Bool = false) -> Result {
+                    environment: [String: String]? = nil, rpc: Bool = false, cancel: ModuleCancellation? = nil) -> Result {
+        guard cancel?.isCancelled != true else { return Result(data: Data(), status: -1, timedOut: false) }
         let p = Process(), output = Pipe(), input = Pipe()
         p.executableURL = URL(fileURLWithPath: executable); p.arguments = args
         p.environment = environment
@@ -98,7 +99,7 @@ enum UsageProcess {
         var data = Data(), pending = Data(), reply = Data(), initialized = false
         let deadline = Date().addingTimeInterval(timeout)
         var complete = false
-        while Date() < deadline && !complete {
+        while Date() < deadline && !complete && cancel?.isCancelled != true {
             var buffer = [UInt8](repeating: 0, count: 8192)
             let n = read(fd, &buffer, buffer.count)
             if n > 0 {
@@ -266,7 +267,7 @@ final class UsageWatcher {
             guard let info else { return }
             let events = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
             Unmanaged<UsageWatcher>.fromOpaque(info).takeUnretainedValue().changed(events)
-        }, &context, paths.map(Self.resolvedPath) as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 1,
+        }, &context, paths as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 1,
         FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes))
         if let stream {
             FSEventStreamSetDispatchQueue(stream, queue)
@@ -282,9 +283,10 @@ final class UsageFileWatcher {
     private let path: String
     private let queue: DispatchQueue
     private let changed: () -> Void
+    private let descriptors: DispatchGroup
     private var source: DispatchSourceFileSystemObject?
-    init(path: String, queue: DispatchQueue, changed: @escaping () -> Void) {
-        self.path = path; self.queue = queue; self.changed = changed
+    init(path: String, queue: DispatchQueue, descriptors: DispatchGroup, changed: @escaping () -> Void) {
+        self.path = path; self.queue = queue; self.descriptors = descriptors; self.changed = changed
         refresh()
     }
     func refresh(notify: Bool = true) {
@@ -293,7 +295,11 @@ final class UsageFileWatcher {
         guard fd >= 0 else { return }
         let watcher = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename, .revoke], queue: queue)
         source = watcher
-        watcher.setCancelHandler { close(fd) }
+        descriptors.enter()
+        watcher.setCancelHandler { [descriptors] in
+            close(fd)
+            descriptors.leave()
+        }
         watcher.setEventHandler { [weak self] in
             guard let self, let source = self.source else { return }
             if !source.data.intersection([.delete, .rename, .revoke]).isEmpty {
@@ -312,11 +318,16 @@ final class UsageService: ObservableObject {
     @Published private(set) var providers = UsageProvider.allCases.map { UsageState(provider: $0) }
     @Published private(set) var statusLineMessage = ""
     private let queue = DispatchQueue(label: "local.cala.usage", qos: .utility)
+    // Keep resource teardown independent of credential subprocesses and file reads on the service queue.
+    private let resourceQueue = DispatchQueue(label: "local.cala.usage.resources", qos: .utility)
+    private let fileDescriptors = DispatchGroup()
     private var states = UsageProvider.allCases.map { UsageState(provider: $0) }
     private var config = Config()
     private var subscription: AnyCancellable?
+    // Accessed only on resourceQueue.
     private var timer: DispatchSourceTimer?
-    private var watchers: [UsageWatcher] = []
+    private var codexWatcher: UsageWatcher?
+    private var watchedCodexPath: String?
     private var claudeWatcher: UsageFileWatcher?
     private var environment: [String: String] = [:]
     private var shellLoaded = false
@@ -335,6 +346,8 @@ final class UsageService: ObservableObject {
     private var visible = false, alwaysVisible = false
     // These two are accessed only by the main-thread visibility hook.
     private var mainVisible = false, mainAlwaysVisible = false
+    private var mainRun: ModuleCancellation?
+    private var run: ModuleCancellation? // service queue only
     private var generations: [UsageProvider: Int] = [:]
     private var active = Set<UsageProvider>()
     private var statusLineConfigured = false
@@ -345,53 +358,129 @@ final class UsageService: ObservableObject {
     private func index(_ p: UsageProvider) -> Int { p == .claude ? 0 : 1 }
     private func publish() {
         let copy = states
-        DispatchQueue.main.async { self.providers = copy }
+        let run = run
+        DispatchQueue.main.async {
+            guard let run, self.mainRun === run else { return }
+            self.providers = copy
+        }
     }
-    private func message(_ s: String) { DispatchQueue.main.async { self.statusLineMessage = s } }
+
+    private func message(_ message: String) {
+        let run = run
+        DispatchQueue.main.async {
+            guard let run, self.mainRun === run else { return }
+            self.statusLineMessage = message
+        }
+    }
 
     func start(store: ConfigStore, visible: Bool) {
-        guard subscription == nil else { return }
+        guard mainRun == nil else { return }
+        let run = ModuleCancellation()
+        mainRun = run
         let alwaysVisible = !store.config.autoHide
         mainVisible = visible; mainAlwaysVisible = alwaysVisible
-        queue.async { self.visible = visible; self.alwaysVisible = alwaysVisible }
-        subscription = store.$config.removeDuplicates().sink { [weak self] config in
-            self?.queue.async { self?.configure(config) }
+        resourceQueue.sync {
+            let timer = DispatchSource.makeTimerSource(queue: resourceQueue)
+            timer.schedule(deadline: .now() + 5, repeating: 5)
+            timer.setEventHandler { [weak self] in
+                self?.queue.async { [weak self] in
+                    guard !run.isCancelled else { return }
+                    self?.maintenance()
+                }
+            }
+            self.timer = timer; timer.resume()
         }
         queue.async {
-            let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now() + 5, repeating: 5)
-            timer.setEventHandler { [weak self] in self?.maintenance() }
-            self.timer = timer; timer.resume()
+            guard !run.isCancelled else { return }
+            self.run = run
+            self.visible = visible; self.alwaysVisible = alwaysVisible
+            self.lastDetection = .distantPast
+        }
+        subscription = store.$config.removeDuplicates().sink { [weak self] config in
+            self?.queue.async {
+                guard !run.isCancelled else { return }
+                self?.configure(config)
+            }
+        }
+    }
+
+    func stop() {
+        guard let run = mainRun else { return }
+        mainRun = nil
+        run.cancel()
+        subscription?.cancel()
+        subscription = nil
+        resourceQueue.sync {
+            timer?.cancel()
+            timer = nil
+            codexWatcher = nil
+            watchedCodexPath = nil
+            claudeWatcher = nil
+        }
+        fileDescriptors.wait()
+        mainVisible = false; mainAlwaysVisible = false
+        providers = providers.map { provider in
+            var provider = provider
+            provider.fetching = false
+            return provider
+        }
+        queue.async {
+            guard self.run === run else { return }
+            self.run = nil
+            self.visible = false; self.alwaysVisible = false
+            self.nextPeriodic = .distantPast
+            for provider in self.active {
+                self.lastAttempt[provider] = nil
+                self.states[self.index(provider)].fetching = false
+            }
+            self.active.removeAll()
         }
     }
     /// Uninstall: take Cala's statusLine entry out of Claude Code's settings.json right now (backup kept).
-    func removeStatusLineNow() {
+    func removeStatusLineNow(config: Config) {
+        stop()
         queue.sync {
+            if !shellLoaded && config.usageClaudeConfigDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                loadLoginEnvironment()
+            }
             let home = FileManager.default.homeDirectoryForCurrentUser.path
-            let dir = configuredDirectory.isEmpty ? folder(config.usageClaudeConfigDir, "CLAUDE_CONFIG_DIR", home + "/.claude") : configuredDirectory
+            let dir = folder(config.usageClaudeConfigDir, "CLAUDE_CONFIG_DIR", home + "/.claude")
             statusLine(enable: false, directory: dir)
+            if !configuredDirectory.isEmpty, configuredDirectory != dir {
+                statusLine(enable: false, directory: configuredDirectory)
+            }
             statusLineConfigured = false
         }
     }
-    func settingsOpened() { queue.async { self.detect(force: true); self.publish() } }
-    func refresh(_ provider: UsageProvider? = nil, force: Bool = false) {
+    func settingsOpened() {
+        guard let run = mainRun else { return }
         queue.async {
+            guard !run.isCancelled else { return }
+            self.detect(force: true); self.publish()
+        }
+    }
+    func refresh(_ provider: UsageProvider? = nil, force: Bool = false) {
+        guard let run = mainRun else { return }
+        queue.async {
+            guard !run.isCancelled else { return }
             self.detect(force: false)
             for p in provider.map({ [$0] }) ?? UsageProvider.allCases { self.fetch(p, force: force) }
         }
     }
     func visibility(visible: Bool, alwaysVisible: Bool) {
-        guard mainVisible != visible || mainAlwaysVisible != alwaysVisible else { return }
+        guard let run = mainRun, mainVisible != visible || mainAlwaysVisible != alwaysVisible else { return }
         let revealed = visible && !mainVisible
         mainVisible = visible; mainAlwaysVisible = alwaysVisible
         queue.async {
+            guard !run.isCancelled else { return }
             self.visible = visible; self.alwaysVisible = alwaysVisible
             if revealed { for p in UsageProvider.allCases { self.fetch(p, force: false) } }
         }
     }
     private func configure(_ new: Config) {
+        guard let run, !run.isCancelled else { return }
         let first = !shellLoaded
-        if shellLoaded && new.usageEnabled == config.usageEnabled && new.usageClaudeEnabled == config.usageClaudeEnabled && new.usageCodexEnabled == config.usageCodexEnabled && new.usageClaudeConfigDir == config.usageClaudeConfigDir && new.usageCodexHome == config.usageCodexHome && new.usageClaudeStatusLine == config.usageClaudeStatusLine {
+        if lastDetection != .distantPast && shellLoaded && new.usageEnabled == config.usageEnabled && new.usageClaudeEnabled == config.usageClaudeEnabled && new.usageCodexEnabled == config.usageCodexEnabled && new.usageClaudeConfigDir == config.usageClaudeConfigDir && new.usageCodexHome == config.usageCodexHome && new.usageClaudeStatusLine == config.usageClaudeStatusLine {
             config = new; return
         }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -401,13 +490,8 @@ final class UsageService: ObservableObject {
         let enabled = new.usageEnabled && (!config.usageEnabled || (new.usageClaudeEnabled && !config.usageClaudeEnabled) || (new.usageCodexEnabled && !config.usageCodexEnabled))
         config = new
         if !shellLoaded {
-            // One bounded login-shell invocation, even for GUI launches with an incomplete environment.
-            let command = "printf '__CALA_ENV__%s\\0%s\\0%s\\0%s\\0%s\\0' \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" \"$PATH\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" \"${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}\""
-            let r = UsageProcess.run("/bin/zsh", ["-lc", command], timeout: 3)
-            if !r.timedOut, let fields = UsageCredentials.shellFields(r.data) {
-                for (key, value) in zip(["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PATH", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "SECURE_STORAGE_SET"], fields) { environment[key] = value }
-            }
-            shellLoaded = true
+            loadLoginEnvironment(cancel: run)
+            guard !run.isCancelled else { return }
             loadCache()
             refreshAfterDetection = true
         }
@@ -425,6 +509,7 @@ final class UsageService: ObservableObject {
             refreshAfterDetection = true
         }
         detect(force: true)
+        guard !run.isCancelled else { return }
         if config.usageClaudeStatusLine != statusLineConfigured || (statusLineConfigured && configuredDirectory != claudeDir) {
             if statusLineConfigured && configuredDirectory != claudeDir { statusLine(enable: false, directory: configuredDirectory) }
             statusLine(enable: config.usageClaudeStatusLine, directory: claudeDir)
@@ -436,6 +521,17 @@ final class UsageService: ObservableObject {
         }
         publish()
     }
+    private func loadLoginEnvironment(cancel: ModuleCancellation? = nil) {
+        // One bounded login-shell invocation, even for GUI launches with an incomplete environment.
+        let command = "printf '__CALA_ENV__%s\\0%s\\0%s\\0%s\\0%s\\0' \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" \"$PATH\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" \"${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}\""
+        let r = UsageProcess.run("/bin/zsh", ["-lc", command], timeout: 3, cancel: cancel)
+        guard cancel?.isCancelled != true else { return }
+        if !r.timedOut, let fields = UsageCredentials.shellFields(r.data) {
+            for (key, value) in zip(["CLAUDE_CONFIG_DIR", "CODEX_HOME", "PATH", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "SECURE_STORAGE_SET"], fields) { environment[key] = value }
+        }
+        shellLoaded = true
+    }
+
     private func folder(_ custom: String, _ env: String, _ fallback: String) -> String {
         let raw = custom.trimmingCharacters(in: .whitespacesAndNewlines)
         let chosen = raw.isEmpty ? (environment[env].flatMap { $0.isEmpty ? nil : $0 } ?? fallback) : raw
@@ -443,17 +539,17 @@ final class UsageService: ObservableObject {
         return URL(fileURLWithPath: expanded, relativeTo: FileManager.default.homeDirectoryForCurrentUser).standardizedFileURL.path.precomposedStringWithCanonicalMapping
     }
     private func detect(force: Bool) {
-        guard shellLoaded, force || Date().timeIntervalSince(lastDetection) >= 300 else { return }
+        guard let run, !run.isCancelled, shellLoaded, force || Date().timeIntervalSince(lastDetection) >= 300 else { return }
         lastDetection = Date()
         let fm = FileManager.default, home = fm.homeDirectoryForCurrentUser.path
-        let oldClaude = claudeDir, oldCodex = codexHome
         claudeDir = folder(config.usageClaudeConfigDir, "CLAUDE_CONFIG_DIR", home + "/.claude")
         codexHome = folder(config.usageCodexHome, "CODEX_HOME", home + "/.codex")
         services = UsageCredentials.services(custom: config.usageClaudeConfigDir, rawEnvironment: environment["CLAUDE_CONFIG_DIR"],
                                              secure: environment["SECURE_STORAGE_SET"] == "x" ? environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] : nil,
                                              directory: claudeDir, defaultDirectory: home + "/.claude")
         states[0].enabled = config.usageEnabled && config.usageClaudeEnabled
-        let credential = states[0].enabled ? Self.readClaudeCredential(directory: claudeDir, services: services) : nil
+        let credential = states[0].enabled ? Self.readClaudeCredential(directory: claudeDir, services: services, cancel: run) : nil
+        guard !run.isCancelled else { return }
         if states[0].enabled { observeCredential(credential) }
         let foundClaude = credential != nil || fm.fileExists(atPath: claudeDir) || findExecutable("claude") != nil || fm.fileExists(atPath: "/Applications/Claude.app") || fm.fileExists(atPath: home + "/Applications/Claude.app")
         states[0].signedIn = credential != nil
@@ -468,19 +564,43 @@ final class UsageService: ObservableObject {
         states[1].signedIn = auth
         states[1].detection = auth ? tx("Detected, signed in", "Detectado, con sesión iniciada") : (executable != nil ? tx("Found but not signed in — open Codex and sign in with ChatGPT", "Encontrado, pero sin sesión: abre Codex e inicia sesión con ChatGPT") : tx("Codex not found — install Codex CLI or app and sign in with ChatGPT", "No se encontró Codex: instala la CLI o la app e inicia sesión con ChatGPT"))
         if !states[1].enabled { states[1].detection = tx("Usage disabled", "Uso desactivado") }
-        if oldClaude != claudeDir || oldCodex != codexHome || watchers.isEmpty {
-            watchers.removeAll()
-            watchers.append(UsageWatcher(paths: [codexHome + "/sessions"], queue: queue) { [weak self] paths in self?.localEvents(paths) })
-        }
-        if states[0].enabled && config.usageClaudeStatusLine {
-            if claudeWatcher == nil {
-                let path = support.appendingPathComponent("claude-usage.json").path
-                claudeWatcher = UsageFileWatcher(path: path, queue: queue) { [weak self] in self?.localEvents([path]) }
-            }
-            claudeWatcher?.refresh()
-        } else { claudeWatcher = nil }
+        let codexPath = UsageWatcher.resolvedPath(codexHome + "/sessions")
+        let claudePath = states[0].enabled && config.usageClaudeStatusLine
+            ? support.appendingPathComponent("claude-usage.json").path : nil
+        updateWatchers(codexPath: codexPath, claudePath: claudePath, run: run)
         readLocal(); publish()
     }
+
+    private func updateWatchers(codexPath: String, claudePath: String?, run: ModuleCancellation) {
+        resourceQueue.async { [weak self] in
+            guard let self, !run.isCancelled else { return }
+            if self.watchedCodexPath != codexPath {
+                self.codexWatcher = UsageWatcher(paths: [codexPath], queue: self.resourceQueue) { [weak self] paths in
+                    self?.enqueueLocalEvents(paths, run: run)
+                }
+                self.watchedCodexPath = codexPath
+            }
+            if let claudePath {
+                if self.claudeWatcher == nil {
+                    self.claudeWatcher = UsageFileWatcher(path: claudePath, queue: self.resourceQueue,
+                                                          descriptors: self.fileDescriptors) { [weak self] in
+                        self?.enqueueLocalEvents([claudePath], run: run)
+                    }
+                }
+                self.claudeWatcher?.refresh()
+            } else {
+                self.claudeWatcher = nil
+            }
+        }
+    }
+
+    private func enqueueLocalEvents(_ paths: [String], run: ModuleCancellation) {
+        queue.async { [weak self] in
+            guard !run.isCancelled else { return }
+            self?.localEvents(paths)
+        }
+    }
+
     private struct CredentialStamp: Equatable { var fingerprint: String?; var expiresAt: Double? }
     private struct Credential {
         var token: String; var plan: String?; var expiresAt: Double?
@@ -494,18 +614,19 @@ final class UsageService: ObservableObject {
             self.blockedClaudeStamp = nil; errorCounts[.claude] = 0; retryNotBefore[.claude] = nil
         }
     }
-    private static func readClaudeCredential(directory: String, services: [String]) -> Credential? {
+    private static func readClaudeCredential(directory: String, services: [String], cancel: ModuleCancellation) -> Credential? {
         func parse(_ object: [String: Any]?) -> Credential? {
             guard let oauth = object?["claudeAiOauth"] as? [String: Any], let token = oauth["accessToken"] as? String, !token.isEmpty else { return nil }
             return Credential(token: token, plan: oauth["rateLimitTier"] as? String ?? oauth["subscriptionType"] as? String, expiresAt: UsageJSON.number(oauth["expiresAt"]))
         }
         for service in services {
             for account in UsageCredentials.accounts(NSUserName()) {
-                let result = UsageProcess.run("/usr/bin/security", ["find-generic-password", "-s", service, "-a", account, "-w"], timeout: 3)
+                guard !cancel.isCancelled else { return nil }
+                let result = UsageProcess.run("/usr/bin/security", ["find-generic-password", "-s", service, "-a", account, "-w"], timeout: 3, cancel: cancel)
                 if result.status == 0, let credential = parse(UsageJSON.object(result.data)) { return credential }
             }
         }
-        return parse(readJSON(URL(fileURLWithPath: directory + "/.credentials.json")))
+        return cancel.isCancelled ? nil : parse(readJSON(URL(fileURLWithPath: directory + "/.credentials.json")))
     }
     private func findExecutable(_ name: String) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -524,7 +645,10 @@ final class UsageService: ObservableObject {
         return candidates.first { !$0.isEmpty && fm.isExecutableFile(atPath: $0) }
     }
     private func maintenance() {
-        claudeWatcher?.refresh()
+        guard let run, !run.isCancelled else { return }
+        resourceQueue.async { [weak self] in
+            if !run.isCancelled { self?.claudeWatcher?.refresh() }
+        }
         detect(force: false)
         guard visible else { return }
         let now = Date()
@@ -583,10 +707,11 @@ final class UsageService: ObservableObject {
         var credentialStamp: CredentialStamp?
     }
     private func fetch(_ p: UsageProvider, force: Bool) {
+        guard let run, !run.isCancelled else { return }
         if p == .claude, states[0].available, blockedClaudeStamp != nil, !active.contains(p), Date().timeIntervalSince(lastCredentialCheck) >= 15 {
-            observeCredential(Self.readClaudeCredential(directory: claudeDir, services: services))
+            observeCredential(Self.readClaudeCredential(directory: claudeDir, services: services, cancel: run))
         }
-        guard canFetch(p, force: force) else { return }
+        guard !run.isCancelled, canFetch(p, force: force) else { return }
         let i = index(p), started = Date(), currentGeneration = generations[p] ?? 0
         active.insert(p)
         states[i].fetching = true; lastAttempt[p] = started; publish()
@@ -599,11 +724,12 @@ final class UsageService: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             let result: FetchResult
             if p == .claude {
-                let renew: (() -> Void)? = claudeExe.map { exe in { Self.renewClaudeCredential(executable: exe, environment: processEnvironment) } }
-                result = Self.fetchClaude(directory: dir, services: keychainServices, renew: renew)
+                let renew: (() -> Void)? = claudeExe.map { exe in { Self.renewClaudeCredential(executable: exe, environment: processEnvironment, cancel: run) } }
+                result = Self.fetchClaude(directory: dir, services: keychainServices, cancel: run, renew: renew)
             }
-            else { result = Self.fetchCodex(home: home, executable: exe, environment: processEnvironment) }
+            else { result = Self.fetchCodex(home: home, executable: exe, environment: processEnvironment, cancel: run) }
             self.queue.async {
+                guard self.run === run, !run.isCancelled else { return }
                 self.active.remove(p)
                 self.states[i].fetching = false
                 guard currentGeneration == (self.generations[p] ?? 0) else { self.publish(); self.fetch(p, force: false); return }
@@ -616,8 +742,8 @@ final class UsageService: ObservableObject {
             }
         }
     }
-    private static func http(_ address: String, headers: [String: String]) -> (Data, HTTPURLResponse?) {
-        guard let url = URL(string: address) else { return (Data(), nil) }
+    private static func http(_ address: String, headers: [String: String], cancel: ModuleCancellation) -> (Data, HTTPURLResponse?) {
+        guard !cancel.isCancelled, let url = URL(string: address) else { return (Data(), nil) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10; configuration.timeoutIntervalForResource = 10
         configuration.httpCookieStorage = nil; configuration.urlCache = nil
@@ -629,8 +755,14 @@ final class UsageService: ObservableObject {
             output.data = data ?? Data(); output.response = response as? HTTPURLResponse; semaphore.signal()
         }
         task.resume()
-        if semaphore.wait(timeout: .now() + 11) == .timedOut { task.cancel(); session.invalidateAndCancel(); return (Data(), nil) }
-        session.invalidateAndCancel(); return (output.data, output.response)
+        defer { session.invalidateAndCancel() }
+        let deadline = DispatchTime.now() + 11
+        while !cancel.isCancelled, DispatchTime.now() < deadline {
+            if semaphore.wait(timeout: min(deadline, .now() + .milliseconds(100))) == .success {
+                return (output.data, output.response)
+            }
+        }
+        return (Data(), nil)
     }
     private static func retryAfter(_ response: HTTPURLResponse?) -> TimeInterval {
         guard let s = response?.value(forHTTPHeaderField: "Retry-After") else { return 0 }
@@ -641,18 +773,20 @@ final class UsageService: ObservableObject {
     /// Claude Code's access token lasts about 8 hours and only Claude Code renews it. When nobody has used it
     /// for a while the token sits expired, so ask Claude Code itself for one tiny non-interactive turn (it
     /// renews and stores its own credentials; Cala never touches the refresh token) and read the credential again.
-    private static func renewClaudeCredential(executable: String, environment: [String: String]) {
-        let r = UsageProcess.run(executable, ["-p", "ok", "--model", "haiku", "--max-turns", "1", "--tools", ""], timeout: 60, environment: environment)
+    private static func renewClaudeCredential(executable: String, environment: [String: String], cancel: ModuleCancellation) {
+        let r = UsageProcess.run(executable, ["-p", "ok", "--model", "haiku", "--max-turns", "1", "--tools", ""], timeout: 60, environment: environment, cancel: cancel)
+        guard !cancel.isCancelled else { return }
         log("usage: claude token renewed via Claude Code status=\(r.status) timedOut=\(r.timedOut)")
     }
-    private static func fetchClaude(directory: String, services: [String], credentialReader: (() -> Credential?)? = nil,
+    private static func fetchClaude(directory: String, services: [String], cancel: ModuleCancellation, credentialReader: (() -> Credential?)? = nil,
                                     transport: ((String, [String: String]) -> (Data, HTTPURLResponse?))? = nil,
                                     renew: (() -> Void)? = nil) -> FetchResult {
-        let read = credentialReader ?? { readClaudeCredential(directory: directory, services: services) }
-        let send = transport ?? http
+        let read = credentialReader ?? { readClaudeCredential(directory: directory, services: services, cancel: cancel) }
+        let send = transport ?? { http($0, headers: $1, cancel: cancel) }
         var credential = read()
         if let renew, credential?.expired == true { renew(); credential = read() }
         for attempt in 0...1 {
+            guard !cancel.isCancelled else { return FetchResult() }
             guard let current = credential, !current.expired else {
                 return FetchResult(status: 401, error: tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla"), expired: true, credentialStamp: credential?.stamp ?? CredentialStamp())
             }
@@ -673,9 +807,10 @@ final class UsageService: ObservableObject {
         }
         return FetchResult(error: "n/a")
     }
-    private static func fetchCodex(home: String, executable: String?, environment: [String: String]) -> FetchResult {
+    private static func fetchCodex(home: String, executable: String?, environment: [String: String], cancel: ModuleCancellation) -> FetchResult {
+        guard !cancel.isCancelled else { return FetchResult() }
         if let executable {
-            let result = UsageProcess.run(executable, ["app-server"], timeout: 10, environment: environment, rpc: true)
+            let result = UsageProcess.run(executable, ["app-server"], timeout: 10, environment: environment, rpc: true, cancel: cancel)
             guard let obj = UsageJSON.object(result.data) else { return FetchResult(error: result.timedOut ? tx("n/a — Codex timed out", "n/d: Codex tardó demasiado") : tx("n/a — Codex unavailable", "n/d: Codex no disponible")) }
             if let error = obj["error"] as? [String: Any] {
                 // Inspect the message for classification, never publish or log arbitrary server text.
@@ -689,7 +824,7 @@ final class UsageService: ObservableObject {
             return FetchResult(reading: reading, status: 200, error: reading.windows.isEmpty ? tx("n/a — unrecognized usage data", "n/d: datos de uso no reconocidos") : nil)
         }
         guard let tokens = readJSON(URL(fileURLWithPath: home + "/auth.json"))?["tokens"] as? [String: Any], let token = tokens["access_token"] as? String, !token.isEmpty, let account = tokens["account_id"] as? String, !account.isEmpty else { return FetchResult(error: tx("n/a — sign in to Codex with ChatGPT", "n/d: inicia sesión en Codex con ChatGPT")) }
-        let (data, response) = http("https://chatgpt.com/backend-api/wham/usage", headers: ["Authorization": "Bearer " + token, "ChatGPT-Account-Id": account, "Accept": "application/json"])
+        let (data, response) = http("https://chatgpt.com/backend-api/wham/usage", headers: ["Authorization": "Bearer " + token, "ChatGPT-Account-Id": account, "Accept": "application/json"], cancel: cancel)
         let status = response?.statusCode ?? 0
         if status == 429 { return FetchResult(status: status, error: tx("Rate-limited", "Límite de uso alcanzado"), retryAfter: retryAfter(response)) }
         guard status == 200, let obj = UsageJSON.object(data), var limits = obj["rate_limit"] as? [String: Any] else { return FetchResult(status: status, error: status == 401 ? tx("Session expired — open Codex to refresh", "Sesión caducada: abre Codex para renovarla") : tx("n/a — usage unavailable", "n/d: uso no disponible"), expired: status == 401) }
@@ -713,6 +848,7 @@ final class UsageService: ObservableObject {
         saveCache()
     }
     private func localEvents(_ paths: [String]) {
+        guard run?.isCancelled == false else { return }
         let root = UsageWatcher.resolvedPath(codexHome + "/sessions")
         let local = UsageWatcher.resolvedPath(support.appendingPathComponent("claude-usage.json").path)
         let resolved = paths.map(UsageWatcher.resolvedPath)
@@ -729,6 +865,7 @@ final class UsageService: ObservableObject {
         return merged
     }
     private func readLocal(codex: Bool = true, claude: Bool = true) {
+        guard let run, !run.isCancelled else { return }
         let fm = FileManager.default
         let root = URL(fileURLWithPath: codexHome + "/sessions")
         var newest: [(URL, Date)] = []
@@ -736,6 +873,7 @@ final class UsageService: ObservableObject {
             // Walk metadata only; retain just three paths and read at most 256 KiB per file.
             let deadline = Date().addingTimeInterval(2)
             for case let url as URL in enumerator {
+                if run.isCancelled { return }
                 if Date() >= deadline { log("usage: local scan reached time budget"); break }
                 guard url.lastPathComponent.hasPrefix("rollout-"), url.pathExtension == "jsonl" else { continue }
                 if let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]), values.isRegularFile == true {
@@ -746,6 +884,7 @@ final class UsageService: ObservableObject {
         }
         var best: UsageReading?
         for (url, _) in newest {
+            guard !run.isCancelled else { return }
             guard let h = try? FileHandle(forReadingFrom: url) else { continue }
             defer { try? h.close() }
             guard let size = try? h.seekToEnd() else { continue }

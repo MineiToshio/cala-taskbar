@@ -154,6 +154,8 @@ final class MailService: ObservableObject {
     private var unreadByAccount: [String: Int] = [:]
     private var pendingSignIns: [String: MailIMAP] = [:]
     private var wakeObserver: NSObjectProtocol?
+    private var observesWake = false
+    private var runID: UUID?
     /// Only the shared service tracks the build (the checks inject their own credential closures and must not touch
     /// the user's defaults).
     private var keychainGate: MailKeychainGate?
@@ -169,11 +171,7 @@ final class MailService: ObservableObject {
                   makeConnection: { MailIMAP(provider: $0) }, readCredential: { try MailKeychain.password(for: $0) },
                   writeCredential: { try MailKeychain.set($0, for: $1) })
         keychainGate = MailKeychainGate()
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
+        observesWake = true
     }
 
     init(accountsURL: URL, makeConnection: @escaping (MailProvider) -> MailIMAP,
@@ -208,6 +206,18 @@ final class MailService: ObservableObject {
     func start() {
         guard !running else { return }
         running = true
+        let run = UUID()
+        runID = run
+        if observesWake {
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.runID == run else { return }
+                    self.refresh()
+                }
+            }
+        }
         for account in accounts where account.enabled { launch(account.id) }
     }
 
@@ -230,6 +240,9 @@ final class MailService: ObservableObject {
     }
 
     func stop() {
+        runID = nil
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        wakeObserver = nil
         awaitingKeychainNotice = false
         credentialsRead.removeAll()
         for connection in pendingSignIns.values { connection.close() }

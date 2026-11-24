@@ -18,58 +18,92 @@ enum DockControl {
         (value("autohide") as? Bool) == true && ((value("autohide-delay") as? Double) ?? 0) >= 100
     }
 
-    private static func restartDock() {
+    private static var hasCalaValues: Bool {
+        (value("autohide") as? Bool) == true && (value("autohide-delay") as? Double) == hiddenDelay
+    }
+
+    private static func synchronize() -> Bool {
         CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+    }
+
+    private static func restartDock() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         p.arguments = ["Dock"]
-        try? p.run()
-        p.waitUntilExit()
+        if (try? p.run()) != nil { p.waitUntilExit() }
     }
 
-    /// Hides the Dock, remembering how it was so it can be restored exactly.
+    /// Hides the Dock, recording the backup before writing the override.
     static func hide(_ store: ConfigStore) {
-        if !isHidden || !store.config.dockBackupSaved {
-            // If it was already hidden (set by hand), "normal" means auto-hide with the default delay.
-            let was = isHidden
-            store.config.dockBackupAutohide = was ? true : (value("autohide") as? Bool)
-            store.config.dockBackupDelay = was ? nil : (value("autohide-delay") as? Double)
-            store.config.dockBackupSaved = true
+        if isHidden {
+            if !store.config.dockBackupSaved { rememberAdoption(store) }
+            return
         }
-        guard !isHidden else { return }
+        var config = store.config
+        config.dockBackupAutohide = value("autohide") as? Bool
+        config.dockBackupDelay = value("autohide-delay") as? Double
+        config.dockBackupSaved = true
+        config.dockOverridePending = true
+        store.config = config
         set("autohide", true)
         set("autohide-delay", hiddenDelay)
-        restartDock()
+        if synchronize() { restartDock() }
     }
 
-    /// Puts the Dock back the way it was before `hide`.
-    static func restore(_ store: ConfigStore) {
-        guard isHidden || store.config.dockBackupSaved else { return }
-        set("autohide", store.config.dockBackupAutohide)
-        set("autohide-delay", store.config.dockBackupDelay)
-        restartDock()
+    private static func rememberAdoption(_ store: ConfigStore) {
+        var config = store.config
+        config.hideNativeDock = true
+        config.dockBackupAutohide = true
+        config.dockBackupDelay = nil
+        config.dockBackupSaved = true
+        config.dockOverridePending = false
+        store.config = config
     }
 
-    /// Called at launch: re-applies the user's choice (e.g. after the Dock was restored on quit).
+    private static func restore(_ store: ConfigStore, includeAdopted: Bool) {
+        var config = store.config
+        guard config.dockBackupSaved else { return }
+        // Legacy backups have no ownership flag. Match the values Cala wrote before using one.
+        let restore = config.dockOverridePending == false ? includeAdopted && isHidden : hasCalaValues
+        if restore {
+            set("autohide", config.dockBackupAutohide)
+            set("autohide-delay", config.dockBackupDelay)
+            guard synchronize() else { return }
+        }
+        config.dockBackupSaved = false
+        config.dockOverridePending = false
+        store.config = config
+        if restore { restartDock() }
+    }
+
+    /// Re-apply the user's choice or adopt a Dock already hidden by hand while the bar runs.
     static func applyOnLaunch(_ store: ConfigStore) {
         if store.config.hideNativeDock && !isHidden { hide(store) }
-        // Already hidden by hand: adopt that state so the switch reflects reality.
         if !store.config.hideNativeDock && isHidden && !store.configLoadFailed && !store.config.recoveredFromInvalidFields {
-            store.config.hideNativeDock = true
-            store.config.dockBackupAutohide = true
-            store.config.dockBackupDelay = nil
-            store.config.dockBackupSaved = true
+            if store.config.dockBackupSaved, store.config.dockOverridePending != false, hasCalaValues {
+                store.config.hideNativeDock = true
+            } else {
+                rememberAdoption(store)
+            }
         }
     }
 
-    /// Called when the toggle changes.
     static func setHidden(_ on: Bool, _ store: ConfigStore) {
         store.config.hideNativeDock = on
-        if on { hide(store) } else { restore(store); store.config.dockBackupSaved = false }
+        guard ModuleRegistry.shared.isRunning(.bar) else { return }
+        if on { hide(store) } else { restore(store, includeAdopted: true) }
     }
 
-    /// Called on quit: give the user their Dock back so they are never left without one.
+    static func onBarStop(_ store: ConfigStore) {
+        restore(store, includeAdopted: true)
+    }
+
+    /// Restore only a pending Cala override when launching with the bar disabled.
+    static func restoreAfterCrashIfNeeded(_ store: ConfigStore) {
+        restore(store, includeAdopted: false)
+    }
+
     static func onQuit(_ store: ConfigStore) {
-        if store.config.hideNativeDock && store.config.restoreDockOnQuit && isHidden { restore(store) }
+        if store.config.restoreDockOnQuit { restore(store, includeAdopted: true) }
     }
 }

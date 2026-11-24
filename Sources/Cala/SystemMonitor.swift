@@ -57,7 +57,9 @@ final class SystemMonitor: ObservableObject {
     private var criticalThermal = CriticalDuration()
     private var metricHold = MetricHold()
     private var lastProcessSample: ProcessSample?
-    private var scanCancel = ScanCancellation()
+    private var scanCancel = ModuleCancellation()
+    private var readingExpiry: DispatchWorkItem?
+    private var isRunning = false
     private lazy var energySampler = EnergySampler(timebase: timebase) { [weak self] total in
         guard let self else { return }
         self.energyHistory.append(total)
@@ -81,7 +83,25 @@ final class SystemMonitor: ObservableObject {
 
     // MARK: Cheap sampling (main thread)
 
+    func start() { isRunning = true }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        energySampler.stop()
+        setProcessPanelOpen(false)
+        setRestExpanded(false)
+        lastReading = nil
+        lastInventory = nil
+        lastTicks = nil
+        recentCPU.removeAll()
+        busySince = nil; hotSince = nil; pressureSince = nil
+        criticalPressure = CriticalDuration(); criticalThermal = CriticalDuration()
+        metricHold = MetricHold()
+    }
+
     func tick() {
+        guard isRunning else { return }
         energySampler.keepAlive()
         sampleCPU()
         sampleMemory()
@@ -210,7 +230,7 @@ final class SystemMonitor: ObservableObject {
 
     func sampleProcesses() {
         refreshRest()
-        guard processSessionStartedAt.isFinite, !sampling else { return }
+        guard isRunning, processSessionStartedAt.isFinite, !sampling else { return }
         sampling = true
         let lastSample = lastProcessSample
         let generation = processGeneration
@@ -336,7 +356,7 @@ final class SystemMonitor: ObservableObject {
     }
 
     func setRestExpanded(_ expanded: Bool) {
-        guard restExpanded != expanded else { return }
+        guard (!expanded || isRunning), restExpanded != expanded else { return }
         restExpanded = expanded
         restGeneration += 1
         restProbe = nil
@@ -344,7 +364,7 @@ final class SystemMonitor: ObservableObject {
     }
 
     private func refreshRest() {
-        guard restExpanded, !restInFlight else { return }
+        guard isRunning, restExpanded, !restInFlight else { return }
         restInFlight = true
         let generation = restGeneration
         restQueue.async {
@@ -394,17 +414,23 @@ final class SystemMonitor: ObservableObject {
         lastReading = reading
 
         let capturedAt = reading.capturedAt
-        DispatchQueue.main.asyncAfter(deadline: .now() + (reading.expiresAt - now)) { [weak self] in
-            guard let self, self.processSessionStartedAt <= capturedAt,
+        readingExpiry?.cancel()
+        let expiry = DispatchWorkItem { [weak self] in
+            guard let self, self.isRunning, self.processSessionStartedAt <= capturedAt,
                   self.lastReading?.capturedAt == capturedAt else { return }
             self.objectWillChange.send()
         }
+        readingExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + (reading.expiresAt - now), execute: expiry)
     }
 
     func setProcessPanelOpen(_ open: Bool) {
+        guard !open || isRunning else { return }
         processGeneration += 1
         scanCancel.cancel()
-        scanCancel = ScanCancellation()
+        scanCancel = ModuleCancellation()
+        readingExpiry?.cancel()
+        readingExpiry = nil
         lastProcessSample = nil
         processSessionStartedAt = open ? samplingTime : .infinity
     }
@@ -477,7 +503,9 @@ private final class EnergySampler: @unchecked Sendable {
     private let lock = NSLock()
     private var lastKeepAlive: TimeInterval = -.infinity
     private var timer: DispatchSourceTimer?
+    private var run: ModuleCancellation?
     private var baseline: Baseline?  // Only touched on `queue`.
+    private var baselineRun: ModuleCancellation?
 
     init(timebase: mach_timebase_info_data_t, deliver: @escaping (Double) -> Void) {
         self.timebase = timebase
@@ -489,26 +517,51 @@ private final class EnergySampler: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         lastKeepAlive = ProcessInfo.processInfo.systemUptime
         guard timer == nil else { return }
+        let run = ModuleCancellation()
+        self.run = run
         let source = DispatchSource.makeTimerSource(queue: queue)
         source.schedule(deadline: .now() + 0.2, repeating: SystemRules.energyInterval, leeway: .milliseconds(500))
-        source.setEventHandler { [weak self] in self?.scan() }
+        source.setEventHandler { [weak self] in self?.scan(run) }
         timer = source
         source.resume()
     }
 
-    private var isAlive: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return ProcessInfo.processInfo.systemUptime - lastKeepAlive < Self.idleLimit
+    func stop() {
+        let stopped = lock.withLock { cancelTimer() }
+        queue.async { [weak self] in
+            guard let self, self.baselineRun === stopped else { return }
+            self.baseline = nil
+            self.baselineRun = nil
+        }
     }
 
-    private func scan() {
-        guard isAlive else { baseline = nil; return }
+    // Called under the lock by both the tray and the timer.
+    private func cancelTimer() -> ModuleCancellation? {
+        let stopped = run
+        stopped?.cancel()
+        timer?.cancel()
+        timer = nil
+        run = nil
+        return stopped
+    }
+
+    private func scan(_ run: ModuleCancellation) {
+        let alive = lock.withLock {
+            guard self.run === run else { return false }
+            if ProcessInfo.processInfo.systemUptime - lastKeepAlive < Self.idleLimit { return true }
+            _ = cancelTimer()
+            return false
+        }
+        if baselineRun !== run || !alive { baseline = nil }
+        baselineRun = alive ? run : nil
+        guard alive else { return }
         let capturedAt = Double(mach_continuous_time()) * Double(timebase.numer) / Double(timebase.denom) / 1_000_000_000
         let uptime = ProcessInfo.processInfo.systemUptime
         guard let ticks = SystemMonitor.readTicks(), let table = SystemMonitor.processTable() else { baseline = nil; return }
         var counters: [pid_t: EnergyCounters] = [:]
         counters.reserveCapacity(table.count)
         for pid in table.keys {
+            guard !run.isCancelled else { return }
             if let (current, _) = SystemMonitor.rusageCounters(pid, timebase: timebase) { counters[pid] = current }
         }
         let before = baseline
@@ -530,17 +583,10 @@ private final class EnergySampler: @unchecked Sendable {
         let cpuWindow = Double(window.busy) / Double(window.total) * 100
         let total = SystemRules.energyTotal(measuredEnergy: energy, measuredCPU: measuredCPU, cpuWindow: cpuWindow,
                                             cores: Int(cores))
-        DispatchQueue.main.async { [deliver] in deliver(total) }
+        DispatchQueue.main.async { [deliver] in
+            if !run.isCancelled { deliver(total) }
+        }
     }
-}
-
-/// Lets the panel stop a process scan in flight when it closes or reopens.
-private final class ScanCancellation: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cancelled = false
-
-    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
-    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
 }
 
 /// Tint of the tray cell: the level of the metric it shows.

@@ -62,7 +62,7 @@ final class DiskService: ObservableObject {
     @Published private(set) var scanning = false
     private var lastScan = Date.distantPast
     private var lastExtra: [String] = []
-    private var generation = 0
+    private var scan: ModuleCancellation?
 
     static func candidates(extra: [String]) -> [DiskFolder] {
         let h = NSHomeDirectory()
@@ -108,7 +108,8 @@ final class DiskService: ObservableObject {
     }
 
     /// Allocated size on disk of everything under `path`, and whether some of it could not be read.
-    static func size(of path: String, excluding: [String] = []) -> (bytes: Int64, partial: Bool) {
+    static func size(of path: String, excluding: [String] = [], cancel: ModuleCancellation? = nil) -> (bytes: Int64, partial: Bool) {
+        guard cancel?.isCancelled != true else { return (0, true) }
         let skip = Set(excluding)
         let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .isDirectoryKey]
         var partial = false
@@ -116,6 +117,7 @@ final class DiskService: ObservableObject {
                                                      options: [], errorHandler: { _, _ in partial = true; return true }) else { return (0, true) }
         var total: Int64 = 0
         for case let u as URL in e {
+            if cancel?.isCancelled == true { return (total, true) }
             if !skip.isEmpty, skip.contains(u.path) { e.skipDescendants(); continue }
             guard let v = try? u.resourceValues(forKeys: keys), v.isDirectory != true else { continue }
             total += Int64(v.totalFileAllocatedSize ?? 0)
@@ -123,14 +125,23 @@ final class DiskService: ObservableObject {
         return (total, partial)
     }
 
+    func stop() {
+        if scanning { lastScan = .distantPast }
+        scan?.cancel()
+        scan = nil
+        scanning = false
+    }
+
     /// Call on the main thread. Publishes the folder list at once (so the panel has its final height) and
     /// fills in the sizes as each folder finishes.
     func refresh(extra: [String], force: Bool = false) {
+        guard ModuleRegistry.shared.isRunning(.tray) else { return }
         let fresh = Date().timeIntervalSince(lastScan) < 600 && extra == lastExtra && !folders.isEmpty
         if fresh && !force { return }
         lastScan = Date(); lastExtra = extra
-        generation += 1
-        let gen = generation
+        scan?.cancel()
+        let scan = ModuleCancellation()
+        self.scan = scan
         let old = Dictionary(folders.map { ($0.path, $0.bytes) }, uniquingKeysWith: { a, _ in a })
         var list = Self.candidates(extra: extra)
         for i in list.indices { list[i].bytes = old[list[i].path] ?? nil }   // keep the last known size while re-measuring
@@ -144,9 +155,9 @@ final class DiskService: ObservableObject {
             for p in paths {
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    let r = Self.size(of: p, excluding: skips[p] ?? [])
+                    let r = Self.size(of: p, excluding: skips[p] ?? [], cancel: scan)
                     DispatchQueue.main.async {
-                        if gen == self.generation, let i = self.folders.firstIndex(where: { $0.path == p }) {
+                        if self.scan === scan, let i = self.folders.firstIndex(where: { $0.path == p }) {
                             self.folders[i].bytes = r.bytes; self.folders[i].partial = r.partial
                         }
                     }
@@ -155,7 +166,8 @@ final class DiskService: ObservableObject {
             }
             group.wait()
             DispatchQueue.main.async {
-                guard gen == self.generation else { return }
+                guard self.scan === scan else { return }
+                self.scan = nil
                 self.scanning = false
                 log("disk: measured \(paths.count) folders in \(Int(Date().timeIntervalSince(started))) s")
             }
@@ -253,7 +265,7 @@ struct DiskPane: View {
             .frame(height: min(CGFloat(service.folders.count + 1) * rowHeight, 272))
             Divider()
             Row(icon: "sparkles", title: tx("Review and free up space…", "Revisar y limpiar espacio…"), subtitle: tx("Only opens a list; deletes nothing", "Solo abre una lista; no borra nada")) {
-                (NSApp.delegate as? AppDelegate)?.flyout.hide()
+                (NSApp.delegate as? AppDelegate)?.tray.flyout?.hide()
                 CleanupWindowController.shared.show()
             }
             Row(icon: "arrow.clockwise", title: tx("Measure again", "Volver a medir")) { service.refresh(extra: store.config.diskFolders, force: true) }

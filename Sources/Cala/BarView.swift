@@ -22,7 +22,6 @@ let deskID = "__desk"
 struct BarView: View {
     @ObservedObject var model: TaskbarModel
     @ObservedObject var store: ConfigStore
-    var showTray = true
     var screenKey = ""
     var onFrames: ([String: CGRect]) -> Void
 
@@ -60,10 +59,11 @@ struct BarView: View {
             HStack(spacing: 2) {
                 if !centered { icons }
                 Spacer(minLength: 8)
-                JoinPill(model: model)
-                if showTray { TrayView(model: model, screenKey: screenKey) }
-                else { UsageTrayView(model: model) }
-                ClockView(model: model)
+                if model.trayVisible {
+                    JoinPill(model: model)
+                    TrayView(model: model, screenKey: screenKey)
+                    ClockView(model: model)
+                }
                 DeskStrip(hovering: model.deskHover).reportFrame(deskID)
             }
             .padding(.leading, centered ? 0 : 8)
@@ -150,7 +150,7 @@ struct DeskStrip: View {
             .accessibilityElement()
             .accessibilityLabel(tx("Show desktop", "Mostrar escritorio"))
             .accessibilityAddTraits(.isButton)
-            .accessibilityAction { (NSApp.delegate as? AppDelegate)?.toggleDesktop() }
+            .accessibilityAction { (NSApp.delegate as? AppDelegate)?.bar?.toggleDesktop() }
     }
 }
 
@@ -227,7 +227,7 @@ struct ClockView: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityHint(tx("Shows your calendar", "Muestra tu calendario"))
             .accessibilityAction {
-                if let app = NSApp.delegate as? AppDelegate, let bar = app.bars.first { app.trayClick(trayClock, bar: bar) }
+                if let app = (NSApp.delegate as? AppDelegate)?.bar, let bar = app.bars.first { app.trayClick(trayClock, bar: bar) }
             }
             .reportFrame(trayClock)
         }
@@ -319,7 +319,7 @@ struct TrayView: View {
         .accessibilityLabel(accessibilityTitle ?? (id == trayMore ? tx("More", "Más") : (TrayItems.info(id)?.title ?? "")))
         .accessibilityAddTraits(.isButton)
         .accessibilityAction {
-            if let app = NSApp.delegate as? AppDelegate, let bar = app.bars.first(where: { $0.screen.key == screenKey }) ?? app.bars.first {
+            if let app = (NSApp.delegate as? AppDelegate)?.bar, let bar = app.bars.first(where: { $0.screen.key == screenKey }) ?? app.bars.first {
                 app.trayClick(id, bar: bar)
             }
         }

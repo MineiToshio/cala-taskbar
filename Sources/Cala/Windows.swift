@@ -59,10 +59,11 @@ func bringFront(_ app: NSRunningApplication) {
     app.activate(options: [.activateAllWindows])
 }
 
-func newWindow(pid: pid_t) {
-    guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+func newWindow(pid: pid_t, run: ModuleCancellation) {
+    guard !run.isCancelled, let app = NSRunningApplication(processIdentifier: pid) else { return }
     bringFront(app)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        guard !run.isCancelled, !app.isTerminated else { return }
         for down in [true, false] {
             let e = CGEvent(keyboardEventSource: nil, virtualKey: 45, keyDown: down)
             e?.flags = .maskCommand
@@ -122,20 +123,23 @@ enum WindowService {
         return v
     }
 
-    static func windows(for pid: pid_t) -> [WinRef] {
+    static func windows(for pid: pid_t, run: ModuleCancellation? = nil) -> [WinRef] {
+        guard run?.isCancelled != true else { return [] }
         let app = AXUIElementCreateApplication(pid)
         guard let arr = attr(app, kAXWindowsAttribute) as? [AXUIElement] else { return cgWindows(for: pid) }
         // For Cala itself only its real windows count (not the bar's own panels).
         let own = pid == ProcessInfo.processInfo.processIdentifier ? Set(TaskbarModel.ownWindows().map { CGWindowID($0.windowNumber) }) : nil
-        let ax: [WinRef] = arr.compactMap { w in
+        var ax: [WinRef] = []
+        for w in arr {
+            guard run?.isCancelled != true else { return [] }
             var id: CGWindowID = 0
-            guard _AXUIElementGetWindow(w, &id) == .success, id != 0 else { return nil }
-            if let own, !own.contains(id) { return nil }
+            guard _AXUIElementGetWindow(w, &id) == .success, id != 0 else { continue }
+            if let own, !own.contains(id) { continue }
             let sub = attr(w, kAXSubroleAttribute) as? String
-            if sub == "AXUnknown" || sub == "AXSystemDialog" { return nil }
+            if sub == "AXUnknown" || sub == "AXSystemDialog" { continue }
             let title = attr(w, kAXTitleAttribute) as? String ?? ""
             let min = (attr(w, kAXMinimizedAttribute) as? Bool) ?? false
-            return WinRef(id: id, title: title, minimized: min, ax: w, pid: pid)
+            ax.append(WinRef(id: id, title: title, minimized: min, ax: w, pid: pid))
         }
         if !ax.isEmpty { return ax }
         // AX sees nothing: windows of a hidden app are still real, otherwise they are ghosts of closed windows.
@@ -163,9 +167,11 @@ enum WindowService {
         return out
     }
 
-    static func press(_ el: AXUIElement, pid: pid_t) {
-        if let app = NSRunningApplication(processIdentifier: pid) { bringFront(app) }
+    static func press(_ el: AXUIElement, pid: pid_t, run: ModuleCancellation) {
+        guard !run.isCancelled, let app = NSRunningApplication(processIdentifier: pid) else { return }
+        bringFront(app)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard !run.isCancelled, !app.isTerminated else { return }
             AXUIElementPerformAction(el, kAXPressAction as CFString)
         }
     }
@@ -193,8 +199,8 @@ enum WindowService {
         AXUIElementSetAttributeValue(ax, kAXMainAttribute as CFString, kCFBooleanTrue)
     }
 
-    private static func closeTarget(_ w: WinRef) -> WinRef? {
-        guard let current = windows(for: w.pid).first(where: { $0.id == w.id }),
+    private static func closeTarget(_ w: WinRef, run: ModuleCancellation) -> WinRef? {
+        guard let current = windows(for: w.pid, run: run).first(where: { $0.id == w.id }),
               let ax = current.ax, !current.minimized,
               (attr(ax, kAXMinimizedAttribute) as? Bool) == false,
               let children = attr(ax, kAXChildrenAttribute) as? [AXUIElement],
@@ -203,18 +209,19 @@ enum WindowService {
         return current
     }
 
-    static func close(_ w: WinRef) {
+    static func close(_ w: WinRef, run: ModuleCancellation) {
+        guard !run.isCancelled else { return }
         var err: AXError = .cannotComplete
-        if let ax = w.ax, let btn = attr(ax, kAXCloseButtonAttribute) {
+        if let ax = w.ax, let btn = attr(ax, kAXCloseButtonAttribute), !run.isCancelled {
             err = AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString)
         }
         log("close id=\(w.id) pid=\(w.pid) ax=\(w.ax != nil) press=\(err.rawValue)")
         // Some apps ignore the close button press: only send Cmd+W to the same, focused window.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            guard let target = closeTarget(w) else { return }
+            guard !run.isCancelled, let target = closeTarget(w, run: run) else { return }
             raise(target)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                guard closeTarget(w) != nil,
+                guard !run.isCancelled, closeTarget(w, run: run) != nil,
                       NSWorkspace.shared.frontmostApplication?.processIdentifier == w.pid,
                       let focused = focusedWindow(pid: w.pid) else { return }
                 var id: CGWindowID = 0
@@ -231,11 +238,14 @@ enum WindowService {
     }
 
     /// Takes a thumbnail first (macOS stops drawing video layers once minimizing starts), then minimizes.
-    static func minimize(_ w: WinRef) {
-        guard let ax = w.ax else { return }
-        Task {
-            await snapshot([w.id])
-            await MainActor.run { _ = AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }
+    static func minimize(_ w: WinRef, run: ModuleCancellation) {
+        guard !run.isCancelled, let ax = w.ax else { return }
+        Task { @MainActor in
+            guard !run.isCancelled else { return }
+            let windows = await ThumbCache.shared.scWindows(ids: [w.id])
+            await ThumbCache.shared.capture(windows, shouldCapture: { _ in !run.isCancelled })
+            guard !run.isCancelled else { return }
+            AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
         }
     }
 
@@ -246,9 +256,9 @@ enum WindowService {
 
     /// Click on a running app's icon: toggle like the Windows taskbar.
     @discardableResult
-    static func toggle(pid: pid_t) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
-        let wins = windows(for: pid)
+    static func toggle(pid: pid_t, run: ModuleCancellation) -> Bool {
+        guard !run.isCancelled, let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        let wins = windows(for: pid, run: run)
         log("click \(app.localizedName ?? "?") windows=\(wins.count) trusted=\(AXIsProcessTrusted())")
         if wins.isEmpty || wins.allSatisfy({ $0.ax == nil }) {
             bringFront(app)
@@ -258,7 +268,7 @@ enum WindowService {
             return true
         }
         if app.isActive, let visible = wins.first(where: { !$0.minimized }) {
-            if wins.filter({ !$0.minimized }).count == 1 { minimize(visible) } else { bringFront(app) }
+            if wins.filter({ !$0.minimized }).count == 1 { minimize(visible, run: run) } else { bringFront(app) }
         } else if let first = wins.first(where: { !$0.minimized }) ?? wins.first {
             raise(first)
         }
@@ -359,22 +369,33 @@ final class ThumbCache {
 /// so minimized windows keep a recent preview. Nothing runs periodically: it is purely event-driven.
 final class MinimizeWatcher {
     static let shared = MinimizeWatcher()
+    private let registrationQueue = DispatchQueue(label: "local.cala.thumbnails.ax", qos: .utility)
     private var observers: [pid_t: AXObserver] = [:]
+    private var registering: [pid_t: UUID] = [:]
+    private var unsupported = Set<pid_t>()
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var mouseMonitor: Any?
+    private var run: ModuleCancellation?
+    private var captures: [CGWindowID: Task<Void, Never>] = [:]
 
     func start() {
+        guard run == nil else { return }
+        let run = ModuleCancellation()
+        self.run = run
         let nc = NSWorkspace.shared.notificationCenter
-        nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] n in
-            if let a = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication { self?.watch(a) }
-        }
-        nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] n in
-            if let a = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-               let obs = self?.observers.removeValue(forKey: a.processIdentifier) {
-                CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .commonModes)
-            }
-        }
+        workspaceObservers.append(nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            guard let self, self.run === run,
+                  let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self.watch(app)
+        })
+        workspaceObservers.append(nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            guard let self, self.run === run,
+                  let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self.unwatch(app.processIdentifier)
+        })
         // Pressing the yellow button: capture right then, before the click completes and minimizing starts.
-        NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { _ in
-            guard AXIsProcessTrusted() else { return }
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+            guard let self, self.run === run, AXIsProcessTrusted() else { return }
             let p = NSEvent.mouseLocation
             guard let h = NSScreen.screens.first?.frame.height else { return }
             var el: AXUIElement?
@@ -388,35 +409,99 @@ final class MinimizeWatcher {
             AXUIElementSetMessagingTimeout(window, 0.25)
             var id: CGWindowID = 0
             guard _AXUIElementGetWindow(window, &id) == .success, id != 0 else { return }
-            Task { await WindowService.snapshot([id]) }
+            self.capture(id)
         }
         sync()
     }
 
+    func stop() {
+        run?.cancel()
+        run = nil
+        registering.removeAll()
+        unsupported.removeAll()
+        workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        workspaceObservers.removeAll()
+        if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
+        mouseMonitor = nil
+        for pid in Array(observers.keys) { unwatch(pid) }
+        captures.values.forEach { $0.cancel() }
+        captures.removeAll()
+    }
+
+    private func unwatch(_ pid: pid_t) {
+        registering[pid] = nil
+        unsupported.remove(pid)
+        guard let observer = observers.removeValue(forKey: pid) else { return }
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+    }
+
+    private func capture(_ id: CGWindowID, onMinimize: Bool = false) {
+        guard let run, captures[id] == nil else { return }
+        captures[id] = Task { @MainActor [weak self] in
+            let windows = await ThumbCache.shared.scWindows(ids: [id])
+            guard !Task.isCancelled else { return }
+            await ThumbCache.shared.capture(windows)
+            guard let self, self.run === run else { return }
+            self.captures[id] = nil
+            if onMinimize {
+                log("minimized window \(id): thumbnail \(ThumbCache.shared.cached(id) != nil ? "saved" : "NOT captured")")
+            }
+        }
+    }
+
     /// Watches every regular app (also retried later, in case Accessibility was granted after launch).
     func sync() {
-        guard AXIsProcessTrusted() else { return }
+        guard run != nil, AXIsProcessTrusted() else { return }
         for a in NSWorkspace.shared.runningApplications where a.activationPolicy == .regular { watch(a) }
     }
 
     private func watch(_ app: NSRunningApplication) {
         let pid = app.processIdentifier
-        guard observers[pid] == nil, pid != ProcessInfo.processInfo.processIdentifier, AXIsProcessTrusted() else { return }
-        var obs: AXObserver?
-        let cb: AXObserverCallback = { _, element, _, _ in
+        guard let run, observers[pid] == nil, registering[pid] == nil, !unsupported.contains(pid),
+              pid != ProcessInfo.processInfo.processIdentifier, AXIsProcessTrusted() else { return }
+        let request = UUID()
+        registering[pid] = request
+        registrationQueue.async { [weak self] in
+            guard let self, !run.isCancelled else { return }
+            let started = DispatchTime.now()
+            let (observer, result) = self.registerObserver(pid: pid)
+            #if DEBUG
+            let milliseconds = (DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000
+            if result == .notificationUnsupported || result == .notImplemented || milliseconds >= 50 {
+                log("thumbnails: AX registration pid=\(pid) result=\(result.rawValue) duration=\(milliseconds)ms")
+            }
+            #endif
+            DispatchQueue.main.async {
+                guard self.run === run, self.registering[pid] == request else { return }
+                self.registering[pid] = nil
+                guard !app.isTerminated else { return }
+                if let observer {
+                    CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+                    self.observers[pid] = observer
+                } else if result == .notificationUnsupported || result == .notImplemented {
+                    self.unsupported.insert(pid)
+                }
+            }
+        }
+    }
+
+    private func registerObserver(pid: pid_t) -> (AXObserver?, AXError) {
+        var observer: AXObserver?
+        let callback: AXObserverCallback = { _, element, _, context in
+            guard let context else { return }
+            let watcher = Unmanaged<MinimizeWatcher>.fromOpaque(context).takeUnretainedValue()
             var id: CGWindowID = 0
             guard _AXUIElementGetWindow(element, &id) == .success, id != 0 else { return }
             // Already captured just before minimizing (mouse-down, Cmd+M, the bar)? Keep that one: it is better.
             if let t = ThumbCache.shared.stamps[id], Date().timeIntervalSince(t) < 5 { return }
-            Task {
-                let ws = await ThumbCache.shared.scWindows(ids: [id])
-                await ThumbCache.shared.capture(ws)
-                log("minimized window \(id): thumbnail \(ThumbCache.shared.cached(id) != nil ? "saved" : "NOT captured")")
-            }
+            watcher.capture(id, onMinimize: true)
         }
-        guard AXObserverCreate(pid, cb, &obs) == .success, let obs else { return }
-        AXObserverAddNotification(obs, AXUIElementCreateApplication(pid), kAXWindowMiniaturizedNotification as CFString, nil)
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .commonModes)
-        observers[pid] = obs
+        let created = AXObserverCreate(pid, callback, &observer)
+        guard created == .success, let observer else { return (nil, created) }
+        let element = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        let result = AXObserverAddNotification(observer, element, kAXWindowMiniaturizedNotification as CFString,
+                                               Unmanaged.passUnretained(self).toOpaque())
+        return (result == .success ? observer : nil, result)
     }
 }

@@ -22,6 +22,7 @@ final class TaskbarModel: ObservableObject {
     @Published var badges: [String: String] = [:]
     @Published var usage: [UsageState] = []
     @Published var trayHover: String?
+    @Published private(set) var trayVisible = false
     /// Running apps that currently have no windows (shown with a dot instead of the bar).
     @Published var windowless: Set<pid_t> = []
     /// Icon being dragged, the screen it is on and its ghost's center x (bar coordinates).
@@ -47,10 +48,16 @@ final class TaskbarModel: ObservableObject {
     private var lastOwnCount = 0
     var hoverSince = Date()
     let store: ConfigStore
+    private let run: ModuleCancellation
     private var bag = Set<AnyCancellable>()
+    private var isRunning = true
+    private var trayRunID: UUID?
+    private var usageObserver: AnyCancellable?
+    private var powerSource: CFRunLoopSource?
 
-    init(store: ConfigStore) {
+    init(store: ConfigStore, run: ModuleCancellation) {
         self.store = store
+        self.run = run
         let nc = NSWorkspace.shared.notificationCenter
         [NSWorkspace.didLaunchApplicationNotification,
          NSWorkspace.didTerminateApplicationNotification,
@@ -64,10 +71,41 @@ final class TaskbarModel: ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self?.rebuild() }
             }.store(in: &bag)
         }
-        UsageService.shared.$providers.receive(on: DispatchQueue.main).sink { [weak self] in self?.usage = $0 }.store(in: &bag)
         rebuild()
+    }
+
+    func startTray() {
+        guard isRunning, trayRunID == nil else { return }
+        let run = UUID()
+        trayRunID = run
+        usageObserver = UsageService.shared.$providers.receive(on: DispatchQueue.main).sink { [weak self] providers in
+            guard let self, self.trayRunID == run else { return }
+            self.usage = providers
+        }
         watchPower()
         disk = DiskInfo.read()
+        trayVisible = true
+    }
+
+    func stopTray() {
+        trayRunID = nil
+        trayVisible = false
+        trayHover = nil
+        usageObserver?.cancel()
+        usageObserver = nil
+        if let powerSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes)
+            CFRunLoopSourceInvalidate(powerSource)
+        }
+        powerSource = nil
+        photoLoading = false
+        photoTried = .distantPast
+    }
+
+    func teardown() {
+        isRunning = false
+        bag.removeAll()
+        stopTray()
     }
 
     /// Event-driven: macOS calls back the moment the power source (plug / unplug) or charge state changes,
@@ -77,8 +115,13 @@ final class TaskbarModel: ObservableObject {
         guard let src = IOPSNotificationCreateRunLoopSource({ ctx in
             guard let ctx else { return }
             let m = Unmanaged<TaskbarModel>.fromOpaque(ctx).takeUnretainedValue()
-            DispatchQueue.main.async { m.batt = SystemTray.battery() }
+            let run = m.trayRunID
+            DispatchQueue.main.async { [weak m] in
+                guard let m, let run, m.trayRunID == run else { return }
+                m.batt = SystemTray.battery()
+            }
         }, ctx)?.takeRetainedValue() else { return }
+        powerSource = src
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         batt = SystemTray.battery()
     }
@@ -94,6 +137,7 @@ final class TaskbarModel: ObservableObject {
     }
 
     func rebuild() {
+        guard isRunning else { return }
         frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
         let me = ProcessInfo.processInfo.processIdentifier
         let running = NSWorkspace.shared.runningApplications
@@ -140,6 +184,7 @@ final class TaskbarModel: ObservableObject {
     }
 
     func refreshTray() {
+        guard let run = trayRunID else { return }
         let battery = SystemTray.battery()
         if batt?.pct != battery?.pct || batt?.charging != battery?.charging || batt?.isCharging != battery?.isCharging { batt = battery }
         let diskNow = DiskInfo.read()
@@ -159,10 +204,14 @@ final class TaskbarModel: ObservableObject {
         // Retried every 30 s until it loads; a transient lookup failure no longer leaves the bar without a photo.
         if userPhoto == nil, !photoLoading, Date().timeIntervalSince(photoTried) > 30 {
             photoLoading = true; photoTried = Date()
-            DispatchQueue.global(qos: .utility).async {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
                 let i = Users.cachedPhoto(NSUserName())
                 _ = Users.list() // Warm the profile list so the panel opens at its final size.
-                DispatchQueue.main.async { self.photoLoading = false; if let i, self.userPhoto !== i { self.userPhoto = i } }
+                DispatchQueue.main.async {
+                    guard let self, self.trayRunID == run else { return }
+                    self.photoLoading = false
+                    if let i, self.userPhoto !== i { self.userPhoto = i }
+                }
             }
         }
         let bright = Brightness.get() != nil
@@ -180,8 +229,9 @@ final class TaskbarModel: ObservableObject {
     /// Returns true when the click opens something (launch or reopen) rather than raising/minimizing a window.
     @discardableResult
     func click(_ item: AppItem) -> Bool {
+        guard !run.isCancelled else { return false }
         if let pid = item.pid {
-            return WindowService.toggle(pid: pid)
+            return WindowService.toggle(pid: pid, run: run)
         } else if let url = item.url {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             return true

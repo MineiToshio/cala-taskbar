@@ -71,7 +71,21 @@ final class WifiInfo {
     var nearby: [(ssid: String, rssi: Int, secure: Bool)] = []
     var objects: [String: CWNetwork] = [:]
     let loc = CLLocationManager()
+    private let scanQueue = DispatchQueue(label: "local.cala.wifi.scan", qos: .utility)
     private var scanning = false
+    private var runID: UUID?
+
+    func start() {
+        guard runID == nil else { return }
+        runID = UUID()
+        scan()
+    }
+
+    func stop() {
+        runID = nil
+        nearby.removeAll()
+        objects.removeAll()
+    }
 
     func requestLocation() {
         if loc.authorizationStatus == .notDetermined { loc.requestWhenInUseAuthorization() }
@@ -82,25 +96,29 @@ final class WifiInfo {
         return profiles.compactMap(\.ssid)
     }
     func scan() {
-        guard !scanning, let i = CWWiFiClient.shared().interface(), i.powerOn() else { return }
+        guard let runID, !scanning, let i = CWWiFiClient.shared().interface(), i.powerOn() else { return }
         scanning = true
-        DispatchQueue.global(qos: .utility).async {
+        scanQueue.async {
             let nets = (try? i.scanForNetworks(withSSID: nil)) ?? []
             var seen = Set<String>(); var out: [(String, Int, Bool)] = []; var objs: [String: CWNetwork] = [:]
             for n in nets.sorted(by: { $0.rssiValue > $1.rssiValue }) {
                 guard let s = n.ssid, !s.isEmpty, seen.insert(s).inserted else { continue }
                 out.append((s, n.rssiValue, !n.supportsSecurity(.none))); objs[s] = n
             }
-            DispatchQueue.main.async { self.nearby = out; self.objects = objs; self.scanning = false }
+            DispatchQueue.main.async {
+                self.scanning = false
+                guard self.runID == runID else { self.scan(); return }
+                self.nearby = out; self.objects = objs
+            }
         }
     }
     func connect(_ ssid: String) {
-        guard let i = CWWiFiClient.shared().interface() else { return }
+        guard let runID, let i = CWWiFiClient.shared().interface() else { return }
         let n = objects[ssid]
         DispatchQueue.global(qos: .userInitiated).async {
             let connected = n.map { (try? i.associate(to: $0, password: nil)) != nil } ?? false
             DispatchQueue.main.async {
-                if !connected { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.wifi-settings-extension")!) }
+                if self.runID == runID, !connected { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.wifi-settings-extension")!) }
             }
         }
     }
@@ -256,20 +274,26 @@ enum Users {
         return loaded
     }
     // Accessed only on the main queue; kept set through verification and any lock fallback.
-    private static var switchAttempt: UUID?
+    private static var switchAttempt: ModuleCancellation?
     private static var switchSucceeded = false
+
+    static func cancelSwitch() {
+        switchAttempt?.cancel()
+        switchAttempt = nil
+    }
 
     /// Ask loginwindow to show the target user's login screen, then verify that our session left the console.
     static func switchTo(_ name: String) {
         guard Thread.isMainThread else { DispatchQueue.main.async { switchTo(name) }; return }
+        guard ModuleRegistry.shared.isRunning(.tray) else { return }
         guard switchAttempt == nil else { log("switch user: request ignored, switch in progress"); return }
-        let attempt = UUID()
+        let attempt = ModuleCancellation()
         switchAttempt = attempt
         switchSucceeded = false
         DispatchQueue.global(qos: .userInitiated).async {
             defer {
                 DispatchQueue.main.async {
-                    if switchAttempt == attempt { switchAttempt = nil }
+                    if switchAttempt === attempt { switchAttempt = nil }
                 }
             }
             func elapsed(_ start: ContinuousClock.Instant) -> Double {
@@ -279,13 +303,14 @@ enum Users {
             func unknown() { log("switch user: unknown, probably switched after delayed verification; not locking") }
             func fail(_ reason: String, since start: ContinuousClock.Instant? = nil) {
                 DispatchQueue.main.async {
-                    guard switchAttempt == attempt, !switchSucceeded else { return }
+                    guard switchAttempt === attempt, !attempt.isCancelled, !switchSucceeded else { return }
                     if let start, elapsed(start) > 6 { unknown(); return }
                     switchAttempt = nil // Consume this attempt before firing the fallback.
                     log("switch user: \(reason), locking instead")
                     lockScreen()
                 }
             }
+            guard !attempt.isCancelled else { return }
             guard let login = dlopen("/System/Library/PrivateFrameworks/login.framework/login", RTLD_NOW) else {
                 fail("login.framework unavailable"); return
             }
@@ -335,6 +360,7 @@ enum Users {
                 _ = try PropertyListSerialization.data(fromPropertyList: dict, format: .binary, options: 0)
             } catch { fail("OpenDirectory record is not plist-serializable: \(error)"); return }
 
+            guard !attempt.isCancelled else { return }
             let start = ContinuousClock.now
             let result = unsafeBitCast(switchSym, to: SwitchFn.self)(dict as CFDictionary)
             log("switch user: \(name) via SACSwitchToUser -> \(result)")
@@ -342,10 +368,11 @@ enum Users {
             // Zero means accepted, not switched. A delayed wake may have missed the entire switch.
             repeat {
                 Thread.sleep(forTimeInterval: 0.25)
+                guard !attempt.isCancelled else { return }
                 let own = sessions().first { ($0["kCGSSessionIDKey"] as? Int) == sid }
                 if (own?["kCGSSessionOnConsoleKey"] as? Bool) == false {
                     DispatchQueue.main.sync {
-                        if switchAttempt == attempt { switchSucceeded = true }
+                        if switchAttempt === attempt { switchSucceeded = true }
                     }
                     log("switch user: switched after \(String(format: "%.2f", elapsed(start))) s")
                     return
@@ -358,6 +385,7 @@ enum Users {
 
     /// Ctrl+Cmd+Q: lock screen, where "Switch User" lives.
     static func lockScreen() {
+        guard ModuleRegistry.shared.isRunning(.tray) else { return }
         let src = CGEventSource(stateID: .hidSystemState)
         for down in [true, false] {
             let e = CGEvent(keyboardEventSource: src, virtualKey: 12, keyDown: down)

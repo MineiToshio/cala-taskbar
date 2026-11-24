@@ -19,6 +19,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     private var samples: [String: [(date: Date, used: Double)]] = [:]
     private var bag = Set<AnyCancellable>()
     private var store: ConfigStore?
+    private var run: ModuleCancellation?
     private let firedKey = "usageAlertsFired"
 
     private func key(_ p: UsageProvider, _ w: UsageWindow) -> String { p.rawValue + "|" + w.id }
@@ -27,9 +28,25 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     func start(store: ConfigStore) {
         guard self.store == nil else { return }
         self.store = store
+        let run = ModuleCancellation()
+        self.run = run
         loadHistory()
         if canNotify { UNUserNotificationCenter.current().delegate = self }
-        UsageService.shared.$providers.receive(on: DispatchQueue.main).sink { [weak self] in self?.ingest($0) }.store(in: &bag)
+        UsageService.shared.$providers.receive(on: DispatchQueue.main).sink { [weak self] states in
+            guard !run.isCancelled else { return }
+            self?.ingest(states)
+        }.store(in: &bag)
+    }
+
+    func stop() {
+        run?.cancel()
+        run = nil
+        bag.removeAll()
+        if canNotify {
+            let center = UNUserNotificationCenter.current()
+            if center.delegate === self { center.delegate = nil }
+        }
+        store = nil
     }
 
     // MARK: Projection
@@ -178,10 +195,12 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private func deliver(id: String, title: String, body: String) {
-        guard canNotify else { return }
+        guard canNotify, let run else { return }
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
+            guard !run.isCancelled else { return }
             let send = {
+                guard !run.isCancelled else { return }
                 let c = UNMutableNotificationContent()
                 c.title = title; c.body = body; c.sound = .default
                 center.add(UNNotificationRequest(identifier: id, content: c, trigger: nil))

@@ -823,7 +823,7 @@ struct TrayPane: View {
                                 Image(systemName: "line.3.horizontal").font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary).frame(width: 14)
                                 Group {
                                     if id == trayMail { MailTrayGlyph(unread: 0) }
-                                    else { TrayGlyph(id: id, model: (NSApp.delegate as? AppDelegate)?.model) }
+                                    else { TrayGlyph(id: id, model: (NSApp.delegate as? AppDelegate)?.bar?.model) }
                                 }.frame(width: 26, height: 22).foregroundStyle(.secondary)
                                 Text(info.title).font(.system(size: 13, weight: .medium))
                                 Spacer()

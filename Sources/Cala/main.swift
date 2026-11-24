@@ -1,8 +1,5 @@
 import AppKit
 import SwiftUI
-import Combine
-import ScreenCaptureKit
-import CoreWLAN
 import Darwin
 
 func CGSMainConnectionID() -> Int32 {
@@ -11,23 +8,6 @@ func CGSMainConnectionID() -> Int32 {
     defer { dlclose(handle) }
     guard let symbol = dlsym(handle, "CGSMainConnectionID") else { return 0 }
     return unsafeBitCast(symbol, to: MainConnection.self)()
-}
-
-private func enableBackgroundCursor() {
-    typealias MainConnection = @convention(c) () -> Int32
-    typealias SetProperty = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32
-    guard let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY) else { return }
-    defer { dlclose(handle) }
-    guard let mainSymbol = dlsym(handle, "CGSMainConnectionID"),
-          let propertySymbol = dlsym(handle, "CGSSetConnectionProperty") else { return }
-    let connection = unsafeBitCast(mainSymbol, to: MainConnection.self)()
-    let setProperty = unsafeBitCast(propertySymbol, to: SetProperty.self)
-    _ = setProperty(connection, connection, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
-}
-
-final class BarPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
 }
 
 final class BlockItem: NSMenuItem {
@@ -41,79 +21,24 @@ final class BlockItem: NSMenuItem {
     @objc func run() { block?() }
 }
 
-final class VolumeSlider: NSView {
-    let slider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
-    let onChange: (Float) -> Void
-    init(volume: Float, muted: Bool, onChange: @escaping (Float) -> Void) {
-        self.onChange = onChange
-        super.init(frame: NSRect(x: 0, y: 0, width: 230, height: 34))
-        let lo = NSImageView(image: NSImage(systemSymbolName: "speaker.fill", accessibilityDescription: nil)!)
-        let hi = NSImageView(image: NSImage(systemSymbolName: "speaker.wave.3.fill", accessibilityDescription: nil)!)
-        lo.frame = NSRect(x: 12, y: 9, width: 16, height: 16)
-        hi.frame = NSRect(x: 202, y: 9, width: 20, height: 16)
-        slider.frame = NSRect(x: 34, y: 7, width: 164, height: 20)
-        slider.doubleValue = muted ? 0 : Double(volume)
-        slider.isContinuous = true
-        slider.target = self; slider.action = #selector(changed)
-        [lo, hi, slider].forEach(addSubview)
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    @objc func changed() { onChange(Float(slider.doubleValue)) }
-}
-
-final class Bar {
-    var screen: NSScreen
-    let primary: Bool
-    let panel: BarPanel
-    var frames: [String: CGRect] = [:]
-    var hidden = false
-    var lastInside = Date()
-
-    init(screen: NSScreen, primary: Bool, model: TaskbarModel, store: ConfigStore) {
-        self.screen = screen
-        self.primary = primary
-        panel = BarPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
-                         backing: .buffered, defer: false)
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        panel.hidesOnDeactivate = false
-        panel.contentView = NSHostingView(rootView: BarView(model: model, store: store, showTray: true, screenKey: screen.key,
-                                                            onFrames: { [weak self] in self?.frames = $0 }))
-    }
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let store = ConfigStore.shared
-    lazy var model = TaskbarModel(store: store)
-    var bars: [Bar] = []
-    var hoverBar: Bar?
-    var overlayBar: Bar?
-    /// The bar whose tray item opened the flyout. While the flyout is open this bar never auto-hides (PanelPolicy).
-    var flyoutBar: Bar?
-    let preview = PreviewController()
-    lazy var flyout = FlyoutController(model: model)
-    var bag = Set<AnyCancellable>()
-    var lastHover = Date.distantPast
-    var hoverID: String?
-    var lastBadge = Date.distantPast
-    var lastReserve = Date.distantPast
-    var lastTray = Date.distantPast
-    var lastCalendar = Date.distantPast
-    var lastMonitor = Date.distantPast
-    var windowsInFlight = false
-    var badgesInFlight = false
-    var terminationSource: DispatchSourceSignal?
-    var failedResizeIDs = Set<CGWindowID>()
+    private let registry = ModuleRegistry.shared
+    private let store = ConfigStore.shared
+    private var terminationSource: DispatchSourceSignal?
+    var bar: BarController? { registry.bar.controller }
+    var tray: TrayModule { registry.tray }
 
     /// Opening the app again while it is running (Finder, Launchpad, Spotlight) shows the settings.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         SettingsWindowController.shared.show(); return true
     }
 
-    func applicationWillTerminate(_ n: Notification) { MailService.shared.stop(); DockControl.onQuit(store); MenuBarControl.onQuit(store); MenuBarIcons.onQuit(store); Watchdog.cleanExit() }
+    func applicationWillTerminate(_ n: Notification) {
+        registry.shutdown()
+        terminationSource?.cancel()
+        terminationSource = nil
+        Watchdog.cleanExit()
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
@@ -136,121 +61,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminationSource = source
         source.resume()
         LoginItem.migrateLegacy()
-        DockControl.applyOnLaunch(store)
-        MenuBarControl.applyOnLaunch(store)
-        MenuBarIcons.apply(store)
+        Watchdog.start(store: store)
+        registry.launch(onboardingCompleted: OnboardingWindowController.completed, axTrusted: AXIsProcessTrusted())
         MenuBarDiagnostics.install()
-        // `notifyutil -p local.cala.openSystemPanel` opens the CPU panel (handy to check it without clicking).
+        // `notifyutil -p local.cala.openSystemPanel` opens the CPU panel while the tray is running.
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), Unmanaged.passUnretained(self).toOpaque(), { _, observer, _, _, _ in
             guard let observer else { return }
-            let me = Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue()
-            DispatchQueue.main.async { if let bar = me.bars.first { me.trayClick(traySystem, bar: bar) } }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue()
+            DispatchQueue.main.async { delegate.tray.openSystemPanel() }
         }, "local.cala.openSystemPanel" as CFString, nil, .deliverImmediately)
-        Watchdog.start(store: store)
         CrashReporter.checkAtLaunch(store: store)
-        WindowSwitcher.shared.ensureTap()
-        MinimizeWatcher.shared.start()
-        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in WindowSwitcher.shared.ensureTap(); MinimizeWatcher.shared.sync() }
-        // No permission prompt at launch: the welcome asks for them one by one, and each feature asks again the first
-        // time it is used (see PermissionCenter).
-        enableBackgroundCursor()
-        WifiInfo.shared.scan()
 
-        LaunchFeedback.shared.model = model
-        rebuildBars()
-        // Claude/Codex usage reads their credentials, which can make macOS ask for Keychain access: start it only
-        // once the welcome is out of the way so that dialog never lands on top of it.
-        let startUsage = { [weak self] in
-            guard let self else { return }
-            let usageVisible = !self.store.config.autoHide || self.bars.contains(where: { !$0.hidden })
-            UsageService.shared.start(store: self.store, visible: usageVisible)
-            UsagePace.shared.start(store: self.store)
-            if usageVisible { UsageService.shared.refresh() }
+        // Usage and mail can prompt for Keychain access, so let the welcome finish first.
+        let onboarding = OnboardingWindowController.shared
+        onboarding.onFinish = { [weak self] in
+            guard let self, !self.registry.isShuttingDown else { return }
+            self.registry.finishChoosingModulesIfNeeded()
+            self.tray.finishOnboarding()
         }
-        // Mail reads the Keychain too, and after an update a short explanation comes first (see MailKeychainNotice).
-        // Only mail sync waits for it; it also waits for the welcome so the two never overlap.
-        let startMail = { MailService.shared.start(explainingKeychain: MailKeychainNoticeController.shared.show) }
-        OnboardingWindowController.shared.onFinish = { startUsage(); startMail() }
-        if !OnboardingWindowController.shared.showIfNeeded(existingInstall: store.existedAtLaunch) {
-            OnboardingWindowController.shared.onFinish = nil
-            startUsage()
-            startMail()
+        if !onboarding.showIfNeeded(existingInstall: store.existedAtLaunch) {
+            onboarding.onFinish = nil
+            tray.finishOnboarding()
         }
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self, !self.store.config.autoHide || self.bars.contains(where: { !$0.hidden }) else { return }
-            UsageService.shared.refresh()
-        }
-        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.rebuildBars() }
-        }
-
-        store.$config.receive(on: DispatchQueue.main).sink { [weak self] _ in
-            DispatchQueue.main.async { self?.layoutAll(animated: false) }
-        }.store(in: &bag)
-
-        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] e in
-            guard let self, self.bars.contains(where: { $0.panel === e.window }) else { return e }
-            // Left press on an app icon: wait for mouse-up so it can become a drag.
-            if e.type == .leftMouseDown, let hi = self.hitInfo(NSEvent.mouseLocation),
-               let id = hi.id, self.model.items.contains(where: { $0.id == id }) {
-                self.pressed = (id, hi.bar, NSEvent.mouseLocation.x, e)
-                self.grab = NSEvent.mouseLocation.x - self.iconCenterX(hi.bar, id, fallback: NSEvent.mouseLocation.x)
-                self.dragging = false
-                return nil
-            }
-            self.handleClick(e)
-            return nil
-        }
-        NSEvent.addLocalMonitorForEvents(matching: .otherMouseDown) { [weak self] e in
-            guard let self, e.buttonNumber == 2 else { return e }
-            let m = NSEvent.mouseLocation
-            if e.window === self.preview.panel { self.preview.middleClick(m); return nil }
-            guard self.bars.contains(where: { $0.panel === e.window }),
-                  let id = self.hitInfo(m)?.id, let item = self.model.items.first(where: { $0.id == id }) else { return e }
-            self.preview.commitPeek()
-            self.preview.hide()
-            if let pid = item.pid { newWindow(pid: pid); self.launchFeedback(item) } else if self.model.click(item) { self.launchFeedback(item) }
-            return nil
-        }
-        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDragged) { [weak self] e in
-            guard let self, let p = self.pressed else { return e }
-            let m = NSEvent.mouseLocation
-            if !self.dragging && abs(m.x - p.x) > 5 {
-                self.dragging = true; self.preview.hide()
-                self.model.dragScreen = p.bar.screen.key; self.model.dragID = p.id
-            }
-            if self.dragging {
-                let lo = p.bar.panel.frame.minX
-                self.model.dragX = min(max(m.x - self.grab - lo, 20), p.bar.panel.frame.width - 20)
-            }
-            if self.dragging, let hi = self.hitInfo(m), hi.bar === p.bar, let t = hi.id,
-               t != p.id, self.model.items.contains(where: { $0.id == t }) {
-                self.model.move(p.id, to: t)
-            }
-            return nil
-        }
-        NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] e in
-            guard let self, let p = self.pressed else { return e }
-            self.pressed = nil
-            if self.dragging {
-                self.dragging = false
-                if let r = p.bar.frames[p.id] {
-                    withAnimation(.easeOut(duration: 0.15)) { self.model.dragX = r.midX }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.17) { self.model.dragID = nil }
-            } else { self.handleClick(p.event) }
-            return nil
-        }
-
-        NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] e in
-            guard let self, self.bars.contains(where: { $0.panel === e.window }),
-                  self.hitInfo(NSEvent.mouseLocation)?.id == trayVol else { return e }
-            SystemTray.setVolume(self.model.volume + Float(e.scrollingDeltaY) * (e.hasPreciseScrollingDeltas ? 0.004 : 0.03))
-            self.model.refreshTray()
-            return nil
-        }
-
-        Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in self?.tick() }
         if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
             let dir = CommandLine.arguments[i + 1]
             for p in SettingsPane.allCases {
@@ -263,355 +95,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         }
         if CommandLine.arguments.contains("--settings") { SettingsWindowController.shared.show() }
-    }
-
-    func rebuildBars() {
-        bars.forEach { $0.panel.orderOut(nil) }
-        preview.hide(); flyout.hide(); flyoutBar = nil
-        bars = NSScreen.screens.enumerated().map { i, sc in
-            Bar(screen: sc, primary: i == 0, model: model, store: store)
-        }
-        layoutAll(animated: false)
-        bars.forEach { $0.panel.orderFrontRegardless() }
-    }
-
-    func layoutAll(animated: Bool) { bars.forEach { layoutBar($0, animated: animated) } }
-
-    func barFrame(_ b: Bar, hidden: Bool) -> NSRect {
-        let f = b.screen.frame
-        let h = store.barHeight
-        return NSRect(x: f.minX, y: hidden ? f.minY - h : f.minY, width: f.width, height: h)
-    }
-
-    func layoutBar(_ b: Bar, animated: Bool) {
-        if !store.config.autoHide { b.hidden = false }
-        let target = barFrame(b, hidden: b.hidden)
-        if animated {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.18
-                b.panel.animator().setFrame(target, display: true)
-            }
-        } else {
-            b.panel.setFrame(target, display: true)
-        }
-    }
-
-    /// The bar under the mouse and the icon id (nil if over empty bar space).
-    func hitInfo(_ m: NSPoint) -> (bar: Bar, id: String?)? {
-        for b in bars where !b.hidden && barFrame(b, hidden: false).contains(m) {
-            let lx = m.x - b.panel.frame.minX
-            return (b, b.frames.first { $0.value.minX <= lx && lx <= $0.value.maxX }?.key)
-        }
-        return nil
-    }
-
-    func iconCenterX(_ b: Bar, _ id: String, fallback: CGFloat) -> CGFloat {
-        guard let r = b.frames[id] else { return fallback }
-        return b.panel.frame.minX + r.midX
-    }
-
-    /// Ghost zoom + pulse on the item's icon (on `bar`, or the bar under the mouse / the first one showing it).
-    func launchFeedback(_ item: AppItem, bar: Bar? = nil) {
-        let m = NSEvent.mouseLocation
-        let shown = bars.filter { !$0.hidden && $0.frames[item.id] != nil }
-        guard let b = bar ?? shown.first(where: { $0.screen.frame.contains(m) }) ?? shown.first,
-              let r = b.frames[item.id] else { return }
-        let f = b.panel.frame
-        let center = NSPoint(x: f.minX + r.midX, y: f.maxY - r.midY)
-        LaunchFeedback.shared.play(item, center: center, size: CGFloat(store.config.iconSize))
-    }
-
-    func iconLeftX(_ b: Bar, _ id: String) -> CGFloat {
-        b.panel.frame.minX + (b.frames[id]?.minX ?? 0)
-    }
-
-    var pressed: (id: String, bar: Bar, x: CGFloat, event: NSEvent)?
-    var dragging = false
-    var grab: CGFloat = 0
-
-    func tick() {
-        let m = NSEvent.mouseLocation
-        let overFlyout = flyout.contains(m)
-        let overPreview = preview.contains(m) || overFlyout
-        if flyout.isVisible { flyout.refit() }
-
-        if store.config.autoHide {
-            for b in bars {
-                let f = b.screen.frame
-                let overBar = !b.hidden && barFrame(b, hidden: false).contains(m)
-                let atEdge = f.contains(m) && m.y <= f.minY + 2
-                // One rule for every tray panel: while one is open on this bar the bar stays, wherever the pointer is.
-                // Refreshing lastInside also gives the usual 0.5 s delay from the moment the panel closes.
-                let pinned = PanelPolicy.keepsBarVisible(panelOpen: flyout.isVisible, panelBarIsThisBar: flyoutBar === b)
-                let near = atEdge || overBar || (overPreview && overlayBar === b)
-                if near || pinned {
-                    b.lastInside = Date()
-                    if b.hidden { b.hidden = false; layoutBar(b, animated: true) }
-                } else if PanelPolicy.barShouldHide(autoHide: true, barHidden: b.hidden, pointerNearBar: near, panelPinsBar: pinned,
-                                                    secondsSinceInside: Date().timeIntervalSince(b.lastInside), delay: 0.5) {
-                    b.hidden = true
-                    if overlayBar === b { preview.hide() }
-                    layoutBar(b, animated: true)
-                }
-            }
-        }
-
-        UsageService.shared.visibility(visible: bars.contains(where: { !$0.hidden }), alwaysVisible: !store.config.autoHide)
-        let hi = hitInfo(m)
-        // Our panels never become key, so the cursor has to be set by hand.
-        if dragging {
-            NSCursor.closedHand.set()
-        } else if overPreview {
-            if !(overFlyout && flyout.kind == trayMail) { NSCursor.pointingHand.set() }
-        } else if let hi {
-            (hi.id != nil ? NSCursor.pointingHand : NSCursor.arrow).set()
-        }
-
-        let id = hi?.id
-        if id != hoverID || hi?.bar !== hoverBar {
-            hoverID = id
-            hoverBar = hi?.bar
-            model.hoverSince = Date()
-            model.startHover = (id == startID)
-            model.deskHover = (id == deskID)
-            model.trayHover = (id?.hasPrefix("__t_") == true) ? id : nil
-            model.hovered = model.items.first { $0.id == id }
-        }
-        if dragging || model.dragID != nil { model.hovered = nil }
-        if id != nil || overPreview { lastHover = Date() }
-
-        if let h = model.hovered, let b = hoverBar {
-            if preview.shownID != h.id || overlayBar !== b,
-               Date().timeIntervalSince(model.hoverSince) >= store.config.previewDelay {
-                overlayBar = b
-                preview.show(item: h, barTop: barFrame(b, hidden: false).maxY, mouseX: iconCenterX(b, h.id, fallback: m.x), screen: b.screen)
-            }
-        } else if preview.isVisible, !overPreview, Date().timeIntervalSince(lastHover) > 0.3 {
-            preview.hide()
-        }
-
-        if Date().timeIntervalSince(lastTray) > 3 { lastTray = Date(); model.refreshTray() }
-        if store.config.place(traySystem) != .hidden, Date().timeIntervalSince(lastMonitor) > 3 { lastMonitor = Date(); SystemMonitor.shared.tick(); RestartAdvisor.shared.refresh(disk: model.disk) }
-        if Date().timeIntervalSince(lastCalendar) > 60 { lastCalendar = Date(); CalendarService.shared.backgroundRefresh(config: store.config) }
-        if Date().timeIntervalSince(lastBadge) > 2 {
-            lastBadge = Date()
-            if !windowsInFlight {
-                windowsInFlight = true
-                let pids = model.items.compactMap(\.pid)
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    let none = Set(pids.filter { AXIsProcessTrusted() && WindowService.windows(for: $0).isEmpty })
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        self.windowsInFlight = false
-                        if self.model.windowless != none { self.model.windowless = none }
-                    }
-                }
-            }
-            if !badgesInFlight {
-                badgesInFlight = true
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    let b = DockBadges.read()
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        self.badgesInFlight = false
-                        if self.model.badges != b { self.model.badges = b }
-                    }
-                }
-            }
-        }
-        if Date().timeIntervalSince(lastReserve) > 0.6 { lastReserve = Date(); reserveSpace() }
-    }
-
-    func handleClick(_ e: NSEvent) {
-        let m = NSEvent.mouseLocation
-        guard let hi = hitInfo(m) else { return }
-        let id = hi.id, bar = hi.bar
-        if e.type != .rightMouseDown, id == startID || id == deskID || model.items.contains(where: { $0.id == id }) {
-            preview.commitPeek()
-        }
-        preview.hide()
-        if !(id?.hasPrefix("__t_") ?? false) { flyout.hide() }
-        let item = model.items.first { $0.id == id }
-        if let id, id.hasPrefix("__t_") { trayClick(id, bar: bar); return }
-        if e.type == .rightMouseDown {
-            let menu = item.map(itemMenu) ?? settingsMenu()
-            popUp(menu, x: id.map { iconLeftX(bar, $0) } ?? m.x, bar: bar)
-        } else if id == deskID {
-            toggleDesktop()
-        } else if id == startID {
-            openAppLauncher()
-        } else if let item {
-            if e.modifierFlags.contains(.shift), let pid = item.pid { newWindow(pid: pid); launchFeedback(item, bar: bar) }
-            else if model.click(item) { launchFeedback(item, bar: bar) }
-        }
-    }
-
-    func trayClick(_ id: String, bar: Bar) {
-        if id == trayJoin {
-            flyout.hide()
-            if let url = CalendarLogic.joinCandidate(CalendarService.shared.events, now: Date())?.joinURL { NSWorkspace.shared.open(url) }
-            return
-        }
-        if flyout.isVisible && flyout.kind == id { flyout.hide(); return }
-        model.refreshTray()
-        overlayBar = bar
-        flyoutBar = bar
-        flyout.show(kind: id, barTop: barFrame(bar, hidden: false).maxY,
-                    centerX: iconCenterX(bar, id, fallback: NSEvent.mouseLocation.x), screen: bar.screen)
-    }
-
-    /// Windows minimized by "show desktop", and the app that was in front, so a second click restores them.
-    var desktopMinimized: [WinRef] = []
-    var desktopFront: pid_t?
-    var desktopInProgress = false
-
-    func toggleDesktop() {
-        guard !desktopInProgress else { return }
-        desktopInProgress = true
-        // Default action: minimize every visible window of every regular app (thumbnails first).
-        let me = ProcessInfo.processInfo.processIdentifier
-        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        var found: [WinRef] = []
-        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && app.processIdentifier != me && !app.isHidden {
-            found += WindowService.windows(for: app.processIdentifier).filter { !$0.minimized && $0.ax != nil }
-        }
-        let candidates = found
-        let ids = candidates.map(\.id)
-        Task {
-            await WindowService.snapshot(ids)
-            await MainActor.run {
-                defer { self.desktopInProgress = false }
-                var done: [WinRef] = []
-                for w in candidates {
-                    if let ax = w.ax, AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success { done.append(w) }
-                }
-                if !done.isEmpty {
-                    if self.desktopMinimized.isEmpty { self.desktopFront = front }
-                    let recorded = Set(self.desktopMinimized.map(\.id))
-                    self.desktopMinimized += done.filter { !recorded.contains($0.id) }
-                    log("desktop: minimized \(done.count) windows")
-                    return
-                }
-                // Nothing left to minimize: the desktop is already clear, so bring back what the last click minimized.
-                let wins = self.desktopMinimized
-                self.desktopMinimized = []
-                for w in wins {
-                    guard let ax = w.ax else { continue }
-                    let result = AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-                    if result != .success, result != .invalidUIElement { self.desktopMinimized.append(w) }
-                }
-                if let pid = self.desktopFront, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
-                    bringFront(app)
-                }
-                if self.desktopMinimized.isEmpty { self.desktopFront = nil }
-                log("desktop: restored \(wins.count - self.desktopMinimized.count) windows")
-            }
-        }
-    }
-
-    /// With the bar always visible, keep the front window from sliding under it (main screen only).
-    func reserveSpace() {
-        guard !store.config.autoHide, let pb = bars.first(where: { $0.primary }), !pb.hidden,
-              NSEvent.pressedMouseButtons == 0,
-              let app = NSWorkspace.shared.frontmostApplication,
-              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
-              let w = WindowService.focusedWindow(pid: app.processIdentifier),
-              !WindowService.isFullScreen(w),
-              let f = WindowService.frame(w) else { return }
-        guard let first = NSScreen.screens.first else { return }
-        let primary = first.frame
-        guard f.minX >= primary.minX - 5, f.minX < primary.maxX else { return }
-        let barTop = primary.height - store.barHeight
-        if f.maxY > barTop + 1 && f.minY < barTop - 120 {
-            var id: CGWindowID = 0
-            guard _AXUIElementGetWindow(w, &id) == .success, id != 0, !failedResizeIDs.contains(id) else { return }
-            let height = barTop - f.minY
-            failedResizeIDs.insert(id)
-            WindowService.setHeight(w, height, width: f.width)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                if let resized = WindowService.frame(w), abs(resized.height - height) <= 1 {
-                    self?.failedResizeIDs.remove(id)
-                }
-            }
-        }
-    }
-
-    func popUp(_ menu: NSMenu, x: CGFloat, bar: Bar) {
-        let top = barFrame(bar, hidden: false).maxY + menu.size.height + 4
-        menu.popUp(positioning: nil, at: NSPoint(x: x, y: top), in: nil)
-    }
-
-    func itemMenu(_ item: AppItem) -> NSMenu {
-        let menu = NSMenu()
-        if let pid = item.pid {
-            let news = WindowService.newItems(pid: pid)
-            for n in news {
-                menu.addItem(BlockItem(n.title) { [weak self] in WindowService.press(n.el, pid: pid); self?.launchFeedback(item) })
-            }
-            if !news.isEmpty { menu.addItem(.separator()) }
-        }
-        if item.pid == nil, let url = item.url {
-            menu.addItem(BlockItem(tx("Open", "Abrir")) { [weak self] in
-                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
-                self?.launchFeedback(item)
-            })
-        }
-        if item.pid != ProcessInfo.processInfo.processIdentifier {
-            menu.addItem(BlockItem(item.pinned ? tx("Unpin from bar", "Desanclar de la barra") : tx("Pin to bar", "Anclar a la barra")) { [model] in
-                model.togglePin(item)
-            })
-        }
-        if let url = item.url {
-            menu.addItem(BlockItem(tx("Show in Finder", "Mostrar en Finder")) { NSWorkspace.shared.activateFileViewerSelecting([url]) })
-        }
-        if let pid = item.pid, pid == ProcessInfo.processInfo.processIdentifier {
-            if !TaskbarModel.ownWindows().isEmpty {
-                menu.addItem(.separator())
-                menu.addItem(BlockItem(calendarText("Close windows", "Cerrar ventanas")) {
-                    for window in TaskbarModel.ownWindows() {
-                        if window.isMiniaturized { window.close() }
-                        else { window.performClose(nil) }
-                    }
-                })
-            }
-        } else if let pid = item.pid {
-            menu.addItem(.separator())
-            menu.addItem(BlockItem(calendarText("Close all windows", "Cerrar todas las ventanas")) {
-                WindowService.windows(for: pid).forEach(WindowService.close)
-            })
-            if let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular,
-               !["com.apple.finder", "com.apple.dock"].contains(app.bundleIdentifier?.lowercased() ?? "") {
-                menu.addItem(BlockItem(calendarText("Quit \(item.name)", "Salir de \(item.name)")) {
-                    app.terminate()
-                })
-            }
-        }
-        return menu
-    }
-
-    func settingsMenu() -> NSMenu {
-        let menu = NSMenu()
-        menu.addItem(BlockItem(tx("Hide bar automatically", "Ocultar barra automáticamente"), checked: store.config.autoHide) { [store] in
-            store.config.autoHide.toggle()
-        })
-        let themes = NSMenu()
-        for t in BarTheme.all {
-            themes.addItem(BlockItem(t.name, checked: store.config.theme == t.id) { [store] in store.config.theme = t.id })
-        }
-        let themeItem = NSMenuItem(title: tx("Theme", "Tema"), action: nil, keyEquivalent: "")
-        themeItem.submenu = themes
-        menu.addItem(themeItem)
-        let trans = NSMenu()
-        for (label, v) in [(tx("None", "Ninguna"), 1.0), (tx("Light", "Ligera"), 0.82), (tx("Medium", "Media"), 0.62), (tx("High", "Alta"), 0.42), (tx("Very high", "Muy alta"), 0.22)] {
-            trans.addItem(BlockItem(label, checked: abs(store.config.barOpacity - v) < 0.01) { [store] in store.config.barOpacity = v })
-        }
-        let transItem = NSMenuItem(title: tx("Transparency", "Transparencia"), action: nil, keyEquivalent: "")
-        transItem.submenu = trans
-        menu.addItem(transItem)
-        menu.addItem(.separator())
-        menu.addItem(BlockItem(tx("Settings…", "Configuración…")) { SettingsWindowController.shared.show() })
-        menu.addItem(BlockItem(tx("Report a Problem…", "Reportar un problema…")) { FeedbackWindowController.shared.show() })
-        return menu
     }
 
 }

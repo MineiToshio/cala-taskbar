@@ -16,8 +16,19 @@ final class LaunchFeedback {
 
     /// `center` is the icon's center in screen coordinates, `size` its side in points.
     func play(_ item: AppItem, center: NSPoint, size: CGFloat) {
+        guard model != nil else { return }
         ghost(item.icon, center: center, size: size)
         watch(item)
+    }
+
+    func stopAll() {
+        watches.values.forEach { $0.invalidate() }
+        watches.removeAll()
+        let closing = panels
+        panels.removeAll()
+        closing.forEach { $0.close() }
+        model?.launching.removeAll()
+        model = nil
     }
 
     // MARK: Ghost zoom
@@ -59,9 +70,9 @@ final class LaunchFeedback {
         group.timingFunction = CAMediaTimingFunction(name: .easeOut)
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak self, weak panel] in
-            guard let panel else { return }
-            panel.orderOut(nil)
-            self?.panels.removeAll { $0 === panel }
+            guard let self, let panel, self.panels.contains(where: { $0 === panel }) else { return }
+            self.panels.removeAll { $0 === panel }
+            panel.close()
         }
         layer.add(group, forKey: "ghost")
         CATransaction.commit()
@@ -79,7 +90,7 @@ final class LaunchFeedback {
         model.launching.insert(id)
         let started = Date()
         watches[id] = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] t in
-            guard let self else { t.invalidate(); return }
+            guard let self, self.watches[id] === t else { t.invalidate(); return }
             let elapsed = Date().timeIntervalSince(started)
             // A minimum so the pulse is noticed even when the window shows up at once.
             let done = elapsed > 0.5 && self.windowCount(pid: nil, bundle: bundle, fallbackPID: item.pid) > baseline

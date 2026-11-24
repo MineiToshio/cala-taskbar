@@ -331,6 +331,7 @@ final class FlyoutController {
     private var localMonitor: Any?
     private var observers: [NSObjectProtocol] = []
     private var kindObserver: AnyCancellable?
+    private var isRunning = true
 
     init(model: TaskbarModel) {
         let flyoutPanel = FlyoutPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -357,6 +358,19 @@ final class FlyoutController {
             self?.fm.minHeight = 0
             DispatchQueue.main.async { if self?.panel.isVisible == true { self?.refit() } }
         }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        kindObserver?.cancel()
+        kindObserver = nil
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+        hide()
+        panel.close()
+        panel.contentView = nil
+        host = nil
     }
 
     // MARK: Click outside
@@ -398,6 +412,7 @@ final class FlyoutController {
     }
 
     func show(kind: String, barTop: CGFloat, centerX: CGFloat, screen: NSScreen) {
+        guard isRunning else { return }
         self.barTop = barTop; self.centerX = centerX; self.screenFrame = screen.frame
         fm.availableHeight = max(300, screen.visibleFrame.height - 90)
         let roomAboveBar = screen.visibleFrame.maxY - barTop - 14
@@ -416,6 +431,7 @@ final class FlyoutController {
     }
 
     func refit() {
+        guard isRunning, let host else { return }
         host.layoutSubtreeIfNeeded()
         let s = host.fittingSize
         if fm.kind != trayMail && s.height > fm.minHeight { fm.minHeight = s.height }

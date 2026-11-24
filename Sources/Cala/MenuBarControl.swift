@@ -42,24 +42,31 @@ enum MenuBarControl {
 
     static func hide(_ store: ConfigStore) {
         if !isHidden || !store.config.menuBarBackupSaved {
-            store.config.menuBarBackupOption = option()
-            store.config.menuBarBackupHide = hideFlag()
-            store.config.menuBarBackupFullscreen = fullscreenFlag()
-            store.config.menuBarBackupSaved = true
+            var config = store.config
+            config.menuBarBackupOption = option()
+            config.menuBarBackupHide = hideFlag()
+            config.menuBarBackupFullscreen = fullscreenFlag()
+            config.menuBarBackupSaved = true
+            store.config = config
         }
         guard !isHidden else { return }
         write(option: hiddenOption, hide: true, fullscreen: false)
     }
 
     /// Puts the menu bar back the way it was before `hide`.
-    static func restore(_ store: ConfigStore) {
-        guard isHidden || store.config.menuBarBackupSaved else { return }
-        write(option: store.config.menuBarBackupOption, hide: store.config.menuBarBackupHide, fullscreen: store.config.menuBarBackupFullscreen)
+    private static func restore(_ store: ConfigStore) {
+        guard store.config.menuBarBackupSaved else { return }
+        if isHidden {
+            write(option: store.config.menuBarBackupOption, hide: store.config.menuBarBackupHide,
+                  fullscreen: store.config.menuBarBackupFullscreen)
+        }
+        store.config.menuBarBackupSaved = false
     }
 
     static func setHidden(_ on: Bool, _ store: ConfigStore) {
         store.config.hideMenuBar = on
-        if on { hide(store) } else { restore(store); store.config.menuBarBackupSaved = false }
+        guard ModuleRegistry.shared.isRunning(.bar) else { return }
+        if on { hide(store) } else { restore(store) }
     }
 
     /// At launch: re-applies the user's choice (it was restored on quit, or the OS reset it).
@@ -67,9 +74,13 @@ enum MenuBarControl {
         if store.config.hideMenuBar && !isHidden { hide(store) }
     }
 
+    static func onBarStop(_ store: ConfigStore) {
+        restore(store)
+    }
+
     /// On quit: give the menu bar back so nobody is left without one.
     static func onQuit(_ store: ConfigStore) {
-        if store.config.hideMenuBar && store.config.restoreMenuBarOnQuit && isHidden { restore(store) }
+        if store.config.restoreMenuBarOnQuit { restore(store) }
     }
 }
 
@@ -141,6 +152,7 @@ enum MenuBarIcons {
 
     /// Makes the menu bar match the user's choice, remembering each icon's original value ("nil" = key absent).
     static func apply(_ store: ConfigStore) {
+        guard ModuleRegistry.shared.isRunning(.tray) else { return }
         var restart_ = Set<String>()
         var backup = store.config.menuBarIconBackupV2
         let known = Set(all.map(\.id))
@@ -161,12 +173,23 @@ enum MenuBarIcons {
 
     /// On quit: show everything again, if the user asked for that.
     static func onQuit(_ store: ConfigStore) {
-        guard store.config.restoreMenuBarOnQuit, !store.config.menuBarIconBackupV2.isEmpty else { return }
-        var restart_ = Set<String>()
+        if store.config.restoreMenuBarOnQuit { restoreForTrayStop(store) }
+    }
+
+    /// Restore backed-up overrides and keep the user's selection for the next start.
+    static func restoreForTrayStop(_ store: ConfigStore) {
+        guard !store.config.menuBarIconBackupV2.isEmpty else { return }
+        var processes = Set<String>()
         for icon in all {
-            if let original = store.config.menuBarIconBackupV2[icon.id] { write(icon, original == "nil" ? nil : original); restart_.insert(icon.process) }
+            guard let saved = store.config.menuBarIconBackupV2[icon.id] else { continue }
+            let original = saved == "nil" ? nil : saved
+            let value = current(icon)
+            guard value != original, isHiddenValue(icon, value) else { continue }
+            write(icon, original)
+            processes.insert(icon.process)
         }
-        if !restart_.isEmpty { restart(restart_) }
+        store.config.menuBarIconBackupV2 = [:]
+        if !processes.isEmpty { restart(processes) }
     }
 }
 
