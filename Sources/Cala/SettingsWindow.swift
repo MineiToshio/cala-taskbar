@@ -18,7 +18,8 @@ final class SettingsWindowController {
                              backing: .buffered, defer: false)
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden
-            w.isMovableByWindowBackground = true
+            // Not movable by background: on macOS 26 a drag on a slider knob in the hosted SwiftUI content moved the
+            // whole window instead of the knob. The title bar strip still drags the window.
             w.isReleasedWhenClosed = false
             w.title = tx("Cala · Settings", "Cala · Configuración")
             w.contentView = NSHostingView(rootView: SettingsView(store: ConfigStore.shared, pane: pane ?? .general))
@@ -247,7 +248,7 @@ struct SliderControl: View {
     let label: (Double) -> String
     var body: some View {
         HStack(spacing: 10) {
-            StepSlider(value: $value, range: range, step: step).frame(width: 200)
+            Slider(value: $value, in: range, step: step).frame(width: 200)
             Text(label(value)).font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
                 .frame(width: 56, alignment: .trailing)
         }

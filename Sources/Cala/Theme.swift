@@ -175,45 +175,6 @@ final class FlyoutSliderCell: NSSliderCell {
     }
 }
 
-/// An NSSlider that never lets a press on it start a window drag. Windows with `isMovableByWindowBackground` ask the
-/// view under the pointer; SwiftUI's own `Slider` is wrapped in hosting and portal views that answer "yes", so a drag on
-/// its knob could move the whole window. Every slider in the app is this class (or hosted through it).
-final class NoWindowDragSlider: NSSlider {
-    override var mouseDownCanMoveWindow: Bool { false }
-}
-
-/// Settings slider: a `NoWindowDragSlider` bound to a Double, snapped to `step` like SwiftUI's `Slider(step:)`.
-struct StepSlider: NSViewRepresentable {
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    var step: Double
-
-    final class Coordinator: NSObject {
-        var parent: StepSlider
-        init(_ parent: StepSlider) { self.parent = parent }
-        @objc func changed(_ slider: NSSlider) {
-            let p = parent
-            let snapped = p.step > 0 ? (slider.doubleValue / p.step).rounded() * p.step : slider.doubleValue
-            let clamped = min(max(snapped, p.range.lowerBound), p.range.upperBound)
-            if slider.doubleValue != clamped { slider.doubleValue = clamped }
-            if p.value != clamped { p.value = clamped }
-        }
-    }
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-    func makeNSView(context: Context) -> NoWindowDragSlider {
-        let slider = NoWindowDragSlider()
-        slider.isContinuous = true
-        slider.target = context.coordinator; slider.action = #selector(Coordinator.changed(_:))
-        slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        return slider
-    }
-    func updateNSView(_ slider: NoWindowDragSlider, context: Context) {
-        context.coordinator.parent = self
-        slider.minValue = range.lowerBound; slider.maxValue = range.upperBound
-        if slider.doubleValue != value { slider.doubleValue = value }
-    }
-}
-
 struct FlyoutSlider: NSViewRepresentable {
     @Environment(\.colorScheme) private var scheme
     @Binding var value: Double
@@ -229,7 +190,7 @@ struct FlyoutSlider: NSViewRepresentable {
     }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSSlider {
-        let slider = NoWindowDragSlider()
+        let slider = NSSlider()
         slider.cell = FlyoutSliderCell()
         slider.minValue = 0; slider.maxValue = 1; slider.isContinuous = true
         slider.target = context.coordinator; slider.action = #selector(Coordinator.changed(_:))
