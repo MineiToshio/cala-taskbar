@@ -41,6 +41,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        ZoneEditor.install()
+        if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
+            // Renders before any module starts: no bar, tap, Dock or menu-bar change while taking pictures.
+            Snapshots.render(to: CommandLine.arguments[i + 1])
+            exit(0)
+        }
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
@@ -83,20 +89,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onboarding.onFinish = nil
             tray.finishOnboarding()
         }
-        if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
-            let dir = CommandLine.arguments[i + 1]
-            for p in SettingsPane.allCases {
-                let r = ImageRenderer(content: VStack(alignment: .leading, spacing: 26) { Text(p.title).font(.system(size: 28, weight: .bold)); PaneBody(pane: p, store: ConfigStore.shared) }.padding(34).frame(width: 640, alignment: .leading).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light))
-                r.scale = 2
-                if let img = r.nsImage, let t = img.tiffRepresentation, let b = NSBitmapImageRep(data: t)?.representation(using: .png, properties: [:]) {
-                    try? b.write(to: URL(fileURLWithPath: "\(dir)/\(p.rawValue).png"))
-                }
-            }
-            exit(0)
-        }
         if CommandLine.arguments.contains("--settings") { SettingsWindowController.shared.show() }
     }
 
+}
+
+/// `Cala --snapshot <dir>`: every Settings pane in the current language (with the Zones module running when it is
+/// enabled, for its per-monitor layout menus), the General and Zones panes and the welcome's module question and zones-only permission page in English
+/// and Spanish, as 2x PNGs. Views are drawn through an offscreen NSHostingView so AppKit controls (switches, menus,
+/// sliders) render as they do on screen.
+@MainActor
+enum Snapshots {
+    private final class Window: NSWindow {
+        override var backingScaleFactor: CGFloat { 2 }
+    }
+
+    static func render(to dir: String) {
+        func write<V: View>(_ view: V, _ name: String, width: CGFloat) {
+            let host = NSHostingView(rootView: view.frame(width: width, alignment: .leading)
+                .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light)
+                .environment(\.controlActiveState, .active))
+            let window = Window(contentRect: CGRect(x: 0, y: 0, width: width, height: 100), styleMask: .borderless,
+                                backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: .aqua)
+            window.contentView = host
+            let size = host.fittingSize
+            window.setContentSize(size)
+            host.frame = CGRect(origin: .zero, size: size)
+            host.layoutSubtreeIfNeeded()
+            defer { window.close() }
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            if let data = bitmap.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+            }
+        }
+        func pane(_ p: SettingsPane) -> some View {
+            VStack(alignment: .leading, spacing: 26) { Text(p.title).font(.system(size: 28, weight: .bold)); PaneBody(pane: p, store: ConfigStore.shared) }
+                .padding(34)
+        }
+        // Only Zones is started (when enabled), so its pane shows the per-monitor layout menus it has while running.
+        let zones = ModuleRegistry.shared.zones
+        if ConfigStore.shared.config.zonesEnabled { zones.start() }
+        defer { zones.stop() }
+        for p in SettingsPane.allCases { write(pane(p), p.rawValue, width: 640) }
+        let language = appLanguageOverride
+        for code in ["en", "es"] {
+            appLanguageOverride = code
+            write(OnboardingView(finish: {}, step: .modules), "onboarding-modules-\(code)", width: 600)
+            write(OnboardingView(finish: {}, step: .essentials, bar: false, zones: true), "onboarding-essentials-zones-\(code)", width: 600)
+            write(pane(.general), "general-\(code)", width: 640)
+            write(pane(.zones), "zones-\(code)", width: 640)
+        }
+        appLanguageOverride = language
+    }
 }
 
 /// The system's app grid: "Apps" on macOS 26, Launchpad before it. Finder's Applications folder as a last resort.

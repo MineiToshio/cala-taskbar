@@ -78,7 +78,8 @@ private struct ZoneEditorArtwork: View {
                     startPoint: work.origin, endPoint: CGPoint(x: work.maxX, y: work.maxY)))
             }
 
-            func line(_ guide: ZoneSnapping.Guide, color: Color) {
+            /// Snapping guides are dashed so they never read as a zone border; grid lines stay solid and faint.
+            func line(_ guide: ZoneSnapping.Guide, color: Color, dashed: Bool = false) {
                 let fraction = guide.axis == .x ? ZoneRect(x: guide.position, y: 0, w: 0, h: 1)
                     : ZoneRect(x: 0, y: guide.position, w: 1, h: 0)
                 let rect = frame(fraction)
@@ -93,7 +94,11 @@ private struct ZoneEditorArtwork: View {
                     path.move(to: CGPoint(x: work.minX, y: y))
                     path.addLine(to: CGPoint(x: work.maxX, y: y))
                 }
-                context.stroke(path, with: .color(color), lineWidth: pixel)
+                if dashed {
+                    context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: max(pixel, 1), lineCap: .butt, dash: [6, 4]))
+                } else {
+                    context.stroke(path, with: .color(color), lineWidth: pixel)
+                }
             }
 
             if grid {
@@ -127,7 +132,7 @@ private struct ZoneEditorArtwork: View {
             if let activeRect = preview?.rect ?? activeIndex.map({ zones[$0].rect }) {
                 let rect = frame(activeRect)
                 drawZone(rect, number: (activeIndex ?? zones.count) + 1, active: true)
-                for guide in preview?.guides ?? [] { line(guide, color: theme.accent) }
+                for guide in preview?.guides ?? [] { line(guide, color: theme.accent, dashed: true) }
                 if preview == nil || preview?.zoneID != nil {
                     let appKitRect = ZoneGeometry.frame(for: activeRect, in: usable)
                     let side = ZonePicking.EditorHandle.side
@@ -192,6 +197,27 @@ final class ZoneCanvasView: NSView {
     }
 
     func resetGesture() { gesture = nil }
+
+    // MARK: Accessibility
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .layoutArea }
+    override func accessibilityRoleDescription() -> String? { tx("zones canvas", "lienzo de zonas") }
+
+    override func accessibilityLabel() -> String? {
+        let zones = session.layout?.zones ?? []
+        let name = session.layoutName.isEmpty ? ZoneEditorSession.untitled : session.layoutName
+        var text = tx("\(name): \(zones.count) zones", "\(name): \(zones.count) zonas")
+        if let index = zones.firstIndex(where: { $0.id == session.selectedZone }) {
+            text += tx(", zone \(index + 1) selected", ", zona \(index + 1) seleccionada")
+        }
+        return text
+    }
+
+    override func accessibilityHelp() -> String? {
+        tx("Drag on an empty area to draw a zone, drag a zone to move it or its edges to resize it. Delete removes the selected zone, Return saves, Esc closes.",
+           "Arrastra en un área vacía para dibujar una zona, arrastra una zona para moverla o sus bordes para cambiar su tamaño. Suprimir borra la zona seleccionada, Retorno guarda, Esc cierra.")
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

@@ -24,6 +24,35 @@ final class ZoneEditor: NSObject {
 
     private override init() { super.init() }
 
+    /// Lets the status menu and Settings open the editor (`ZonesModule.openEditor`). Called once at launch.
+    static func install() {
+        ZonesModule.openEditor = { key in MainActor.assumeIsolated { ZoneEditor.shared.open(displayKey: key) } }
+    }
+
+    /// Edits the running module's store, so a Save is live at once. With Zones off it loads zones.json on its own:
+    /// a Save writes the file and the module reads it when it starts. An open editor keeps its draft and moves
+    /// to the requested display.
+    func open(displayKey: String?) {
+        let barIsRunning = { ModuleRegistry.shared.bar.isRunning }
+        if let store {
+            open(store: store, displayKey: displayKey, barIsRunning: barIsRunning)
+            return
+        }
+        let module = ModuleRegistry.shared.zones
+        if module.isRunning, let live = module.store {
+            open(store: live, displayKey: displayKey, barIsRunning: barIsRunning)
+            return
+        }
+        do {
+            let standalone = try ZonesStore(templateName: ZonesModule.templateName)
+            log("zones editor: opened with Zones off, zones.json loaded on its own")
+            open(store: standalone, displayKey: displayKey, barIsRunning: barIsRunning)
+        } catch {
+            log("zones editor: could not load zones.json: \(error)")
+            NSSound.beep()
+        }
+    }
+
     /// Pass the current bar-module state when the bar can be stopped independently.
     func open(store: ZonesStore, displayKey: String? = nil, barIsRunning: @escaping () -> Bool = { true }) {
         if let window, self.store === store {
@@ -71,6 +100,8 @@ final class ZoneEditor: NSObject {
         window.makeKeyAndOrderFront(nil)
         content.layoutSubtreeIfNeeded()
         session.focusCanvas()
+        ZonesModule.editorOpen = true   // the drag tap ignores drags while the editor is open
+        log("zones editor: opened")
     }
 
     /// Discards the draft and closes the editor, including when the module stops.
@@ -83,6 +114,8 @@ final class ZoneEditor: NSObject {
         store = nil
         displayID = nil
         barIsRunning = { true }
+        ZonesModule.editorOpen = false
+        log("zones editor: closed")
     }
 
     @objc private func screenParametersChanged(_ notification: Notification) {
@@ -122,9 +155,14 @@ final class ZoneEditor: NSObject {
 
     private func save() {
         guard let session, session.dialog == nil, let store else { return }
+        // If Zones was started (or restarted) while editing, save into the running module's store: the draft is
+        // merged onto its current state, so the module uses the new layouts at once and nothing is stale.
+        let target = ZonesModule.current.flatMap { $0.isRunning ? $0.store : nil } ?? store
         do {
-            try store.saveEditorDraft(session.finishedDraft, basedOn: session.original)
+            try target.saveEditorDraft(session.finishedDraft, basedOn: session.original)
+            log("zones editor: saved \(target.state.layouts.count) layouts\(target === store ? "" : " into the running module")")
             close()
+            NotificationCenter.default.post(name: ZonesModule.didChange, object: nil)
         } catch {
             let message = error is ZonesStore.SaveError
                 ? tx("Cala couldn’t back up the damaged zones file.", "Cala no pudo respaldar el archivo de zonas dañado.")

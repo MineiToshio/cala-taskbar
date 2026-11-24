@@ -75,6 +75,42 @@ enum ModulePlan {
         return set.zones ? [.accessibility] : []
     }
 
+    /// Permissions one module needs on its own. The tray's extras are optional and asked when their feature is used.
+    static func requiredPermissions(for id: ModuleID) -> [Permission] {
+        switch id {
+        case .bar, .switcher: [.accessibility, .screenRecording]
+        case .zones: [.accessibility]
+        case .tray: []
+        }
+    }
+
+    /// The module another one cannot run without (the tray lives inside the bar).
+    static func dependency(of id: ModuleID) -> ModuleID? { id == .tray ? .bar : nil }
+
+    // MARK: Onboarding
+
+    enum OnboardingPage: String, CaseIterable { case welcome, modules, essentials, optional, ready }
+
+    /// The modules written when the welcome's "What do you want to use?" step is left; nil when nothing is checked.
+    /// "Bar" means the taskbar with its tray and Option+Tab. A user reopening the welcome who keeps the same Bar
+    /// answer keeps their own tray and switcher choices.
+    static func onboardingChoice(bar: Bool, zones: Bool, current: ModuleSet, chosen: Bool) -> ModuleSet? {
+        guard bar || zones else { return nil }
+        if chosen && current.bar == bar {
+            return ModuleSet(bar: bar, switcher: current.switcher, tray: current.tray, zones: zones)
+        }
+        return ModuleSet(bar: bar, switcher: bar, tray: bar, zones: zones)
+    }
+
+    /// Welcome pages for a choice: the optional extras all belong to the tray, so they follow the Bar.
+    static func onboardingPages(for set: ModuleSet) -> [OnboardingPage] {
+        var pages: [OnboardingPage] = [.welcome, .modules]
+        if !requiredPermissions(set).isEmpty { pages.append(.essentials) }
+        if effective(set).tray { pages.append(.optional) }
+        pages.append(.ready)
+        return pages
+    }
+
     static func running(_ modules: some Sequence<any CalaModule>) -> ModuleSet {
         let active = Set(modules.filter(\.isRunning).map(\.id))
         return ModuleSet(bar: active.contains(.bar), switcher: active.contains(.switcher),

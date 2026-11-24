@@ -59,6 +59,35 @@ check(ModulePlan.startupLine(running: defaults, source: .migrated) == "modules: 
 check(ModulePlan.startupLine(running: zonesOnly, source: .stored) == "modules: active=zones off=bar,switcher,tray source=stored",
       "running zones-only startup log format")
 
+// Onboarding "What do you want to use?" → the module keys it writes.
+let onlyZones = ModulePlan.onboardingChoice(bar: false, zones: true, current: defaults, chosen: false)
+check(onlyZones == zonesOnly, "onboarding only Zones writes bar, switcher and tray off, zones on")
+check(onlyZones.map(ModulePlan.requiredPermissions) == [.accessibility], "onboarding only Zones asks for Accessibility only")
+check(onlyZones.map(ModulePlan.showsStatusItem) == true && onlyZones.map { ModulePlan.effective($0).bar } == false,
+      "onboarding only Zones lives in the status item without a bar")
+check(onlyZones.map(ModulePlan.onboardingPages) == [.welcome, .modules, .essentials, .ready], "onboarding only Zones skips the tray extras")
+let onlyBar = ModulePlan.onboardingChoice(bar: true, zones: false, current: defaults, chosen: false)
+check(onlyBar == defaults, "onboarding only Bar writes today's bar, switcher and tray, zones off")
+check(onlyBar.map(ModulePlan.requiredPermissions) == [.accessibility, .screenRecording], "onboarding only Bar asks for today's permissions")
+check(onlyBar.map(ModulePlan.showsStatusItem) == false, "onboarding only Bar shows no status item")
+check(onlyBar.map(ModulePlan.onboardingPages) == [.welcome, .modules, .essentials, .optional, .ready], "onboarding only Bar keeps every page")
+let both = ModulePlan.onboardingChoice(bar: true, zones: true, current: defaults, chosen: false)
+check(both == all, "onboarding both writes every module on")
+check(both.map(ModulePlan.requiredPermissions) == [.accessibility, .screenRecording] && both.map(ModulePlan.showsStatusItem) == true,
+      "onboarding both asks for the bar's permissions and shows the status item")
+check(ModulePlan.onboardingChoice(bar: false, zones: false, current: defaults, chosen: false) == nil, "onboarding needs at least one choice")
+let customized = ModuleSet(bar: true, switcher: false, tray: false, zones: false)
+check(ModulePlan.onboardingChoice(bar: true, zones: true, current: customized, chosen: true) ==
+      ModuleSet(bar: true, switcher: false, tray: false, zones: true), "reopened welcome keeps the user's tray and switcher")
+check(ModulePlan.onboardingChoice(bar: true, zones: false, current: zonesOnly, chosen: true) == defaults,
+      "reopened welcome turning the bar on brings its tray and switcher")
+check(ModulePlan.onboardingChoice(bar: true, zones: false, current: customized, chosen: false) == defaults,
+      "first welcome ignores provisional tray and switcher values")
+check(ModulePlan.requiredPermissions(for: .zones) == [.accessibility] && ModulePlan.requiredPermissions(for: .tray).isEmpty &&
+      ModulePlan.requiredPermissions(for: .bar) == [.accessibility, .screenRecording], "permissions per module")
+check(ModulePlan.dependency(of: .tray) == .bar && ModulePlan.dependency(of: .switcher) == nil && ModulePlan.dependency(of: .zones) == nil,
+      "only the tray depends on the bar")
+
 final class TestModule: CalaModule {
     let id: ModuleID
     private(set) var isRunning = false

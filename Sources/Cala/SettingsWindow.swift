@@ -34,11 +34,24 @@ final class SettingsWindowController {
 // MARK: - Structure
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, appearance, screens, tray, usage, calendar, mail, permissions, about
+    case general, zones, appearance, screens, tray, usage, calendar, mail, permissions, about
     var id: String { rawValue }
+
+    /// Panes shown for the running modules: the bar's panes need the Bar, the tray's need the Tray. General, Zones
+    /// (it holds its own switch), Permissions and Advanced are always there. `--snapshot` still renders every pane.
+    static func visible(for modules: ModuleSet) -> [SettingsPane] {
+        let set = ModulePlan.effective(modules)
+        return allCases.filter { pane in
+            switch pane {
+            case .appearance, .screens: set.bar
+            case .tray, .usage, .calendar, .mail: set.tray
+            default: true
+            }
+        }
+    }
     var title: String {
         switch self {
-        case .general: tx("General", "General"); case .appearance: tx("Appearance", "Apariencia"); case .screens: tx("Screens", "Pantallas"); case .tray: tx("Tray", "Bandeja")
+        case .general: tx("General", "General"); case .zones: tx("Zones", "Zonas"); case .appearance: tx("Appearance", "Apariencia"); case .screens: tx("Screens", "Pantallas"); case .tray: tx("Tray", "Bandeja")
         case .calendar: tx("Calendar", "Calendario")
         case .mail: tx("Mail", "Correo")
         case .usage: tx("Usage", "Uso")
@@ -47,7 +60,8 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     }
     var subtitle: String {
         switch self {
-        case .general: tx("How the bar and startup behave.", "Comportamiento de la barra y del inicio.")
+        case .general: tx("What Cala does, how the bar behaves and startup.", "Qué hace Cala, cómo se comporta la barra y el inicio.")
+        case .zones: tx("Snap windows into zones while you drag them.", "Encaja ventanas en zonas mientras las arrastras.")
         case .appearance: tx("Colors, transparency and sizes.", "Colores, transparencia y tamaños.")
         case .screens: tx("How the bar is laid out on each screen.", "Cómo se acomoda la barra en cada pantalla.")
         case .tray: tx("What shows on the right of the bar, what sits behind the ^ arrow and what is hidden.", "Qué se ve a la derecha de la barra, qué queda detrás de la flecha ^ y qué se oculta.")
@@ -60,7 +74,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     }
     var icon: String {
         switch self {
-        case .general: "gearshape.fill"; case .appearance: "paintpalette.fill"; case .screens: "display"; case .tray: "square.grid.2x2"
+        case .general: "gearshape.fill"; case .zones: "rectangle.split.2x2.fill"; case .appearance: "paintpalette.fill"; case .screens: "display"; case .tray: "square.grid.2x2"
         case .calendar: "calendar"
         case .mail: "envelope.fill"
         case .usage: "chart.bar.fill"
@@ -69,7 +83,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     }
     var color: Color {
         switch self {
-        case .general: Color(red: 0.55, green: 0.57, blue: 0.62); case .appearance: Color(red: 0.95, green: 0.35, blue: 0.55)
+        case .general: Color(red: 0.55, green: 0.57, blue: 0.62); case .zones: Color(red: 0.35, green: 0.42, blue: 0.95); case .appearance: Color(red: 0.95, green: 0.35, blue: 0.55)
         case .screens: Color(red: 0.25, green: 0.52, blue: 0.98); case .tray: Color(red: 0.2, green: 0.65, blue: 0.7); case .permissions: Color(red: 0.2, green: 0.72, blue: 0.4)
         case .calendar: .red
         case .mail: .blue
@@ -92,7 +106,11 @@ struct SettingsView: View {
     @State private var pane: SettingsPane
     init(store: ConfigStore, pane: SettingsPane = .general) { self.store = store; _pane = State(initialValue: pane) }
 
+    /// The selected pane, or General when the module it belongs to was just switched off.
+    private var shown: SettingsPane { SettingsPane.visible(for: store.config.modules).contains(pane) ? pane : .general }
+
     var body: some View {
+        let pane = shown
         HStack(spacing: 0) {
             sidebar.frame(width: 220)
             ScrollView {
@@ -128,8 +146,8 @@ struct SettingsView: View {
                 }
             }
             .padding(.horizontal, 8).padding(.top, 40).padding(.bottom, 14)
-            ForEach(SettingsPane.allCases) { p in
-                SidebarItem(pane: p, selected: pane == p) { pane = p }
+            ForEach(SettingsPane.visible(for: store.config.modules)) { p in
+                SidebarItem(pane: p, selected: shown == p) { pane = p }
             }
             Spacer()
         }
@@ -146,6 +164,7 @@ struct PaneBody: View {
     var body: some View {
         switch pane {
         case .general: GeneralPane(store: store)
+        case .zones: ZonesSettingsPane(store: store)
         case .appearance: AppearancePane(store: store)
         case .screens: ScreensPane(store: store)
         case .tray: TrayPane(store: store)
@@ -279,16 +298,13 @@ struct GeneralPane: View {
                 .padding(.horizontal, 16).padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            SectionTitle(text: tx("What Cala does", "Qué hace Cala"))
+            ModulesCard(store: store)
             Card {
-                SettingRow(title: tx("Hide the bar automatically", "Ocultar la barra automáticamente"), caption: tx("It hides, and shows again when you move the mouse to the bottom edge of the screen.", "Se esconde y aparece al llevar el mouse al borde inferior de la pantalla.")) {
-                    Toggle("", isOn: Binding(get: { store.config.autoHide }, set: { store.config.autoHide = $0 })).toggleStyle(.switch).labelsHidden()
-                        .accessibilityLabel(tx("Hide the bar automatically", "Ocultar la barra automáticamente"))
-                }
-                RowDivider()
                 SettingRow(title: tx("Open at login", "Abrir al iniciar sesión"),
                            caption: LoginItem.needsApproval
                             ? tx("Switched off in System Settings → General → Login Items. Turn Cala on there.", "Desactivado en Ajustes del Sistema → General → Ítems de inicio. Activa Cala allí.")
-                            : tx("The bar starts by itself every time you log in.", "La barra arranca sola cada vez que entras a tu usuario.")) {
+                            : tx("Cala starts by itself every time you log in.", "Cala arranca sola cada vez que entras a tu usuario.")) {
                     HStack(spacing: 8) {
                         if LoginItem.needsApproval { Button(tx("Open Login Items", "Abrir Ítems de inicio")) { LoginItem.openSystemSettings() }.controlSize(.small) }
                         Toggle("", isOn: Binding(get: { login }, set: { LoginItem.set($0); login = LoginItem.enabled })).toggleStyle(.switch).labelsHidden()
@@ -300,6 +316,44 @@ struct GeneralPane: View {
                     }
                 }
             }
+            if store.config.barEnabled { barSections } else { barOffNote }
+            if store.config.switcherEnabled {
+                SectionTitle(text: tx("Switch windows", "Cambiar de ventana"))
+                Card {
+                    SettingRow(title: tx("Also use Cmd + Tab", "Usar también Cmd + Tab"), caption: tx("Replaces the macOS app switcher with this one. Needs the Accessibility permission.", "Reemplaza el cambiador de apps de macOS por este. Necesita el permiso de Accesibilidad.")) {
+                        Toggle("", isOn: Binding(get: { store.config.switcherReplaceCmdTab }, set: { store.config.switcherReplaceCmdTab = $0 })).toggleStyle(.switch).labelsHidden()
+                            .accessibilityLabel(tx("Also use Cmd + Tab", "Usar también Cmd + Tab"))
+                    }
+                }
+            }
+        }
+    }
+
+    private var barOffNote: some View {
+        Text(tx("The Bar is off, so its settings are hidden. Turn it on above to see them again.",
+                "La Barra está apagada, así que sus ajustes están ocultos. Actívala arriba para volver a verlos."))
+            .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.leading, 4)
+    }
+
+    /// Everything that only matters while the bar runs.
+    @ViewBuilder private var barSections: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(tx("Bar", "Barra")).font(.system(size: 20, weight: .bold))
+            Text(tx("The taskbar, its tray and what it changes in macOS.", "La barra de tareas, su bandeja y lo que cambia en macOS."))
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+        }
+        .padding(.top, 6)
+        Card {
+            SettingRow(title: tx("Hide the bar automatically", "Ocultar la barra automáticamente"), caption: tx("It hides, and shows again when you move the mouse to the bottom edge of the screen.", "Se esconde y aparece al llevar el mouse al borde inferior de la pantalla.")) {
+                Toggle("", isOn: Binding(get: { store.config.autoHide }, set: { store.config.autoHide = $0 })).toggleStyle(.switch).labelsHidden()
+                    .accessibilityLabel(tx("Hide the bar automatically", "Ocultar la barra automáticamente"))
+            }
+        }
+        if store.config.trayEnabled { traySections }
+        bodyAfterTray
+    }
+
+    @ViewBuilder private var traySections: some View {
             SectionTitle(text: tx("Disk", "Disco"))
             Card {
                 VStack(alignment: .leading, spacing: 6) {
@@ -322,6 +376,9 @@ struct GeneralPane: View {
                     .accessibilityLabel(tx("Show in bar", "Mostrar en la barra"))
                 }
             }
+    }
+
+    @ViewBuilder private var bodyAfterTray: some View {
             SectionTitle(text: tx("macOS Dock", "Dock de macOS"))
             Card {
                 SettingRow(title: tx("Hide the macOS Dock", "Ocultar el Dock de macOS"), caption: tx("This bar replaces it. It hides completely and does not come back when you move the mouse near it. Turn it off and it is left exactly as it was.", "Esta barra lo reemplaza. Se esconde por completo y no vuelve a aparecer al acercar el mouse. Al apagarlo, queda exactamente como estaba.")) {
@@ -338,6 +395,8 @@ struct GeneralPane: View {
             }
             .animation(.easeOut(duration: 0.2), value: store.config.hideNativeDock)
             SectionTitle(text: tx("macOS menu bar", "Barra de menús de macOS"))
+            // Hiding macOS icons Cala's tray already shows only makes sense while the tray runs.
+            if store.config.trayEnabled {
             Card {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(tx("macOS icons that Cala already shows", "Iconos de macOS que ya muestra Cala")).font(.system(size: 13, weight: .medium))
@@ -365,27 +424,13 @@ struct GeneralPane: View {
                         .accessibilityLabel(tx("Bring them back when Cala closes", "Devolverlos al cerrar Cala"))
                 }
             }
+            }
             Card {
                 SettingRow(title: tx("Hide the whole menu bar", "Ocultar toda la barra de menús"), caption: tx("It hides completely and reappears when you move the mouse to the top edge of the screen. macOS does not allow removing it entirely. Turn it off and it is left exactly as it was.", "Se esconde por completo y reaparece al llevar el mouse al borde superior de la pantalla. macOS no permite quitarla del todo. Al apagarlo, queda exactamente como estaba.")) {
                     Toggle("", isOn: Binding(get: { store.config.hideMenuBar }, set: { MenuBarControl.setHidden($0, store) })).toggleStyle(.switch).labelsHidden()
                         .accessibilityLabel(tx("Hide the whole menu bar", "Ocultar toda la barra de menús"))
                 }
             }
-            SectionTitle(text: tx("Switch windows", "Cambiar de ventana"))
-            Card {
-                SettingRow(title: tx("Window switcher (Option + Tab)", "Selector de ventanas (Opción + Tab)"), caption: tx("Hold Option and press Tab: you see all your windows, not just apps. Tab moves forward, Shift+Tab goes back, Esc cancels; when you release Option the chosen one opens.", "Mantén Opción y pulsa Tab: ves todas tus ventanas, no solo las apps. Tab avanza, Mayús+Tab retrocede, Esc cancela; al soltar Opción se abre la elegida.")) {
-                    Toggle("", isOn: Binding(get: { store.config.switcherEnabled }, set: { store.config.switcherEnabled = $0 })).toggleStyle(.switch).labelsHidden()
-                        .accessibilityLabel(tx("Window switcher (Option + Tab)", "Selector de ventanas (Opción + Tab)"))
-                }
-                if store.config.switcherEnabled {
-                    RowDivider()
-                    SettingRow(title: tx("Also use Cmd + Tab", "Usar también Cmd + Tab"), caption: tx("Replaces the macOS app switcher with this one. Needs the Accessibility permission.", "Reemplaza el cambiador de apps de macOS por este. Necesita el permiso de Accesibilidad.")) {
-                        Toggle("", isOn: Binding(get: { store.config.switcherReplaceCmdTab }, set: { store.config.switcherReplaceCmdTab = $0 })).toggleStyle(.switch).labelsHidden()
-                            .accessibilityLabel(tx("Also use Cmd + Tab", "Usar también Cmd + Tab"))
-                    }
-                }
-            }
-            .animation(.easeOut(duration: 0.2), value: store.config.switcherEnabled)
             SectionTitle(text: tx("Previews", "Vistas previas"))
             Card {
                 SettingRow(title: tx("Preview delay", "Retardo de la vista previa"), caption: tx("Time before the windows show when you hover over an icon.", "Tiempo antes de mostrar las ventanas al pasar el mouse por un icono.")) {
@@ -393,7 +438,82 @@ struct GeneralPane: View {
                                   range: 0...0.6, step: 0.01) { $0 < 0.01 ? tx("None", "Ninguno") : "\(Int($0 * 1000)) ms" }
                 }
             }
+    }
+}
+
+// MARK: - Modules
+
+/// Turns a module on or off from Settings. The registry applies it live (config sink); switching one on asks
+/// right away for the first permission it still needs.
+enum ModuleSwitch {
+    static func set(_ id: ModuleID, _ on: Bool, store: ConfigStore) {
+        switch id {
+        case .bar: store.config.barEnabled = on
+        case .switcher: store.config.switcherEnabled = on
+        case .tray: store.config.trayEnabled = on
+        case .zones: store.config.zonesEnabled = on
         }
+        log("settings: module \(id.rawValue) \(on ? "on" : "off")")
+        if on { PermissionCenter.shared.requestMissing(for: id) }
+    }
+}
+
+/// "What Cala does": one switch per module, with the tray disabled (and saying why) while the bar is off, and a
+/// card for each permission the running modules still miss.
+struct ModulesCard: View {
+    @ObservedObject var store: ConfigStore
+    @ObservedObject private var center = PermissionCenter.shared
+
+    var body: some View {
+        let modules = store.config.modules
+        let missing = ModulePlan.requiredPermissions(ModulePlan.effective(modules)).map(PermissionKind.init).filter { !center.granted($0) }
+        Card {
+            row(.bar, title: tx("Bar", "Barra"),
+                caption: tx("A taskbar at the bottom of every screen. Off: no bar is created, no space is reserved and Cala lives in the menu bar.",
+                            "Una barra de tareas abajo en cada pantalla. Apagada: no se crea la barra, no se reserva espacio y Cala vive en la barra de menús."))
+            RowDivider()
+            row(.tray, title: tx("Tray", "Bandeja"),
+                caption: modules.bar
+                ? tx("Wi-Fi, sound, battery, disk, calendar, usage and mail on the right of the bar.",
+                     "Wi-Fi, sonido, batería, disco, calendario, uso y correo a la derecha de la barra.")
+                : tx("Lives inside the Bar: turn the Bar on to use it.", "Vive dentro de la Barra: activa la Barra para usarla."),
+                enabled: modules.bar)
+            RowDivider()
+            row(.switcher, title: tx("Window switcher (Option + Tab)", "Selector de ventanas (Opción + Tab)"),
+                caption: tx("Hold Option and press Tab: you see all your windows, not just apps. Tab moves forward, Shift+Tab goes back, Esc cancels; when you release Option the chosen one opens.",
+                            "Mantén Opción y pulsa Tab: ves todas tus ventanas, no solo las apps. Tab avanza, Mayús+Tab retrocede, Esc cancela; al soltar Opción se abre la elegida."))
+            RowDivider()
+            row(.zones, title: tx("Zones", "Zonas"),
+                caption: tx("Drag a window and drop it into a zone. Layouts, gesture and gap are in the Zones pane.",
+                            "Arrastra una ventana y suéltala en una zona. Distribuciones, gesto y separación están en el panel Zonas.")) {
+                Button(tx("Set up…", "Configurar…")) { SettingsWindowController.shared.show(pane: .zones) }.controlSize(.small)
+            }
+            ForEach(missing) { kind in
+                RowDivider()
+                PermissionCard(kind: kind, why: kind == .accessibility && !ModulePlan.needsThumbnails(ModulePlan.effective(modules))
+                               ? PermissionKind.zonesAccessibilityWhy : nil)
+            }
+        }
+        .onAppear { center.beginWatching() }
+        .onDisappear { center.endWatching() }
+    }
+
+    private func row(_ id: ModuleID, title: String, caption: String, enabled: Bool = true) -> some View {
+        row(id, title: title, caption: caption, enabled: enabled) { EmptyView() }
+    }
+
+    private func row<Extra: View>(_ id: ModuleID, title: String, caption: String, enabled: Bool = true,
+                                  @ViewBuilder extra: () -> Extra) -> some View {
+        SettingRow(title: title, caption: caption) {
+            HStack(spacing: 8) {
+                extra()
+                Toggle("", isOn: Binding(get: { enabled && store.config.modules[id] }, set: { ModuleSwitch.set(id, $0, store: store) }))
+                    .toggleStyle(.switch).labelsHidden().disabled(!enabled)
+                    .accessibilityLabel(title)
+                    .accessibilityHint(enabled ? "" : caption)
+            }
+        }
+        .opacity(enabled ? 1 : 0.6)
     }
 }
 
@@ -614,19 +734,30 @@ struct ScreensPane: View {
 // MARK: - Permissions
 
 struct PermissionsPane: View {
+    @ObservedObject private var store = ConfigStore.shared
+
     var body: some View {
+        let modules = ModulePlan.effective(store.config.modules)
+        let required = ModulePlan.requiredPermissions(modules).map(PermissionKind.init)
+        let zonesOnly = modules.zones && !ModulePlan.needsThumbnails(modules)
         VStack(alignment: .leading, spacing: 20) {
-            SectionTitle(text: tx("For the bar", "Para la barra"))
-            Card {
-                PermissionCard(kind: .accessibility)
-                RowDivider()
-                PermissionCard(kind: .screenRecording)
+            if !required.isEmpty {
+                SectionTitle(text: modules.bar ? (modules.zones ? tx("For the bar and zones", "Para la barra y las zonas") : tx("For the bar", "Para la barra"))
+                                 : modules.zones && !modules.switcher ? tx("For zones", "Para las zonas") : tx("Needed", "Necesarios"))
+                Card {
+                    ForEach(Array(required.enumerated()), id: \.element) { i, kind in
+                        if i > 0 { RowDivider() }
+                        PermissionCard(kind: kind, why: zonesOnly && kind == .accessibility ? PermissionKind.zonesAccessibilityWhy : nil)
+                    }
+                }
             }
-            SectionTitle(text: tx("Optional", "Opcionales"))
-            Card {
-                ForEach(Array([PermissionKind.calendar, .location, .bluetooth, .automation, .notifications].enumerated()), id: \.element) { i, kind in
-                    if i > 0 { RowDivider() }
-                    PermissionCard(kind: kind)
+            if modules.tray {
+                SectionTitle(text: tx("Optional", "Opcionales"))
+                Card {
+                    ForEach(Array([PermissionKind.calendar, .location, .bluetooth, .automation, .notifications].enumerated()), id: \.element) { i, kind in
+                        if i > 0 { RowDivider() }
+                        PermissionCard(kind: kind)
+                    }
                 }
             }
             HStack(alignment: .top) {

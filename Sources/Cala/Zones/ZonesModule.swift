@@ -16,8 +16,12 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
             current?.editorStateChanged()
         }
     }
-    /// Opens the zones editor for a display key. Wired by the editor; nil until then.
+    /// Opens the zones editor for a display key. Set at launch by `ZoneEditor.install()`; it works with the module
+    /// off too (the editor then loads zones.json on its own).
     static var openEditor: ((String) -> Void)?
+    /// Posted on the main thread when layouts or per-display choices change (menu, Settings, editor) or the module
+    /// starts or stops, so Settings can re-read them.
+    static let didChange = Notification.Name("CalaZonesDidChange")
     private(set) static weak var current: ZonesModule?
 
     private struct SessionScreen {
@@ -74,6 +78,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         let run = UUID()
         runID = run
         log("zones: \(zones.state.layouts.count) layouts loaded")
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
 
         let mover = ZoneWindowMover()
         let tap = ZoneDragTap(
@@ -125,6 +130,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         configObserver = nil
         store = nil
         if Self.current === self { Self.current = nil }
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 
     private func ensureTap() {
@@ -231,7 +237,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         // Cala's bar overlays the bottom strip of every screen when it is always visible; auto-hide leaves it free.
         let barReserves = bar.isRunning && !config.config.autoHide
         let list = screens.enumerated().map { index, screen -> SessionScreen in
-            let key = Self.displayID(screen).flatMap { keys[$0] } ?? screen.key
+            let key = Self.displayKey(screen, keys: keys)
             let usable = ZoneGeometry.usableRect(frame: screen.frame, visibleFrame: screen.visibleFrame,
                                                  barHeight: config.barHeight, barReserves: barReserves)
             return SessionScreen(index: index, key: key, frame: screen.frame, usable: usable,
@@ -283,26 +289,26 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
 
     func zonesStatusMenuItems() -> [NSMenuItem] {
         var items: [NSMenuItem] = []
-        let editor = BlockItem(tx("Zones editor…", "Editor de zonas…")) { [weak self] in self?.openEditorForPointerScreen() }
-        editor.isEnabled = Self.openEditor != nil && store != nil
+        let editor = BlockItem(tx("Zones editor…", "Editor de zonas…")) { Self.openEditorForPointerScreen() }
+        editor.isEnabled = Self.openEditor != nil
         items.append(editor)
         guard let store else { return items }
         let screens = NSScreen.screens
         let keys = ZoneDisplays.keys(for: screens)
         for screen in screens {
-            let key = Self.displayID(screen).flatMap { keys[$0] } ?? screen.key
+            let key = Self.displayKey(screen, keys: keys)
             let off = store.state.activeByDisplay[key] == ZonesState.off
             let active = off ? nil : store.layout(forDisplay: key)?.id
             let menu = NSMenu()
             menu.autoenablesItems = false
             for layout in store.state.layouts {
                 menu.addItem(BlockItem(layout.name, checked: layout.id == active) { [weak self] in
-                    self?.choose(layout.id, forDisplay: key)
+                    self?.setLayout(layout.id, forDisplay: key)
                 })
             }
             menu.addItem(.separator())
             menu.addItem(BlockItem(tx("Off on this display", "Desactivadas en esta pantalla"), checked: off) { [weak self] in
-                self?.choose(nil, forDisplay: key)
+                self?.setLayout(nil, forDisplay: key)
             })
             let name = screen.localizedName
             let item = NSMenuItem(title: tx("Layout · \(name)", "Distribución · \(name)"), action: nil, keyEquivalent: "")
@@ -312,7 +318,8 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         return items
     }
 
-    private func choose(_ layout: UUID?, forDisplay key: String) {
+    /// The layout shown on a display, or nil for "Off". Used by the status menu and Settings.
+    func setLayout(_ layout: UUID?, forDisplay key: String) {
         guard isRunning, let store else { return }
         do {
             try store.setActiveLayout(layout, forDisplay: key)
@@ -320,15 +327,27 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         } catch {
             log("zones: could not save the layout choice: \(error)")
         }
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
     }
 
-    private func openEditorForPointerScreen() {
-        guard isRunning, let open = Self.openEditor else { return }
+    /// The layout id active on a display, or nil when the display is set to Off.
+    func activeLayout(forDisplay key: String) -> UUID? {
+        guard let store, store.state.activeByDisplay[key] != ZonesState.off else { return nil }
+        return store.layout(forDisplay: key)?.id
+    }
+
+    /// Opens the editor on the screen under the pointer (the status menu's "Zones editor…").
+    static func openEditorForPointerScreen() {
+        guard let open = openEditor else { return }
         let screens = NSScreen.screens
         let index = ZoneGeometry.screenIndex(containing: NSEvent.mouseLocation, frames: screens.map(\.frame)) ?? 0
         guard screens.indices.contains(index) else { return }
-        let keys = ZoneDisplays.keys(for: screens)
-        open(Self.displayID(screens[index]).flatMap { keys[$0] } ?? screens[index].key)
+        open(displayKey(screens[index], keys: ZoneDisplays.keys(for: screens)))
+    }
+
+    /// The zones.json key of a screen, given the keys of every connected screen.
+    static func displayKey(_ screen: NSScreen, keys: [CGDirectDisplayID: String]) -> String {
+        displayID(screen).flatMap { keys[$0] } ?? screen.key
     }
 
     // MARK: Helpers
@@ -355,13 +374,19 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
 
     /// macOS 15+ tiles windows dropped on screen edges by itself. Zones cannot turn that off; log it once so
     /// the docs and a support report can point to System Settings → Desktop & Dock.
+    /// Whether macOS's own "Drag windows to screen edges to tile" (macOS 15+) is on. Unset means the default: on.
+    static var nativeTilingOn: Bool {
+        guard #available(macOS 15, *) else { return false }
+        let value = CFPreferencesCopyAppValue("EnableTilingByEdgeDrag" as CFString, "com.apple.WindowManager" as CFString)
+        return (value as? Bool) ?? true
+    }
+
     private static func logNativeTiling() {
         guard !tilingChecked else { return }
         tilingChecked = true
         guard #available(macOS 15, *) else { return }
         let value = CFPreferencesCopyAppValue("EnableTilingByEdgeDrag" as CFString, "com.apple.WindowManager" as CFString)
-        let on = (value as? Bool) ?? true   // unset means the system default: on
-        if on {
+        if nativeTilingOn {
             log("zones: macOS window tiling by edge drag is on (com.apple.WindowManager EnableTilingByEdgeDrag"
                 + (value == nil ? " unset, default" : "=1") + "); drops near screen edges may also tile natively")
         }

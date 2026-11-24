@@ -28,8 +28,8 @@ enum PermissionKind: String, CaseIterable, Identifiable {
     /// One sentence: what the user gets by allowing it.
     var why: String {
         switch self {
-        case .accessibility: tx("Lists the windows of your apps so the bar can show, focus, minimize and close them, and powers Option+Tab.",
-                                "Ve las ventanas de tus apps para que la barra pueda mostrarlas, enfocarlas, minimizarlas y cerrarlas, y para Opción+Tab.")
+        case .accessibility: tx("Lists the windows of your apps so the bar can show, focus, minimize and close them, powers Option+Tab and snaps windows into zones.",
+                                "Ve las ventanas de tus apps para que la barra pueda mostrarlas, enfocarlas, minimizarlas y cerrarlas, y para Opción+Tab y encajar ventanas en zonas.")
         case .screenRecording: tx("Draws the window thumbnails when you hover over an app. Cala never records or sends your screen.",
                                   "Dibuja las miniaturas de las ventanas al pasar el mouse por una app. Cala nunca graba ni envía tu pantalla.")
         case .calendar: tx("Shows your next events in the clock panel and a Join button before video calls. Events stay on this Mac.",
@@ -70,6 +70,19 @@ enum PermissionKind: String, CaseIterable, Identifiable {
         case .notifications:
             let id = Bundle.main.bundleIdentifier ?? ""
             return URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=" + id)!
+        }
+    }
+
+    /// What Accessibility is for when Zones is the only thing that needs it.
+    static var zonesAccessibilityWhy: String {
+        tx("Lets Cala move and resize the window you drop into a zone. Mouse clicks are watched only to notice a window drag.",
+           "Permite a Cala mover y cambiar de tamaño la ventana que sueltas en una zona. Los clics solo se observan para notar que arrastras una ventana.")
+    }
+
+    init(_ permission: ModulePlan.Permission) {
+        switch permission {
+        case .accessibility: self = .accessibility
+        case .screenRecording: self = .screenRecording
         }
     }
 
@@ -192,6 +205,16 @@ final class PermissionCenter: NSObject, ObservableObject, CLLocationManagerDeleg
         refresh()
     }
 
+    /// Called when a module is switched on: asks for the first permission it needs that is still missing (one macOS
+    /// dialog or pane at a time; the rest show as cards in Settings). The module starts anyway and waits for it.
+    func requestMissing(for module: ModuleID) {
+        refresh()
+        let missing = ModulePlan.requiredPermissions(for: module).map(PermissionKind.init).filter { !granted($0) }
+        if missing.isEmpty { return }
+        log("permissions: \(module.rawValue) needs \(missing.map(\.rawValue).joined(separator: ","))")
+        request(missing[0])
+    }
+
     func openSettings(_ kind: PermissionKind) {
         NSWorkspace.shared.open(kind.settingsURL)
     }
@@ -252,6 +275,8 @@ final class PermissionCenter: NSObject, ObservableObject, CLLocationManagerDeleg
 /// One permission as a settings row: colored glyph, name, why, and a single clear action that matches its state.
 struct PermissionCard: View {
     let kind: PermissionKind
+    /// Replaces the generic "why" when the context is narrower (e.g. Accessibility asked only for zones).
+    var why: String? = nil
     @ObservedObject var center = PermissionCenter.shared
 
     var body: some View {
@@ -263,7 +288,7 @@ struct PermissionCard: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(kind.title).font(.system(size: 13, weight: .medium))
-                Text(kind.why).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(why ?? kind.why).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if state == .waiting && kind.grantedInSettings {
                     Text(tx("Not on yet. Turn on Cala in System Settings → Privacy & Security → \(kind.title); Cala notices by itself.", "Aún no está activo. Activa Cala en Ajustes del Sistema → Privacidad y seguridad → \(kind.title); Cala lo nota sola."))
                         .font(.system(size: 11)).foregroundStyle(StatusColor.color(.attention)).fixedSize(horizontal: false, vertical: true)

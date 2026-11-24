@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// First run: a short welcome that offers to move Cala to Applications, asks for the two permissions the bar is built
-/// on, lists the optional ones (each is also asked for the first time its feature is used) and sets open-at-login.
+/// First run: a short welcome that offers to move Cala to Applications, asks what to use (the Bar, Zones or both), asks
+/// only for the permissions that choice needs, lists the optional ones when the Bar (and its tray) is chosen (each is
+/// also asked for the first time its feature is used) and sets open-at-login.
 /// It can be skipped at any step and reopened from Settings → Permissions.
 final class OnboardingWindowController: NSObject, NSWindowDelegate {
     static let shared = OnboardingWindowController()
@@ -59,15 +60,39 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-private enum OnboardingStep: Int, CaseIterable { case welcome, essentials, optional, ready }
+private typealias OnboardingStep = ModulePlan.OnboardingPage
 
 struct OnboardingView: View {
     let finish: () -> Void
-    @State private var step: OnboardingStep = .welcome
+    @State private var step: OnboardingStep
     @State private var moveError: String?
     @State private var login = true
+    /// The "What do you want to use?" answers. They are written to the module keys when that step is left.
+    @State private var useBar: Bool
+    @State private var useZones: Bool
     @ObservedObject private var center = PermissionCenter.shared
     @ObservedObject private var store = ConfigStore.shared
+
+    /// `step`, `bar` and `zones` let the --snapshot renderer open a given page; the app always starts at the welcome.
+    init(finish: @escaping () -> Void, step: ModulePlan.OnboardingPage = .welcome, bar: Bool? = nil, zones: Bool? = nil) {
+        self.finish = finish
+        _step = State(initialValue: step)
+        let modules = ConfigStore.shared.config.modules
+        _useBar = State(initialValue: bar ?? modules.bar)
+        _useZones = State(initialValue: zones ?? modules.zones)
+    }
+
+    /// The choice as it would be saved; nil while nothing is checked.
+    private var choice: ModuleSet? {
+        let config = store.config
+        return ModulePlan.onboardingChoice(bar: useBar, zones: useZones, current: config.modules, chosen: config.modulesChosen)
+    }
+    private var steps: [OnboardingStep] {
+        ModulePlan.onboardingPages(for: choice ?? ModuleSet(bar: useBar, switcher: useBar, tray: useBar, zones: useZones))
+    }
+    private var required: [PermissionKind] {
+        ModulePlan.requiredPermissions(choice ?? .none).map(PermissionKind.init)
+    }
 
     /// The notifications row only matters to people who use Claude Code or Codex.
     private var usesAI: Bool {
@@ -83,6 +108,7 @@ struct OnboardingView: View {
             Group {
                 switch step {
                 case .welcome: welcome
+                case .modules: modulesStep
                 case .essentials: essentials
                 case .optional: optionalStep
                 case .ready: ready
@@ -115,13 +141,16 @@ struct OnboardingView: View {
                 .frame(width: 72, height: 72).padding(.leading, -6).padding(.bottom, 10)
                 .accessibilityHidden(true)
             heading(tx("Welcome to Cala", "Te damos la bienvenida a Cala"),
-                    tx("A taskbar for your Mac. It takes a minute to set up.", "Una barra de tareas para tu Mac. Prepararla toma un minuto."))
+                    tx("A taskbar and window zones for your Mac. It takes a minute to set up.", "Una barra de tareas y zonas de ventanas para tu Mac. Prepararla toma un minuto."))
             Card {
                 feature("dock.rectangle", tx("Your apps at the bottom", "Tus apps abajo"),
                         tx("Click to switch, hover to see each window, right-click for more.", "Clic para cambiar, pasa el mouse para ver cada ventana, clic derecho para más."))
                 RowDivider()
                 feature("square.grid.2x2", tx("Everything else on the right", "Todo lo demás a la derecha"),
                         tx("Wi-Fi, sound, battery, disk, calendar and a panel that explains why your Mac is slow.", "Wi-Fi, sonido, batería, disco, calendario y un panel que explica por qué tu Mac va lento."))
+                RowDivider()
+                feature("rectangle.split.2x2", tx("Windows into zones", "Ventanas en zonas"),
+                        tx("Drag a window, right-click or hold Shift, and drop it into a zone of your layout.", "Arrastra una ventana, haz clic derecho o mantén Mayús, y suéltala en una zona de tu distribución."))
                 RowDivider()
                 feature("lock.shield", tx("Private by design", "Privada por diseño"),
                         tx("Nothing leaves your Mac unless you send a report yourself.", "Nada sale de tu Mac salvo que tú envíes un informe."))
@@ -149,18 +178,70 @@ struct OnboardingView: View {
         }
     }
 
-    private var essentials: some View {
+    // MARK: What do you want to use?
+
+    private var modulesStep: some View {
         VStack(alignment: .leading, spacing: 0) {
-            heading(tx("Two permissions for the bar", "Dos permisos para la barra"),
-                    tx("macOS asks you to allow them in System Settings. Cala notices by itself when you do; no restart needed.",
-                       "macOS pide activarlos en Ajustes del Sistema. Cala nota sola cuando lo haces; no hace falta reiniciar."))
-            Card {
-                PermissionCard(kind: .accessibility)
-                RowDivider()
-                PermissionCard(kind: .screenRecording)
+            heading(tx("What do you want to use?", "¿Qué quieres usar?"),
+                    tx("Choose one or both. You can change this any time in Settings, without reinstalling.",
+                       "Elige una o las dos. Puedes cambiarlo cuando quieras en Configuración, sin reinstalar."))
+            VStack(spacing: 12) {
+                ModuleChoiceCard(isOn: $useBar, symbol: "dock.rectangle", title: tx("Bar", "Barra"),
+                                 detail: tx("A taskbar at the bottom of every screen with your apps and windows, a tray with Wi-Fi, battery, calendar and more, and Option+Tab to switch windows.",
+                                            "Una barra de tareas abajo en cada pantalla con tus apps y ventanas, una bandeja con Wi-Fi, batería, calendario y más, y Opción+Tab para cambiar de ventana."),
+                                 needs: tx("Needs Accessibility and Screen Recording.", "Necesita Accesibilidad y Grabación de pantalla."))
+                ModuleChoiceCard(isOn: $useZones, symbol: "rectangle.split.2x2", title: tx("Zones", "Zonas"),
+                                 detail: tx("Drag any window, right-click or hold Shift, and drop it into a zone: halves, thirds, a grid or a layout you draw. Without a bar, Cala lives in the menu bar.",
+                                            "Arrastra cualquier ventana, haz clic derecho o mantén Mayús, y suéltala en una zona: mitades, tercios, una cuadrícula o una distribución que dibujes. Sin barra, Cala vive en la barra de menús."),
+                                 needs: tx("Needs Accessibility only.", "Solo necesita Accesibilidad."))
             }
-            Text(tx("Without them the bar still lists and opens your apps; it just cannot show or manage their windows. If macOS offers \u{201C}Quit & Reopen\u{201D} after Screen Recording, accept it.",
-                    "Sin ellos la barra igual lista y abre tus apps; solo no puede mostrar ni manejar sus ventanas. Si macOS ofrece \u{201C}Salir y volver a abrir\u{201D} tras Grabación de pantalla, acéptalo."))
+            if choice == nil {
+                Label(tx("Choose at least one to continue.", "Elige al menos una para continuar."), systemImage: "exclamationmark.circle")
+                    .font(.system(size: 11.5)).foregroundStyle(StatusColor.color(.attention))
+                    .padding(.top, 12).padding(.leading, 4)
+            }
+        }
+    }
+
+    /// Writes the choice to the module keys; the registry applies it live behind the welcome.
+    private func saveChoice() {
+        guard let set = choice else { return }
+        var config = store.config
+        let changed = !config.modulesChosen || config.modules != set
+        config.barEnabled = set.bar
+        config.switcherEnabled = set.switcher
+        config.trayEnabled = set.tray
+        config.zonesEnabled = set.zones
+        config.modulesChosen = true
+        store.config = config
+        if changed { log("onboarding: chose \(ModulePlan.summary(set))") }
+    }
+
+    // MARK: Permissions
+
+    private var essentials: some View {
+        let kinds = required
+        let zonesOnly = !useBar && useZones
+        return VStack(alignment: .leading, spacing: 0) {
+            heading(useBar ? (useZones ? tx("Two permissions for the bar and zones", "Dos permisos para la barra y las zonas")
+                                       : tx("Two permissions for the bar", "Dos permisos para la barra"))
+                           : tx("One permission for zones", "Un permiso para las zonas"),
+                    kinds.count == 1
+                    ? tx("macOS asks you to allow it in System Settings. Cala notices by itself when you do; no restart needed.",
+                         "macOS pide activarlo en Ajustes del Sistema. Cala nota sola cuando lo haces; no hace falta reiniciar.")
+                    : tx("macOS asks you to allow them in System Settings. Cala notices by itself when you do; no restart needed.",
+                         "macOS pide activarlos en Ajustes del Sistema. Cala nota sola cuando lo haces; no hace falta reiniciar."))
+            Card {
+                ForEach(Array(kinds.enumerated()), id: \.element) { i, kind in
+                    if i > 0 { RowDivider() }
+                    PermissionCard(kind: kind, why: zonesOnly && kind == .accessibility ? PermissionKind.zonesAccessibilityWhy : nil)
+                }
+            }
+            Text(zonesOnly
+                 ? tx("Without it, zones can't move windows. Cala waits and turns them on as soon as you allow it.",
+                      "Sin él, las zonas no pueden mover ventanas. Cala espera y las activa en cuanto lo permitas.")
+                 : tx("Without them the bar still lists and opens your apps; it just cannot show or manage their windows. If macOS offers \u{201C}Quit & Reopen\u{201D} after Screen Recording, accept it.",
+                      "Sin ellos la barra igual lista y abre tus apps; solo no puede mostrar ni manejar sus ventanas. Si macOS ofrece \u{201C}Salir y volver a abrir\u{201D} tras Grabación de pantalla, acéptalo."))
                 .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 12).padding(.leading, 4)
         }
@@ -187,29 +268,47 @@ struct OnboardingView: View {
     private var ready: some View {
         VStack(alignment: .leading, spacing: 0) {
             heading(tx("You are all set", "Todo listo"),
-                    tx("Two last choices. You can change both later in Settings.", "Dos últimas elecciones. Puedes cambiar ambas después en Configuración."))
+                    useBar ? tx("Two last choices. You can change both later in Settings.", "Dos últimas elecciones. Puedes cambiar ambas después en Configuración.")
+                           : tx("One last choice. You can change it later in Settings.", "Una última elección. Puedes cambiarla después en Configuración."))
             Card {
                 SettingRow(title: tx("Open Cala at login", "Abrir Cala al iniciar sesión"),
                            caption: tx("Appears in System Settings → General → Login Items.", "Aparece en Ajustes del Sistema → General → Ítems de inicio.")) {
                     Toggle("", isOn: $login).toggleStyle(.switch).labelsHidden()
                         .accessibilityLabel(tx("Open Cala at login", "Abrir Cala al iniciar sesión"))
                 }
-                RowDivider()
-                SettingRow(title: tx("Hide the macOS Dock", "Ocultar el Dock de macOS"),
-                           caption: tx("Cala replaces it. Turning this off, or quitting Cala, brings it back exactly as it was.",
-                                       "Cala lo reemplaza. Al apagarlo, o al salir de Cala, vuelve exactamente como estaba.")) {
-                    Toggle("", isOn: Binding(get: { store.config.hideNativeDock }, set: { DockControl.setHidden($0, store) }))
-                        .toggleStyle(.switch).labelsHidden()
-                        .accessibilityLabel(tx("Hide the macOS Dock", "Ocultar el Dock de macOS"))
+                if useBar {
+                    RowDivider()
+                    SettingRow(title: tx("Hide the macOS Dock", "Ocultar el Dock de macOS"),
+                               caption: tx("Cala replaces it. Turning this off, or quitting Cala, brings it back exactly as it was.",
+                                           "Cala lo reemplaza. Al apagarlo, o al salir de Cala, vuelve exactamente como estaba.")) {
+                        Toggle("", isOn: Binding(get: { store.config.hideNativeDock }, set: { DockControl.setHidden($0, store) }))
+                            .toggleStyle(.switch).labelsHidden()
+                            .accessibilityLabel(tx("Hide the macOS Dock", "Ocultar el Dock de macOS"))
+                    }
                 }
             }
             VStack(alignment: .leading, spacing: 8) {
-                tip("cursorarrow.click.2", tx("Right-click an empty part of the bar for themes and Settings.", "Clic derecho en una zona vacía de la barra para temas y Configuración."))
+                if useBar {
+                    tip("cursorarrow.click.2", tx("Right-click an empty part of the bar for themes and Settings.", "Clic derecho en una zona vacía de la barra para temas y Configuración."))
+                } else {
+                    tip("menubar.rectangle", tx("Cala lives in the menu bar: click its icon for Settings, the zones editor and your layouts.", "Cala vive en la barra de menús: haz clic en su icono para Configuración, el editor de zonas y tus distribuciones."))
+                }
+                if useZones {
+                    tip("rectangle.split.2x2", zonesTip)
+                }
                 tip("questionmark.circle", tx("Missing permissions can be turned on any time in Settings → Permissions.", "Los permisos que falten se activan cuando quieras en Configuración → Permisos."))
             }
             .padding(.top, 16).padding(.leading, 4)
         }
         .onAppear { login = LoginItem.enabled || !UserDefaults.standard.bool(forKey: "loginItemChosen") }
+    }
+
+    private var zonesTip: String {
+        switch ZoneActivation(config: store.config.zonesActivation) {
+        case .shift: tx("Drag a window and hold Shift to show your zones; release over one to snap it.", "Arrastra una ventana y mantén Mayús para ver tus zonas; suéltala sobre una para encajarla.")
+        case .rightClick: tx("Drag a window and right-click to show your zones; release over one to snap it.", "Arrastra una ventana y haz clic derecho para ver tus zonas; suéltala sobre una para encajarla.")
+        case .both: tx("Drag a window and right-click or hold Shift to show your zones; release over one to snap it.", "Arrastra una ventana y haz clic derecho o mantén Mayús para ver tus zonas; suéltala sobre una para encajarla.")
+        }
     }
 
     private func feature(_ symbol: String, _ title: String, _ detail: String) -> some View {
@@ -233,17 +332,19 @@ struct OnboardingView: View {
     // MARK: Footer
 
     private var footer: some View {
-        HStack(spacing: 10) {
+        let steps = steps
+        let index = steps.firstIndex(of: step) ?? 0
+        return HStack(spacing: 10) {
             HStack(spacing: 6) {
-                ForEach(OnboardingStep.allCases, id: \.self) { s in
+                ForEach(steps, id: \.self) { s in
                     Circle().fill(s == step ? Color.accentColor : Color.primary.opacity(0.18)).frame(width: 7, height: 7)
                 }
             }
             .accessibilityElement()
-            .accessibilityLabel(tx("Step \(step.rawValue + 1) of \(OnboardingStep.allCases.count)", "Paso \(step.rawValue + 1) de \(OnboardingStep.allCases.count)"))
+            .accessibilityLabel(tx("Step \(index + 1) of \(steps.count)", "Paso \(index + 1) de \(steps.count)"))
             Spacer()
             if step != .welcome {
-                Button(tx("Back", "Atrás")) { step = OnboardingStep(rawValue: step.rawValue - 1) ?? .welcome }
+                Button(tx("Back", "Atrás")) { step = index > 0 ? steps[index - 1] : .welcome }
             }
             if step == .ready {
                 Button(tx("Start using Cala", "Empezar a usar Cala")) {
@@ -253,8 +354,12 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             } else {
-                Button(nextLabel) { step = OnboardingStep(rawValue: step.rawValue + 1) ?? .ready }
-                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                Button(nextLabel) {
+                    if step == .modules { saveChoice() }
+                    step = index + 1 < steps.count ? steps[index + 1] : .ready
+                }
+                .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                .disabled(step == .modules && choice == nil)
             }
         }
         .controlSize(.large)
@@ -264,8 +369,48 @@ struct OnboardingView: View {
         switch step {
         case .welcome: return tx("Get started", "Empezar")
         case .essentials:
-            return center.granted(.accessibility) || center.granted(.screenRecording) ? tx("Continue", "Continuar") : tx("Continue without them", "Continuar sin ellos")
+            let kinds = required
+            if kinds.contains(where: center.granted) { return tx("Continue", "Continuar") }
+            return kinds.count == 1 ? tx("Continue without it", "Continuar sin él") : tx("Continue without them", "Continuar sin ellos")
         default: return tx("Continue", "Continuar")
         }
+    }
+}
+
+/// One answer to "What do you want to use?": a checkbox card that is clickable as a whole.
+private struct ModuleChoiceCard: View {
+    @Binding var isOn: Bool
+    let symbol: String
+    let title: String
+    let detail: String
+    let needs: String
+
+    var body: some View {
+        Button { isOn.toggle() } label: {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: isOn ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 18)).foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+                    .frame(width: 22).padding(.top, 1)
+                Image(systemName: symbol).font(.system(size: 15, weight: .medium)).foregroundStyle(Color.accentColor).frame(width: 26)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.system(size: 14, weight: .semibold))
+                    Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(needs).font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(isOn ? Color.accentColor : Color.primary.opacity(0.08), lineWidth: isOn ? 1.5 : 0.5))
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn ? tx("Checked", "Marcada") : tx("Not checked", "Sin marcar"))
+        .accessibilityHint(detail)
+        .accessibilityAddTraits(.isToggle)
     }
 }
