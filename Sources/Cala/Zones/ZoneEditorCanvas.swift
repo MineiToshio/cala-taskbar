@@ -20,12 +20,20 @@ struct ZoneEditorScene: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .accessibilityHidden(session.dialog != nil)
                 }
+                if usable.width > 0, usable.height > 0, session.layout?.zones.isEmpty == true, session.preview == nil {
+                    ZoneEditorEmptyHint(theme: session.theme)
+                        .frame(width: usable.width, height: usable.height)
+                        .padding(.leading, usable.minX)
+                        .padding(.top, usable.minY)
+                        .allowsHitTesting(false)
+                }
                 if session.dialog != nil {
                     Color.black.opacity(0.32)
                         .onTapGesture {}
                         .accessibilityHidden(true)
                 }
                 if usable.width > 0, usable.height > 0 {
+                    // Laid out with padding (not an offset) so what is drawn and what takes clicks always agree.
                     VStack(spacing: 12) {
                         ZoneEditorHUD(session: session)
                             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(coordinateSpace)) } action: {
@@ -39,12 +47,32 @@ struct ZoneEditorScene: View {
                         }
                     }
                     .frame(width: max(0, usable.width - 24))
-                    .offset(x: usable.minX + 12, y: usable.minY + 18)
+                    .padding(.leading, usable.minX + 12)
+                    .padding(.top, usable.minY + 14)
                 }
             }
             .coordinateSpace(name: coordinateSpace)
             .environment(\.colorScheme, scheme)
         }
+    }
+}
+
+/// Shown on an empty layout: what to do first.
+private struct ZoneEditorEmptyHint: View {
+    let theme: BarTheme
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "rectangle.dashed")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(theme.accent)
+            Text(tx("Drag on the screen to draw a zone", "Arrastra sobre la pantalla para dibujar una zona"))
+                .font(.system(size: 22, weight: .semibold))
+            Text(tx("or use Add zone", "o usa Añadir zona"))
+                .font(.system(size: 14))
+                .flyoutSecondary()
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -187,6 +215,8 @@ final class ZoneCanvasView: NSView {
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+    /// The first click on an inactive editor already draws or grabs a zone.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -215,8 +245,8 @@ final class ZoneCanvasView: NSView {
     }
 
     override func accessibilityHelp() -> String? {
-        tx("Drag on an empty area to draw a zone, drag a zone to move it or its edges to resize it. Delete removes the selected zone, Return saves, Esc closes.",
-           "Arrastra en un área vacía para dibujar una zona, arrastra una zona para moverla o sus bordes para cambiar su tamaño. Suprimir borra la zona seleccionada, Retorno guarda, Esc cierra.")
+        tx("Drag on an empty area to draw a zone (hold Shift to draw over other zones), drag a zone to move it or its edges to resize it. Delete removes the selected zone, Return saves, Esc closes.",
+           "Arrastra en un área vacía para dibujar una zona (mantén Mayús para dibujar sobre otras), arrastra una zona para moverla o sus bordes para cambiar su tamaño. Suprimir borra la zona seleccionada, Retorno guarda, Esc cierra.")
     }
 
     override func updateTrackingAreas() {
@@ -241,7 +271,7 @@ final class ZoneCanvasView: NSView {
         resetGesture()
         let point = appKitPoint(for: event)
         guard let layout = session.layout, !session.usable.isEmpty else { return }
-        let hit = editorHit(at: point, in: layout)
+        let hit = editorHit(at: point, in: layout, drawing: event.modifierFlags.contains(.shift))
         guard hit != nil || isOnCanvas(point) else { return }
         session.selectedZone = hit?.zone.id
         gesture = Gesture(start: fraction(point), hit: hit,
@@ -261,6 +291,7 @@ final class ZoneCanvasView: NSView {
 
     override func flagsChanged(with event: NSEvent) {
         guard let gesture, let last = gesture.last else {
+            updateCursor(for: event)
             super.flagsChanged(with: event)
             return
         }
@@ -291,8 +322,9 @@ final class ZoneCanvasView: NSView {
         }
     }
 
-    private func editorHit(at point: CGPoint, in layout: ZoneLayout) -> ZonePicking.EditorHit? {
-        guard !session.drawArmed else { return nil }
+    /// Shift draws a new zone anywhere, also over existing ones (every built-in layout fills the whole screen).
+    private func editorHit(at point: CGPoint, in layout: ZoneLayout, drawing: Bool) -> ZonePicking.EditorHit? {
+        guard !drawing else { return nil }
         return ZonePicking.editorHit(at: point, zones: layout.zones, usable: session.usable,
                                      selectedID: session.selectedZone)
     }
@@ -307,14 +339,16 @@ final class ZoneCanvasView: NSView {
             cursor(for: gesture.hit, dragging: gesture.last != nil).set()
             return
         }
-        let location = convert(event.locationInWindow, from: nil)
+        // Key events (Shift pressed or released) carry no reliable pointer position.
+        let inWindow = event.type == .flagsChanged ? window?.mouseLocationOutsideOfEventStream ?? .zero : event.locationInWindow
+        let location = convert(inWindow, from: nil)
         guard !session.hudFrame.contains(location) else { return }
         guard session.dialog == nil, let layout = session.layout, !session.usable.isEmpty else {
             NSCursor.arrow.set()
             return
         }
         let point = ZoneGeometry.appKitPoint(fromCG: location, primaryHeight: bounds.height)
-        let hit = editorHit(at: point, in: layout)
+        let hit = editorHit(at: point, in: layout, drawing: event.modifierFlags.contains(.shift))
         let cursor = hit != nil || isOnCanvas(point) ? cursor(for: hit, dragging: false) : .arrow
         cursor.set()
     }

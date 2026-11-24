@@ -333,23 +333,36 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         guard let store else { return items }
         let screens = NSScreen.screens
         let keys = ZoneDisplays.keys(for: screens)
-        for screen in screens {
+        let labels = ZoneDisplays.labels(for: screens)
+        for (index, screen) in screens.enumerated() {
             let key = Self.displayKey(screen, keys: keys)
             let off = store.state.activeByDisplay[key] == ZonesState.off
-            let active = off ? nil : store.layout(forDisplay: key)?.id
+            let active = off ? nil : store.layout(forDisplay: key)
+            // Each layout is pictured at this monitor's shape, so the choice is visual and per monitor.
+            let aspect = ZoneThumbnailRenderer.aspect(of: screen.frame)
             let menu = NSMenu()
             menu.autoenablesItems = false
             for layout in store.state.layouts {
-                menu.addItem(BlockItem(layout.name, checked: layout.id == active) { [weak self] in
+                let item = BlockItem(ZoneEditorSession.displayName(layout), checked: layout.id == active?.id) { [weak self] in
                     self?.setLayout(layout.id, forDisplay: key)
-                })
+                }
+                item.image = ZoneThumbnailRenderer.image(layout.zones, aspect: aspect)
+                menu.addItem(item)
             }
             menu.addItem(.separator())
             menu.addItem(BlockItem(tx("Off on this display", "Desactivadas en esta pantalla"), checked: off) { [weak self] in
                 self?.setLayout(nil, forDisplay: key)
             })
-            let name = screen.localizedName
-            let item = NSMenuItem(title: tx("Layout · \(name)", "Distribución · \(name)"), action: nil, keyEquivalent: "")
+            menu.addItem(.separator())
+            menu.addItem(BlockItem(tx("Edit zones on this display…", "Editar zonas en esta pantalla…")) {
+                Self.openEditor?(key)
+            })
+            let name = labels[index]
+            let current = active.map(ZoneEditorSession.displayName) ?? tx("Off", "Desactivadas")
+            let item = NSMenuItem(title: tx("\(name): \(current)", "\(name): \(current)"), action: nil, keyEquivalent: "")
+            item.image = active.map { ZoneThumbnailRenderer.image($0.zones, aspect: aspect) }
+                ?? NSImage(systemSymbolName: "nosign", accessibilityDescription: nil)
+            item.toolTip = ZoneDisplays.sizeText(screen)
             item.submenu = menu
             items.append(item)
         }

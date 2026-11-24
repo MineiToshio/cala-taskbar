@@ -1,5 +1,8 @@
 import SwiftUI
 
+/// The editor's single panel: the layout's name, a gallery of every layout pictured at this monitor's shape,
+/// the zone tools and Cancel / Save. Clicking a picture puts that layout on the canvas and makes it the one this
+/// monitor uses; there is no separate "layout" picker or "use on this monitor" step.
 struct ZoneEditorHUD: View {
     let session: ZoneEditorSession
     @Environment(\.colorScheme) private var scheme
@@ -16,37 +19,77 @@ struct ZoneEditorHUD: View {
     }
 
     private var expanded: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(tx("Zones editor", "Editor de zonas"))
-                    .font(.system(size: 18, weight: .semibold))
-                    .accessibilityAddTraits(.isHeader)
-                Spacer()
-                collapseButton
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) { monitorPicker; layoutPicker; renameField }
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 12) { monitorPicker; layoutPicker }
-                    renameField
-                }
-            }
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            ZoneEditorGallery(session: session)
             Divider()
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 16) { layoutTools; snappingTools }
-                VStack(alignment: .leading, spacing: 8) { layoutTools; snappingTools }
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) { help; Spacer(minLength: 0); actions }
-                VStack(alignment: .leading, spacing: 8) { help; actions }
-            }
+            footer
         }
         .controlSize(.small)
         .buttonStyle(.bordered)
-        .frame(maxWidth: 590)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .frame(maxWidth: 980)
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
         .themedPanel(radius: 14, theme: session.theme)
+        .onChange(of: session.renameRequest) {
+            nameFocused = true
+        }
+    }
+
+    // MARK: Header: name and layout actions, then monitor, grid, Cancel and Save
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            nameField
+            iconButton(tx("Duplicate layout", "Duplicar distribución"), "plus.square.on.square") { session.duplicateLayout() }
+            iconButton(tx("Delete layout…", "Eliminar distribución…"), "trash") { session.requestDeleteLayout() }
+                .disabled(session.draft.layouts.count <= 1)
+            Spacer(minLength: 12)
+            if session.monitors.count > 1 { monitorPicker }
+            Toggle(isOn: Binding(get: { session.gridEnabled }, set: session.changeGrid)) {
+                Label(tx("Grid", "Cuadrícula"), systemImage: "grid")
+            }
+            .toggleStyle(.button)
+            .help(tx("Also snap to a 12 × 12 grid", "Ajustar también a una cuadrícula de 12 × 12"))
+            Button(session.hasChanges ? tx("Cancel", "Cancelar") : tx("Close", "Cerrar"), action: session.requestCancel)
+                .keyboardShortcut(.cancelAction)
+            Button(tx("Save", "Guardar"), action: session.save)
+                .buttonStyle(.borderedProminent)
+            collapseButton
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var nameField: some View {
+        let title = tx("Layout name", "Nombre de la distribución")
+        return TextField(title, text: Binding(get: { session.layoutName }, set: { session.layoutName = $0 }),
+                         prompt: Text(ZoneEditorSession.untitled))
+            .textFieldStyle(.plain)
+            .font(.system(size: 16, weight: .semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(nameFocused ? 0.08 : 0.04)))
+            .frame(minWidth: 140, maxWidth: 260)
+            .focused($nameFocused)
+            .onSubmit {
+                nameFocused = false
+                session.focusCanvas()
+            }
+            .help(tx("Click to rename", "Haz clic para cambiar el nombre"))
+            .accessibilityLabel(title)
+    }
+
+    private var monitorPicker: some View {
+        Picker(tx("Monitor", "Pantalla"), selection: Binding(get: { session.displayKey }, set: session.selectDisplay)) {
+            ForEach(session.monitors) { monitor in
+                Text("\(monitor.name) — \(monitor.size)").tag(monitor.key)
+            }
+        }
+        .labelsHidden()
+        .fixedSize()
+        .help(tx("Edit the zones of another monitor", "Editar las zonas de otra pantalla"))
+        .accessibilityLabel(tx("Monitor", "Pantalla"))
     }
 
     private var collapseButton: some View {
@@ -63,112 +106,169 @@ struct ZoneEditorHUD: View {
         .help(title)
     }
 
-    private var monitorPicker: some View {
-        let title = tx("Monitor", "Monitor")
-        return labeled(title) {
-            Picker(title, selection: Binding(get: { session.displayKey }, set: session.selectDisplay)) {
-                ForEach(session.monitors) { Text($0.name).tag($0.key) }
+    private func iconButton(_ title: String, _ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol).labelStyle(.iconOnly)
+        }
+        .buttonStyle(.borderless)
+        .help(title)
+    }
+
+    // MARK: Footer: zone tools and how to draw
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Button { session.addZone() } label: {
+                Label(tx("Add zone", "Añadir zona"), systemImage: "plus.rectangle")
             }
-            .labelsHidden()
-            .frame(width: 165, alignment: .leading)
-        }
-    }
-
-    private var layoutPicker: some View {
-        let title = tx("Layout", "Diseño")
-        return labeled(title) {
-            Picker(title, selection: Binding(get: { session.layoutID }, set: session.chooseLayout)) {
-                ForEach(session.draft.layouts) { layout in
-                    Text(layout.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                         ? ZoneEditorSession.untitled : layout.name).tag(Optional(layout.id))
-                }
+            .disabled(session.layout == nil)
+            Button(role: .destructive) { session.deleteZone() } label: {
+                Label(tx("Delete zone", "Eliminar zona"), systemImage: "minus.rectangle")
             }
-            .labelsHidden()
-            .frame(width: 155, alignment: .leading)
-        }
-    }
-
-    private var renameField: some View {
-        let title = tx("Layout name", "Nombre del diseño")
-        return labeled(title) {
-            TextField(title, text: Binding(get: { session.layoutName }, set: { session.layoutName = $0 }))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 195)
-                .focused($nameFocused)
-                .onSubmit {
-                    nameFocused = false
-                    session.focusCanvas()
-                }
-        }
-    }
-
-    private func labeled<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption.weight(.medium))
+            .disabled(session.selectedZone == nil)
+            Text(hint)
+                .font(.caption)
                 .flyoutSecondary()
-                .accessibilityHidden(true)
-            content()
+                .lineLimit(2)
+                .padding(.leading, 6)
+            Spacer(minLength: 0)
+            if session.isOff {
+                Label(tx("Zones are off on this monitor: click a layout to turn them on",
+                         "Las zonas están desactivadas en esta pantalla: haz clic en una distribución para activarlas"),
+                      systemImage: "pause.circle")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(StatusColor.color(.attention, dark: scheme == .dark))
+                    .lineLimit(2)
+            }
         }
     }
 
-    private var layoutTools: some View {
-        HStack(spacing: 6) {
-            Menu(tx("New layout", "Nuevo diseño")) {
-                Button(tx("Blank", "En blanco")) { session.createLayout() }
-                Divider()
-                ForEach(ZoneTemplates.ids, id: \.self) { id in
-                    Button(ZoneEditor.templateName(id)) { session.createLayout(template: id) }
+    private var hint: String {
+        if session.layout?.zones.isEmpty ?? true {
+            return tx("Drag on the screen to draw a zone · Hold ⌥ to turn off snapping",
+                      "Arrastra sobre la pantalla para dibujar una zona · Mantén ⌥ para desactivar el ajuste")
+        }
+        return tx("Drag a zone to move it, its edges to resize · Drag empty space, or hold ⇧ over zones, to draw · ⌥ turns off snapping",
+                  "Arrastra una zona para moverla, sus bordes para cambiar su tamaño · Arrastra en un espacio vacío, o mantén ⇧ sobre las zonas, para dibujar · ⌥ desactiva el ajuste")
+    }
+}
+
+/// Every layout as a picture of this monitor's shape. The one on the canvas (and used by this monitor) is ringed.
+private struct ZoneEditorGallery: View {
+    let session: ZoneEditorSession
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.themeAccent) private var accent
+    private static let box = CGSize(width: 104, height: 54)
+
+    var body: some View {
+        // "+" stays in view at the start; the pictures scroll when they do not fit.
+        HStack(alignment: .top, spacing: 8) {
+            addTile
+                .padding(.vertical, 2)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 8) {
+                        ForEach(session.draft.layouts) { layout in
+                            tile(layout).id(layout.id)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                    .padding(.horizontal, 2)
                 }
+                .onAppear { scroll(proxy, animated: false) }
+                .onChange(of: session.layoutID) { scroll(proxy, animated: true) }
             }
-            .fixedSize()
-            Button(tx("Duplicate", "Duplicar"), action: session.duplicateLayout)
-                .accessibilityLabel(tx("Duplicate layout", "Duplicar diseño"))
-            Button(tx("Delete layout", "Eliminar diseño"), role: .destructive, action: session.requestDeleteLayout)
-                .tint(StatusColor.color(.critical, dark: scheme == .dark))
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(tx("Layouts", "Distribuciones"))
+    }
+
+    private func scroll(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard let id = session.layoutID else { return }
+        if animated { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id) } } else { proxy.scrollTo(id) }
+    }
+
+    private func tile(_ layout: ZoneLayout) -> some View {
+        let selected = layout.id == session.layoutID
+        let name = ZoneEditorSession.displayName(layout)
+        let dark = scheme == .dark
+        return Button {
+            session.select(layout.id)
+            session.focusCanvas()
+        } label: {
+            VStack(spacing: 5) {
+                ZoneThumbnailView(zones: layout.zones, aspect: session.aspect, box: Self.box, accent: accent)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(FlyoutStyle.card(dark: dark)))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(selected ? accent : Color.primary.opacity(0.10),
+                                          style: StrokeStyle(lineWidth: selected ? 2 : 1, dash: selected && session.isOff ? [4, 3] : []))
+                    }
+                Text(name)
+                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Color.primary : FlyoutStyle.secondary(dark: dark))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: Self.box.width + 12)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(name)
+        .accessibilityLabel(name)
+        .accessibilityValue(tx("\(layout.zones.count) zones", "\(layout.zones.count) zonas"))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .contextMenu {
+            Button(tx("Rename", "Cambiar nombre")) { session.rename(layout.id) }
+            Button(tx("Duplicate", "Duplicar")) { session.duplicateLayout(layout.id) }
+            if ZoneTemplates.isModified(layout) {
+                Button(tx("Restore original zones", "Restaurar las zonas originales")) { session.restoreOriginal(layout.id) }
+            }
+            Divider()
+            Button(tx("Delete…", "Eliminar…"), role: .destructive) { session.requestDeleteLayout(layout.id) }
                 .disabled(session.draft.layouts.count <= 1)
         }
-        .fixedSize()
     }
 
-    private var snappingTools: some View {
-        HStack(spacing: 8) {
-            Button(session.drawArmed ? tx("Stop drawing", "Dejar de dibujar") : tx("Draw zone", "Dibujar zona")) {
-                session.drawArmed.toggle()
-            }
-            .help(tx("Draw a zone over existing zones", "Dibuja una zona sobre las existentes"))
-            Toggle(tx("12×12 grid", "Cuadrícula 12×12"),
-                   isOn: Binding(get: { session.gridEnabled }, set: session.changeGrid))
-                .toggleStyle(.checkbox)
-                .help(tx("Snap to the 12-division grid", "Ajustar a la cuadrícula de 12 divisiones"))
+    /// "+": a new blank layout. Built-in layouts the user deleted can be added back from the same button.
+    @ViewBuilder private var addTile: some View {
+        let missing = ZoneTemplates.missing(in: session.draft)
+        let title = tx("New layout", "Nueva distribución")
+        if missing.isEmpty {
+            Button(action: session.createBlankLayout) { addLabel(title) }
+                .buttonStyle(.plain)
+                .help(title)
+                .accessibilityLabel(title)
+        } else {
+            Menu {
+                Button(tx("Blank layout", "Distribución en blanco"), action: session.createBlankLayout)
+                Section(tx("Add back a built-in layout", "Recuperar una distribución incluida")) {
+                    ForEach(missing, id: \.self) { id in
+                        Button(ZoneEditor.templateName(id)) { session.addBuiltIn(id) }
+                    }
+                }
+            } label: { addLabel(title) }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(title)
+                .accessibilityLabel(title)
         }
-        .fixedSize()
     }
 
-    private var help: some View {
-        Text(session.drawArmed
-             ? tx("Drag anywhere on the canvas to draw.", "Arrastra en el lienzo para dibujar.")
-             : tx("Drag to draw or edit · Hold ⌥ to turn off snapping", "Arrastra para dibujar o editar · Mantén ⌥ para desactivar el ajuste"))
-            .font(.caption)
-            .flyoutSecondary()
-    }
-
-    private var actions: some View {
-        HStack(spacing: 6) {
-            if session.isAssigned {
-                Label(tx("In use on this monitor", "En uso en este monitor"), systemImage: "checkmark.circle.fill")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(StatusColor.color(.ok, dark: scheme == .dark))
-                    .padding(.trailing, 4)
-            } else {
-                Button(tx("Use on this monitor", "Usar en este monitor"), action: session.assignToDisplay)
-            }
-            Button(tx("Cancel", "Cancelar"), action: session.requestCancel)
-                .keyboardShortcut(.cancelAction)
-            Button(tx("Save", "Guardar"), action: session.save)
-                .buttonStyle(.borderedProminent)
+    private func addLabel(_ title: String) -> some View {
+        VStack(spacing: 5) {
+            Image(systemName: "plus")
+                .font(.system(size: 18, weight: .medium))
+                .frame(width: 56, height: Self.box.height + 12)
+                .background(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.22),
+                                                                          style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+            Text(tx("New", "Nueva"))
+                .font(.system(size: 11))
+                .flyoutSecondary()
         }
-        .fixedSize()
+        .contentShape(Rectangle())
     }
 }
 
@@ -209,7 +309,7 @@ struct ZoneEditorDialog: View {
     private var title: String {
         switch dialog {
         case .discard: tx("Discard changes to zones?", "¿Descartar los cambios en las zonas?")
-        case .deleteLayout: tx("Delete layout?", "¿Eliminar el diseño?")
+        case .deleteLayout: tx("Delete layout?", "¿Eliminar la distribución?")
         case .saveError: tx("Couldn’t save zones", "No se pudieron guardar las zonas")
         }
     }
@@ -226,7 +326,7 @@ struct ZoneEditorDialog: View {
     private var confirmation: String? {
         switch dialog {
         case .discard: tx("Discard changes", "Descartar cambios")
-        case .deleteLayout: tx("Delete layout", "Eliminar diseño")
+        case .deleteLayout: tx("Delete layout", "Eliminar distribución")
         case .saveError: nil
         }
     }

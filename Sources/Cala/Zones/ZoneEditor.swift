@@ -75,13 +75,17 @@ final class ZoneEditor: NSObject {
         window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.isMovable = false
-        window.backgroundColor = .clear
+        // Not `.clear`: the window server sends a click through any point where the window's own surface is fully
+        // transparent, and the canvas is drawn by SwiftUI layers that do not count. With a clear background every
+        // click and drag on the canvas went to the app or desktop underneath (only the panel's AppKit controls got
+        // them), so drawing seemed not to work. A 1 % tint, invisible under the editor's dimming, keeps them here.
+        window.backgroundColor = NSColor(white: 0, alpha: 0.01)
         window.hasShadow = false
         window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
         window.acceptsMouseMovedEvents = true
         window.title = tx("Cala · Zones editor", "Cala · Editor de zonas")
-        let content = NSHostingView(rootView: ZoneEditorScene(session: session))
+        let content = ZoneEditorHostingView(rootView: ZoneEditorScene(session: session))
         content.sizingOptions = []
         window.contentView = content
 
@@ -136,10 +140,9 @@ final class ZoneEditor: NSObject {
             return display.id == displayID
         }
         guard let display = preferred ?? displays.first else { return }
-        session.monitors = displays.enumerated().map { position, item in
-            let name = item.screen.localizedName
-            let duplicateName = displays.filter { $0.screen.localizedName == name }.count > 1
-            return .init(key: item.key, name: duplicateName ? "\(name) (\(position + 1))" : name)
+        let labels = ZoneDisplays.labels(for: displays.map(\.screen))
+        session.monitors = displays.indices.map { index in
+            .init(key: displays[index].key, name: labels[index], size: ZoneDisplays.sizeText(displays[index].screen))
         }
 
         let screen = display.screen
@@ -148,7 +151,8 @@ final class ZoneEditor: NSObject {
                                              barHeight: config.barHeight,
                                              barReserves: barIsRunning() && !config.config.autoHide)
         let local = usable.offsetBy(dx: -screen.frame.minX, dy: -screen.frame.minY)
-        session.place(on: display.key, usable: local, selectLayout: selectLayout)
+        session.place(on: display.key, usable: local, aspect: ZoneThumbnailRenderer.aspect(of: screen.frame),
+                      selectLayout: selectLayout)
         displayID = display.id
         window.setFrame(screen.frame, display: true)
     }
@@ -188,16 +192,21 @@ final class ZoneEditor: NSObject {
                                                  others: layout.zones.map(\.rect), grid: true,
                                                  snapping: true, threshold: (0.01, 0.01), minSize: (0.05, 0.05))
         let selected = layout.addZone(overlap)
-        let session = ZoneEditorSession(state: ZonesState(layouts: [layout, ZoneTemplates.makeLayout(
-            "two-columns", name: templateName("two-columns"))], defaultLayout: layout.id),
-                                        gridEnabled: true, theme: .named("graphite"))
-        session.monitors = [.init(key: "sample", name: tx("Built-in Display", "Pantalla integrada")),
-                            .init(key: "external", name: tx("External Display", "Pantalla externa"))]
+        // Every built-in layout, with the edited 2 × 2 grid in its place, so the gallery is pictured full.
+        var state = ZoneTemplates.seedState(names: templateName)
+        if let index = state.layouts.firstIndex(where: { $0.template == "grid-2x2" }) {
+            layout.id = state.layouts[index].id
+            state.layouts[index] = layout
+        }
+        state.defaultLayout = layout.id
+        let session = ZoneEditorSession(state: state, gridEnabled: true, theme: .named("graphite"))
+        session.monitors = [.init(key: "sample", name: tx("Right display", "Pantalla derecha"), size: "1280 × 800"),
+                            .init(key: "external", name: tx("Left display", "Pantalla izquierda"), size: "3840 × 1080")]
         let bounds = CGRect(origin: .zero, size: size)
         // Include the area reserved for the menu bar in the sample.
         let visible = CGRect(x: 0, y: 0, width: size.width, height: max(0, size.height - 28))
         let usable = ZoneGeometry.usableRect(frame: bounds, visibleFrame: visible, barHeight: 34, barReserves: true)
-        session.place(on: "sample", usable: usable, selectLayout: true)
+        session.place(on: "sample", usable: usable, aspect: Double(size.width / size.height), selectLayout: true)
         session.selectedZone = selected
         session.preview = .init(zoneID: selected, rect: overlap, guides: guides)
 
@@ -234,6 +243,13 @@ private final class ZoneEditorSnapshotWindow: NSWindow {
     override var backingScaleFactor: CGFloat { scale }
 }
 
+/// The editor's root view. It takes the first click even when Cala was not active (the editor is opened from the
+/// menu-bar icon or the bar, which do not activate the app), so a drag or a button press is never swallowed by
+/// the click that activates the window.
+private final class ZoneEditorHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 @MainActor
 private final class ZoneEditorWindow: NSWindow {
     weak var session: ZoneEditorSession?
@@ -267,6 +283,7 @@ final class ZoneEditorSession {
     struct Monitor: Identifiable {
         var key: String
         var name: String
+        var size: String
         var id: String { key }
     }
 
@@ -285,17 +302,21 @@ final class ZoneEditorSession {
     let original: ZonesState
     let theme: BarTheme
     private(set) var draft: ZonesState
+    /// The layout on the canvas: the one this monitor uses (or would use, when zones are off on it).
     private(set) var layoutID: UUID?
     private(set) var displayKey = ""
     private(set) var usable = CGRect.zero
+    /// Width / height of the edited monitor, so the gallery pictures have its shape.
+    private(set) var aspect = 16.0 / 10
     @ObservationIgnored weak var canvas: ZoneCanvasView?
     @ObservationIgnored var hudFrame = CGRect.zero
     var monitors: [Monitor] = []
     var selectedZone: UUID?
     var preview: Preview?
-    var drawArmed = false
     var hudCollapsed = false
     var gridEnabled: Bool
+    /// Bumped to put the cursor in the layout-name field (a new or duplicated layout, or "Rename").
+    var renameRequest = 0
     private(set) var dialog: Dialog?
 
     var selectDisplay: (String) -> Void = { _ in }
@@ -317,6 +338,8 @@ final class ZoneEditorSession {
         get { layout?.name ?? "" }
         set { if let layoutIndex { draft.layouts[layoutIndex].name = newValue } }
     }
+    var hasChanges: Bool { draft != original }
+    var monitorName: String { monitors.first { $0.key == displayKey }?.name ?? "" }
 
     var finishedDraft: ZonesState {
         var result = draft
@@ -328,29 +351,40 @@ final class ZoneEditorSession {
         return result
     }
 
-    static var untitled: String { tx("Untitled layout", "Diseño sin título") }
+    nonisolated static var untitled: String { tx("Untitled layout", "Distribución sin título") }
 
-    var isAssigned: Bool { layoutID != nil && draft.layout(forDisplay: displayKey)?.id == layoutID }
-
-    func assignToDisplay() {
-        if let layoutID { draft.activeByDisplay[displayKey] = layoutID.uuidString }
+    nonisolated static func displayName(_ layout: ZoneLayout) -> String {
+        layout.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? untitled : layout.name
     }
 
-    func place(on key: String, usable: CGRect, selectLayout: Bool) {
+    /// Zones are switched off on this monitor (menu-bar icon or Settings): the canvas still shows a layout to edit.
+    var isOff: Bool { draft.activeByDisplay[displayKey] == ZonesState.off }
+
+    func place(on key: String, usable: CGRect, aspect: Double, selectLayout: Bool) {
         displayKey = key
         self.usable = usable
+        self.aspect = aspect
         if selectLayout {
-            chooseLayout(draft.layout(forDisplay: key)?.id ?? draft.defaultLayout)
+            show(draft.layout(forDisplay: key)?.id ?? draft.defaultLayout)
         } else {
             resetGesture()
         }
     }
 
-    func chooseLayout(_ id: UUID?) {
+    /// Shows a layout without changing which one the monitor uses.
+    private func show(_ id: UUID?) {
         layoutID = id
         selectedZone = nil
-        drawArmed = false
         resetGesture()
+    }
+
+    /// The gallery's click: the layout goes on the canvas and becomes the one this monitor uses (on Save).
+    func select(_ id: UUID) {
+        guard draft.layouts.contains(where: { $0.id == id }) else { return }
+        show(id)
+        if isOff || draft.layout(forDisplay: displayKey)?.id != id {
+            draft.activeByDisplay[displayKey] = id.uuidString
+        }
     }
 
     private func resetGesture() {
@@ -375,7 +409,7 @@ final class ZoneEditorSession {
 
     func requestCancel() {
         if dialog != nil { dismissDialog() }
-        else if draft != original { present(.discard) }
+        else if hasChanges { present(.discard) }
         else { discard() }
     }
 
@@ -383,30 +417,55 @@ final class ZoneEditorSession {
         switch dialog {
         case .discard: discard()
         case let .deleteLayout(id, _):
-            if draft.delete(id) { chooseLayout(draft.layout(forDisplay: displayKey)?.id ?? draft.defaultLayout) }
+            if draft.delete(id) { show(draft.layout(forDisplay: displayKey)?.id ?? draft.defaultLayout) }
             dismissDialog()
         case .saveError, nil: dismissDialog()
         }
     }
 
-    func createLayout(template id: String? = nil) {
-        let layout = id.map { ZoneTemplates.makeLayout($0, name: ZoneEditor.templateName($0)) }
-            ?? ZoneLayout(name: Self.untitled)
+    // MARK: Layouts
+
+    private func insert(_ layout: ZoneLayout, rename: Bool) {
         draft.layouts.append(layout)
-        chooseLayout(layout.id)
+        select(layout.id)
+        if rename { renameRequest += 1 }
     }
 
-    func duplicateLayout() {
-        guard let layout else { return }
-        let name = tx("\(layout.name) copy", "Copia de \(layout.name)")
-        let id = draft.duplicate(layout.id, name: name)
-        chooseLayout(id)
+    func createBlankLayout() {
+        let name = ZoneEditing.uniqueName(tx("My layout", "Mi distribución"), existing: draft.layouts.map(\.name))
+        insert(ZoneLayout(name: name), rename: true)
     }
 
-    func requestDeleteLayout() {
-        guard let layout, draft.layouts.count > 1 else { return }
-        present(.deleteLayout(layout.id, name: layout.name.isEmpty ? Self.untitled : layout.name))
+    func addBuiltIn(_ template: String) {
+        insert(ZoneTemplates.makeLayout(template, name: ZoneEditor.templateName(template)), rename: false)
     }
+
+    func duplicateLayout(_ id: UUID? = nil) {
+        guard let source = draft.layouts.first(where: { $0.id == (id ?? layoutID) }) else { return }
+        let name = ZoneEditing.uniqueName(tx("\(Self.displayName(source)) copy", "Copia de \(Self.displayName(source))"),
+                                          existing: draft.layouts.map(\.name))
+        let copy = draft.duplicate(source.id, name: name)
+        select(copy)
+        renameRequest += 1
+    }
+
+    func rename(_ id: UUID) {
+        select(id)
+        renameRequest += 1
+    }
+
+    func restoreOriginal(_ id: UUID) {
+        guard let index = draft.layouts.firstIndex(where: { $0.id == id }) else { return }
+        draft.layouts[index] = ZoneTemplates.restored(draft.layouts[index])
+        select(id)
+    }
+
+    func requestDeleteLayout(_ id: UUID? = nil) {
+        guard let layout = draft.layouts.first(where: { $0.id == (id ?? layoutID) }), draft.layouts.count > 1 else { return }
+        present(.deleteLayout(layout.id, name: Self.displayName(layout)))
+    }
+
+    // MARK: Zones
 
     func apply(_ preview: Preview) {
         guard let layoutIndex else { return }
@@ -415,8 +474,15 @@ final class ZoneEditorSession {
             draft.layouts[layoutIndex].zones[index].rect = preview.rect
         } else {
             selectedZone = draft.layouts[layoutIndex].addZone(preview.rect)
-            drawArmed = false
         }
+    }
+
+    func addZone() {
+        guard let layoutIndex else { return }
+        let rect = ZoneEditing.newZoneRect(existing: draft.layouts[layoutIndex].zones.map(\.rect))
+        selectedZone = draft.layouts[layoutIndex].addZone(rect)
+        resetGesture()
+        focusCanvas()
     }
 
     func deleteZone() {
@@ -424,6 +490,7 @@ final class ZoneEditorSession {
         draft.layouts[layoutIndex].zones.removeAll { $0.id == selectedZone }
         self.selectedZone = nil
         resetGesture()
+        focusCanvas()
     }
 
     func duplicateZone() {

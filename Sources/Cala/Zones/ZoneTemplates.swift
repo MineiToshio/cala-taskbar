@@ -43,6 +43,27 @@ enum ZoneTemplates {
         return ZoneLayout(name: name, zones: zones, nextSeq: zones.count, template: id)
     }
 
+    /// Built-in layouts no layout in the state comes from (the user deleted them), in template order.
+    static func missing(in state: ZonesState) -> [String] {
+        let present = Set(state.layouts.compactMap(\.template))
+        return ids.filter { !present.contains($0) }
+    }
+
+    /// Whether a layout made from a built-in no longer has the built-in's zones (so "Restore original" applies).
+    static func isModified(_ layout: ZoneLayout) -> Bool {
+        guard let template = layout.template, ids.contains(template) else { return false }
+        return layout.zones.map(\.rect) != zones(template)
+    }
+
+    /// The layout with its built-in zones back; its id, name and per-monitor use stay.
+    static func restored(_ layout: ZoneLayout) -> ZoneLayout {
+        guard let template = layout.template, ids.contains(template) else { return layout }
+        var copy = layout
+        copy.zones = zones(template).enumerated().map { Zone(rect: $0.element, seq: $0.offset) }
+        copy.nextSeq = copy.zones.count
+        return copy
+    }
+
     static func seedState(names: (String) -> String = name) -> ZonesState {
         let layouts = ids.map { makeLayout($0, name: names($0)) }
         return ZonesState(layouts: layouts, defaultLayout: layouts.first?.id)

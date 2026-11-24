@@ -69,7 +69,9 @@ A **layout** is a named set of zones. The first start with no `zones.json` creat
 | `main-two-stacked` — Main + two stacked | (0, 0, ½, 1) · (½, 0, ½, ½) · (½, ½, ½, ½) |
 | `wide-center` — Wide center | (0, 0, ¼, 1) · (¼, 0, ½, 1) · (¾, 0, ¼, 1) |
 
-You can create as many layouts of your own as you like (from the editor: blank, or from any template), duplicate one (the copy is named "… copy"), rename it and delete it. The last remaining layout cannot be deleted. Templates are only starting points: after the first start they are ordinary layouts you can edit or delete.
+You can create as many layouts of your own as you like (the editor's **+**: a blank layout), duplicate one (the copy is named "… copy", numbered if that name is taken), rename it and delete it. The last remaining layout cannot be deleted. Templates are only starting points: after the first start they are ordinary layouts you can edit or delete. An edited built-in can get its original zones back (**Restore original zones** in its picture's context menu), and a deleted one can be added back from the **+** button (it becomes a menu while any built-in is missing).
+
+Every layout is shown as a **picture of its zones at the monitor's shape** (an ultrawide gets flat pictures, a portrait screen tall ones) wherever you choose one: the editor's gallery, Settings → Zones and the menu-bar icon's layout menus. One renderer draws them all; the geometry (`ZoneThumbnails`: fit to the screen's aspect, inset, gap between neighbours, pixel alignment, larger zones painted first) is pure and checked.
 
 There is one **default layout** (starts as Two columns). A monitor with no choice of its own uses it. Deleting a layout sends the monitors that used it back to the default; if the default itself is deleted, the first remaining layout becomes the default.
 
@@ -124,28 +126,35 @@ Why fractions:
 ## Monitors
 
 - **Identity.** A monitor is keyed by its CoreGraphics display UUID (the same key `alignments` uses in `config.json`), or the numeric display id if macOS gives no UUID. **Identical monitors** that report the same UUID get a `#2`, `#3`... suffix, ordered by position left to right then top to bottom. That order is stable only while the arrangement does not change (known limitation).
-- **Per-monitor choice.** Each monitor has its own active layout, or **Off** (no overlay and no snapping there). Choose it from the menu-bar icon (Layout · *monitor* → pick a layout, or "Off on this display"), from Settings → Zones → Layout per monitor, or with "Use on this monitor" in the editor.
+- **Names.** A monitor is shown by its own name when that name is unique. Monitors that share a name (two identical models, or several reported as "(AirPlay)", which macOS only numbers "(1)", "(2)") or have none are named by position instead: **Left / Middle / Right display**, **Top / Bottom display**, else **Display N**; the size in points is shown next to it (`ZoneMonitorNames`, checked). The same names are used in Settings, the menu-bar icon and the editor.
+- **Per-monitor choice.** Each monitor has its own active layout, or **Off** (no overlay and no snapping there). Choose it from the menu-bar icon (*monitor*: *current layout* → a menu of pictured layouts, "Off on this display" and "Edit zones on this display…"), from Settings → Zones → Layout per monitor (a grid of pictures and an **Off** tile, with **Edit zones…** for that monitor), or by clicking a layout in the editor's gallery.
 - **Disconnect.** The assignment stays in the file, like icon alignment. If zones mode is active and its monitor goes away, zones mode is cancelled and the window stays; any other screen change rebuilds the overlay in place.
 - **Connect.** A known monitor gets its stored layout; an unknown one gets the default layout (nothing is written until you choose).
 - Mirrored displays are one screen with one key. A Space change does not cancel zones mode (it fires whenever the pointer carries a window onto another monitor, and an edge push to a neighbouring Space carries the window along): the overlay panels join every Space, are brought back to the front, and the target is recomputed from the pointer.
 
 ## Editor
 
-Open it from the menu-bar icon (**Zones editor…**, on the monitor under the pointer) or Settings → Zones → **Edit zones…** (with a monitor picker when there is more than one monitor). It works even with the Zones module off: it loads `zones.json` on its own and a Save writes the file, which the module reads when it starts. With the module on, a Save is live at once.
+Open it from the menu-bar icon (**Zones editor…**, on the monitor under the pointer, or **Edit zones on this display…** in a monitor's layout menu) or Settings → Zones → **Edit zones…** next to each monitor. It works even with the Zones module off: it loads `zones.json` on its own and a Save writes the file, which the module reads when it starts. With the module on, a Save is live at once.
 
-It is a borderless window that covers the chosen monitor, above everything including the bar. The working area (the usable rectangle) is drawn on a dimmed screen, so what is outside it (menu bar, Dock, Cala's bar strip) is visibly excluded.
+It is a borderless window that covers the chosen monitor, above everything including the bar. The working area (the usable rectangle) is drawn on a dimmed screen, so what is outside it (menu bar, Dock, Cala's bar strip) is visibly excluded. It takes the first click even when Cala was not active, so the click that brings it forward already draws, grabs or presses a button.
+
+There is one concept, the **layout**, and one panel at the top (collapsible):
+- **Name** of the layout on the canvas, editable in place (click it; Return goes back to the canvas). Next to it **Duplicate** and **Delete** (with confirmation; staged until Save).
+- **Gallery:** every layout as a picture at this monitor's shape, the one on the canvas ringed. **Clicking a picture shows that layout on the canvas and makes it the one this monitor uses** (on Save); there is no separate layout picker or "use on this monitor" step. **+** (always visible at the start) adds a blank layout and puts the cursor in its name; while a built-in layout is missing it is a menu that can also add it back. Each picture's context menu: Rename, Duplicate, Restore original zones (edited built-ins), Delete.
+- **Monitor** picker (only with more than one monitor; "Left display — 3840 × 1080"), **Grid**, **Cancel** (reads **Close** when nothing changed) and **Save**.
+- Under the gallery: **Add zone** (a centred, grid-aligned zone, selected), **Delete zone** (enabled with a selection) and a one-line hint. If zones are off on this monitor, the ring is dashed and a note says that clicking a layout turns them on.
 
 On the canvas:
-- **Draw:** drag on an empty area. The **Draw zone** button turns drawing on everywhere, including over existing zones (for overlap).
-- **Move:** drag a zone. **Resize:** drag one of its eight handles (corners and edge midpoints) or its border.
-- **Select** a zone by clicking it. **Delete** or **Forward Delete** removes it; **⌘D** duplicates it.
+- **Draw:** drag on an empty area. Every built-in layout fills the whole screen, so **hold ⇧ (Shift)** to draw over existing zones (for overlap), or use **Add zone**. An empty layout says "Drag on the screen to draw a zone" in the middle of the screen.
+- **Move:** drag a zone. **Resize:** drag one of the selected zone's eight handles (corners and edge midpoints) or any zone's border. The cursor shows what a drag will do (crosshair, open hand, resize arrows).
+- **Select** a zone by clicking it; clicking empty space deselects. **Delete** or **Forward Delete** removes it; **⌘D** duplicates it.
 - Zones cannot leave the screen, and cannot be smaller than the larger of 5 % of the usable size and 80 pt.
-- **Snapping:** within 8 pt, an edge snaps to another zone's edges, the screen's edges and its centre line (½); with **12×12 grid** on, also to the twelfths. Active snap lines show as dashed guides. Hold **⌥ (Option)** to turn snapping off while dragging. The grid choice is remembered (`zonesEditorGrid`).
+- **Snapping:** within 8 pt, an edge snaps to another zone's edges, the screen's edges and its centre line (½); with **Grid** on, also to the twelfths of a 12 × 12 grid. Active snap lines show as dashed guides. Hold **⌥ (Option)** to turn snapping off while dragging. The grid choice is remembered (`zonesEditorGrid`).
 - Overlapping zones use the same "smallest wins" rule to decide which one you grab.
 
-The top panel (collapsible) holds: **Monitor** picker (moves the editor to that monitor), **Layout** picker, layout name, **New layout** (blank or from any template), **Duplicate**, **Delete layout**, the grid checkbox, **Use on this monitor** (or the "In use on this monitor" badge), **Cancel** and **Save**.
+Edits happen on a draft. **Save** (button, **⌘S** or **Return**) writes everything in one atomic write. **Cancel**, **Esc** or closing the window asks "Discard changes to zones?" only if something changed. Saving merges the draft into the live state, so a layout changed elsewhere while you were editing is not overwritten. **Drags are ignored the whole time the editor is open**, so a window dragged at that moment never triggers zones.
 
-Edits happen on a draft. **Save** (button, **⌘S** or **Return**) writes everything in one atomic write. **Cancel**, **Esc** or closing the window asks "Discard changes to zones?" only if something changed. Deleting a layout is staged and takes effect on Save. Saving merges the draft into the live state, so a layout changed elsewhere while you were editing is not overwritten. **Drags are ignored the whole time the editor is open**, so a window dragged at that moment never triggers zones.
+`Cala --snapshot <dir>` also renders the editor (`zones-editor-en.png`, `zones-editor-es.png`) offscreen, without starting any module.
 
 ## Settings keys
 
@@ -266,8 +275,10 @@ Do this from the **console** session (a background Fast User Switching session r
 - [ ] Unplug the monitor under the pointer mid-drag: zones mode cancels and the window stays.
 
 **6. Editor**
-- [ ] Draw, move, resize from all eight handles; zones cannot leave the screen; ⌥ disables snapping; dashed guides show; the grid toggle works and is remembered.
-- [ ] New layout (blank and from a template), duplicate, rename, delete (the last one cannot be deleted).
+- [ ] Click each picture in the gallery: the canvas shows it at once and, after Save, the monitor uses it.
+- [ ] Draw on empty space, ⇧-draw over a zone, Add zone; move, resize from all eight handles; zones cannot leave the screen; ⌥ disables snapping; dashed guides show; the grid toggle works and is remembered.
+- [ ] + (blank layout, name ready to type), duplicate, rename in place, delete with confirmation (the last one cannot be deleted); delete a built-in and add it back from +; edit a built-in and restore its original zones.
+- [ ] Settings → Zones and the menu-bar icon show the layouts as pictures per monitor, and two monitors with the same name read as Left / Right display.
 - [ ] Cancel with changes asks to discard; Save keeps them; dragging a window while the editor is open does nothing.
 - [ ] With Zones off, the editor still opens from the menu-bar icon and its Save is used when Zones is turned on.
 

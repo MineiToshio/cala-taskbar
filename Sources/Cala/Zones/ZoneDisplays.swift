@@ -13,4 +13,14 @@ enum ZoneDisplays {
         }
         return ZoneDisplayKeys.keys(for: displays)
     }
+
+    /// Names that tell the screens apart (see `ZoneMonitorNames`), in `screens` order.
+    static func labels(for screens: [NSScreen]) -> [String] {
+        ZoneMonitorNames.labels(screens.map { .init(name: $0.localizedName, frame: $0.frame) }, localize: tx)
+    }
+
+    /// "3840 × 1080", the size macOS reports for the screen in points.
+    static func sizeText(_ screen: NSScreen) -> String {
+        "\(Int(screen.frame.width)) × \(Int(screen.frame.height))"
+    }
 }

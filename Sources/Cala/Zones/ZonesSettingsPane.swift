@@ -1,15 +1,15 @@
 import AppKit
 import SwiftUI
 
-/// Settings → Zones: the module switch, how zones mode starts, the gap, the layout shown on each monitor, the editor
-/// and a note about macOS's own edge tiling. Layout choices go through the running module; with Zones off they are
-/// shown disabled (zones.json is not read), while the editor still opens and loads the file on its own.
+/// Settings → Zones: the module switch, how zones mode starts, the gap, each monitor's layout picked from pictures
+/// (with that monitor's editor one click away) and a note about macOS's own edge tiling. Layout choices go through
+/// the running module; with Zones off the pictures are hidden (zones.json is not read), while the editor still
+/// opens and loads the file on its own.
 struct ZonesSettingsPane: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject private var center = PermissionCenter.shared
     /// Bumped when layouts, the module or the screens change: ZonesStore is not observable.
     @State private var tick = 0
-    @State private var editorDisplay = ""
     @State private var tilingOn = ZonesModule.nativeTilingOn
 
     private var module: ZonesModule { ModuleRegistry.shared.zones }
@@ -28,11 +28,9 @@ struct ZonesSettingsPane: View {
     private var monitors: [Monitor] {
         let screens = NSScreen.screens
         let keys = ZoneDisplays.keys(for: screens)
-        return screens.enumerated().map { position, screen in
-            let name = screen.localizedName
-            let duplicate = screens.filter { $0.localizedName == name }.count > 1
-            return Monitor(screen: screen, key: ZonesModule.displayKey(screen, keys: keys),
-                           name: duplicate ? "\(name) (\(position + 1))" : name)
+        let labels = ZoneDisplays.labels(for: screens)
+        return screens.indices.map { index in
+            Monitor(screen: screens[index], key: ZonesModule.displayKey(screens[index], keys: keys), name: labels[index])
         }
     }
 
@@ -82,20 +80,7 @@ struct ZonesSettingsPane: View {
             Card {
                 ForEach(Array(monitors.enumerated()), id: \.offset) { index, monitor in
                     if index > 0 { RowDivider() }
-                    SettingRow(title: monitor.name,
-                               caption: "\(Int(monitor.screen.frame.width)) × \(Int(monitor.screen.frame.height))") {
-                        if let layouts = layoutStore?.state.layouts {
-                            Picker("", selection: layoutBinding(monitor.key)) {
-                                ForEach(layouts) { Text($0.name).tag($0.id.uuidString) }
-                                Divider()
-                                Text(tx("Off", "Desactivadas")).tag(ZonesState.off)
-                            }
-                            .labelsHidden().frame(width: 220)
-                            .accessibilityLabel(tx("Layout on \(monitor.name)", "Distribución en \(monitor.name)"))
-                        } else {
-                            Text(tx("Zones is off", "Zonas está apagado")).font(.system(size: 12)).foregroundStyle(.secondary)
-                        }
-                    }
+                    monitorSection(monitor, layoutStore: layoutStore)
                 }
                 if !running {
                     RowDivider()
@@ -103,26 +88,6 @@ struct ZonesSettingsPane: View {
                             "Activa Zonas para elegir la distribución de cada pantalla. La misma elección está en el icono de Cala en la barra de menús."))
                         .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            Card {
-                SettingRow(title: tx("Edit zones", "Editar zonas"),
-                           caption: tx("Draw, move and resize zones, or start from a template. It opens full screen on the monitor you choose; Esc closes it.",
-                                       "Dibuja, mueve y cambia el tamaño de las zonas, o parte de una plantilla. Se abre a pantalla completa en la pantalla que elijas; Esc lo cierra.")) {
-                    HStack(spacing: 8) {
-                        if monitors.count > 1 {
-                            Picker("", selection: Binding(get: { selectedEditorDisplay(monitors) }, set: { editorDisplay = $0 })) {
-                                ForEach(monitors, id: \.key) { Text($0.name).tag($0.key) }
-                            }
-                            .labelsHidden().frame(width: 170)
-                            .accessibilityLabel(tx("Monitor to edit", "Pantalla a editar"))
-                        }
-                        Button(tx("Edit zones…", "Editar zonas…")) {
-                            ZonesModule.openEditor?(selectedEditorDisplay(monitors))
-                        }
-                        .fixedSize()
-                        .disabled(ZonesModule.openEditor == nil || monitors.isEmpty)
-                    }
                 }
             }
             Card {
@@ -156,15 +121,83 @@ struct ZonesSettingsPane: View {
         .onDisappear { center.endWatching() }
     }
 
-    private func selectedEditorDisplay(_ monitors: [Monitor]) -> String {
-        monitors.contains { $0.key == editorDisplay } ? editorDisplay : monitors.first?.key ?? ""
+    /// One monitor: its name and size, "Edit zones…" for it, and every layout as a picture of its shape.
+    private func monitorSection(_ monitor: Monitor, layoutStore: ZonesStore?) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(monitor.name).font(.system(size: 13, weight: .medium))
+                    Text(ZoneDisplays.sizeText(monitor.screen)).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                Button(tx("Edit zones…", "Editar zonas…")) { ZonesModule.openEditor?(monitor.key) }
+                    .disabled(ZonesModule.openEditor == nil)
+                    .accessibilityLabel(tx("Edit zones on \(monitor.name)", "Editar zonas en \(monitor.name)"))
+            }
+            if let store = layoutStore {
+                layoutGrid(monitor, store: store)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
     }
 
-    private func layoutBinding(_ key: String) -> Binding<String> {
-        Binding(get: {
-                    guard let store = layoutStore, store.state.activeByDisplay[key] != ZonesState.off else { return ZonesState.off }
-                    return store.layout(forDisplay: key)?.id.uuidString ?? ZonesState.off
-                },
-                set: { module.setLayout(UUID(uuidString: $0), forDisplay: key) })
+    private func layoutGrid(_ monitor: Monitor, store: ZonesStore) -> some View {
+        let off = store.state.activeByDisplay[monitor.key] == ZonesState.off
+        let active = off ? nil : store.layout(forDisplay: monitor.key)?.id
+        let aspect = ZoneThumbnailRenderer.aspect(of: monitor.screen.frame)
+        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 96, maximum: 120), spacing: 10, alignment: .top)],
+                         alignment: .leading, spacing: 10) {
+            ForEach(store.state.layouts) { layout in
+                LayoutTile(name: ZoneEditorSession.displayName(layout), selected: layout.id == active) {
+                    ZoneThumbnailView(zones: layout.zones, aspect: aspect, box: LayoutTileMetrics.box)
+                } action: {
+                    module.setLayout(layout.id, forDisplay: monitor.key)
+                }
+            }
+            LayoutTile(name: tx("Off", "Desactivadas"), selected: off) {
+                Image(systemName: "nosign").font(.system(size: 18)).foregroundStyle(.secondary)
+                    .frame(width: LayoutTileMetrics.box.width, height: LayoutTileMetrics.box.height)
+            } action: {
+                module.setLayout(nil, forDisplay: monitor.key)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(tx("Layout on \(monitor.name)", "Distribución en \(monitor.name)"))
+    }
+}
+
+private enum LayoutTileMetrics {
+    static let box = CGSize(width: 84, height: 44)
+}
+
+/// A clickable picture with its name under it; the chosen one is ringed in the accent colour.
+private struct LayoutTile<Picture: View>: View {
+    let name: String
+    let selected: Bool
+    @ViewBuilder var picture: Picture
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                picture
+                    .padding(5)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.04)))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(0.12), lineWidth: selected ? 2 : 1)
+                    }
+                Text(name)
+                    .font(.system(size: 10.5, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? .primary : .secondary)
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: LayoutTileMetrics.box.width + 10)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(name)
+        .accessibilityLabel(name)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

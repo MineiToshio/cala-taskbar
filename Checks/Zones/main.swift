@@ -368,6 +368,84 @@ expect("A drag that began after a manual move clears the old snap record",
        records.restoreOnDrag(window, current: snapped, cursorX: 350, initialFrameAX: translated) == nil
        && records.restoreOnDrag(window, current: snapped, cursorX: 350) == nil)
 
+// MARK: Thumbnails, monitor names and editor helpers
+
+let wide = ZoneThumbnails.size(aspect: 3840.0 / 1080, fitting: CGSize(width: 112, height: 70))
+let laptop = ZoneThumbnails.size(aspect: 1512.0 / 982, fitting: CGSize(width: 112, height: 70))
+let portrait = ZoneThumbnails.size(aspect: 1080.0 / 1920, fitting: CGSize(width: 112, height: 70))
+expect("Thumbnail keeps the screen's shape inside its box",
+       wide == CGSize(width: 112, height: 32) && laptop == CGSize(width: 108, height: 70)
+       && portrait == CGSize(width: 39, height: 70)
+       && ZoneThumbnails.size(aspect: .nan, fitting: CGSize(width: 10, height: 10)) == CGSize(width: 1, height: 1))
+let thumbColumns = ZoneThumbnails.frames(for: ZoneTemplates.zones("two-columns"), size: CGSize(width: 100, height: 50),
+                                         inset: 2, gap: 2, scale: 2)
+expect("Thumbnail zones sit inside the inset with a gap between neighbours",
+       thumbColumns.count == 2 && thumbColumns[0] == CGRect(x: 3, y: 3, width: 46, height: 44)
+       && thumbColumns[1] == CGRect(x: 51, y: 3, width: 46, height: 44)
+       && thumbColumns[1].minX - thumbColumns[0].maxX == 2
+       && ZoneThumbnails.frames(for: ZoneTemplates.zones("two-columns"), size: CGSize(width: 100, height: 50),
+                                inset: 2, gap: 4, scale: 2)[1].minX
+          - ZoneThumbnails.frames(for: ZoneTemplates.zones("two-columns"), size: CGSize(width: 100, height: 50),
+                                  inset: 2, gap: 4, scale: 2)[0].maxX == 4)
+let thumbThirds = ZoneThumbnails.frames(for: ZoneTemplates.zones("three-columns"), size: CGSize(width: 101, height: 31),
+                                        inset: 1.5, gap: 1.5, scale: 2)
+expect("Thumbnail edges land on the pixel grid and tiny zones stay one pixel wide",
+       thumbThirds.allSatisfy { [$0.minX, $0.maxX, $0.minY, $0.maxY].allSatisfy { ($0 * 2).rounded() == $0 * 2 } }
+       && ZoneThumbnails.frames(for: [rect(0.5, 0.5, 0.001, 0.001)], size: CGSize(width: 40, height: 20),
+                                inset: 0, gap: 2, scale: 2)[0].size == CGSize(width: 0.5, height: 0.5))
+expect("Thumbnails paint larger zones first so overlapping small ones stay visible",
+       ZoneThumbnails.paintingOrder([rect(0.4, 0.4, 0.2, 0.2), rect(0, 0, 1, 1), rect(0, 0, 0.5, 1), rect(0.5, 0, 0.5, 1)])
+       == [1, 2, 3, 0])
+
+func english(_ en: String, _ es: String) -> String { en }
+func spanish(_ en: String, _ es: String) -> String { es }
+let numberedLeft = ZoneMonitorNames.Monitor(name: "(AirPlay) (2)", frame: CGRect(x: -3840, y: -98, width: 3840, height: 1080))
+let numberedMain = ZoneMonitorNames.Monitor(name: "(AirPlay) (1)", frame: CGRect(x: 0, y: 0, width: 1512, height: 982))
+expect("Names macOS only told apart with a number are named by position",
+       ZoneMonitorNames.labels([numberedMain, numberedLeft], localize: english) == ["Right display", "Left display"]
+       && ZoneMonitorNames.baseName(" Dell U2720Q (12) ") == "dell u2720q" && ZoneMonitorNames.baseName("Studio (Pro)") == "studio (pro)")
+let airplayLeft = ZoneMonitorNames.Monitor(name: " (AirPlay)", frame: CGRect(x: -3840, y: -98, width: 3840, height: 1080))
+let airplayMain = ZoneMonitorNames.Monitor(name: "(AirPlay) ", frame: CGRect(x: 0, y: 0, width: 1512, height: 982))
+expect("Monitors sharing a name are named by position",
+       ZoneMonitorNames.labels([airplayMain, airplayLeft], localize: english) == ["Right display", "Left display"]
+       && ZoneMonitorNames.labels([airplayMain, airplayLeft], localize: spanish) == ["Pantalla derecha", "Pantalla izquierda"])
+expect("A unique monitor name is kept; three side by side get left, middle and right",
+       ZoneMonitorNames.labels([.init(name: "Studio Display", frame: primary), airplayLeft], localize: english)
+       == ["Studio Display", " (AirPlay)".trimmingCharacters(in: .whitespaces)]
+       && ZoneMonitorNames.labels([.init(name: "Dell", frame: primary), .init(name: "Dell", frame: left),
+                                   .init(name: "", frame: right)], localize: english)
+       == ["Middle display", "Left display", "Right display"])
+expect("Stacked monitors are top and bottom; other arrangements are numbered",
+       ZoneMonitorNames.labels([.init(name: "", frame: primary), .init(name: "", frame: above)], localize: english)
+       == ["Bottom display", "Top display"]
+       && ZoneMonitorNames.labels([.init(name: "", frame: primary), .init(name: "", frame: CGRect(x: 1000, y: 800, width: 1920, height: 1080))],
+                                  localize: english) == ["Display 1", "Display 2"]
+       && ZoneMonitorNames.labels([.init(name: "", frame: primary)], localize: english) == ["Display 1"])
+
+let firstNew = ZoneEditing.newZoneRect(existing: [])
+let secondNew = ZoneEditing.newZoneRect(existing: [firstNew])
+expect("Add zone places a centred grid-aligned zone and steps when that spot is taken",
+       near(firstNew, rect(4.0 / 12, 3.0 / 12, 4.0 / 12, 6.0 / 12))
+       && near(secondNew, rect(5.0 / 12, 4.0 / 12, 4.0 / 12, 6.0 / 12))
+       && near(ZoneEditing.newZoneRect(existing: [firstNew, secondNew, rect(6.0 / 12, 5.0 / 12, 4.0 / 12, 6.0 / 12),
+                                                  rect(7.0 / 12, 6.0 / 12, 4.0 / 12, 6.0 / 12)]), rect(0, 0, 4.0 / 12, 6.0 / 12)))
+expect("New layout names never repeat",
+       ZoneEditing.uniqueName("My layout", existing: ["Two columns"]) == "My layout"
+       && ZoneEditing.uniqueName("My layout", existing: [" my layout ", "My layout 2"]) == "My layout 3")
+
+var trimmedSeed = ZoneTemplates.seedState()
+trimmedSeed.layouts.removeAll { $0.template == "wide-center" || $0.template == "two-rows" }
+var editedCenter = ZoneTemplates.makeLayout("wide-center", name: "Mine")
+editedCenter.addZone(rect(0.1, 0.1, 0.2, 0.2))
+let restoredCenter = ZoneTemplates.restored(editedCenter)
+expect("Deleted built-ins can be added back; an edited built-in can be restored keeping its id and name",
+       ZoneTemplates.missing(in: trimmedSeed) == ["two-rows", "wide-center"]
+       && ZoneTemplates.missing(in: ZoneTemplates.seedState()).isEmpty
+       && ZoneTemplates.isModified(editedCenter) && !ZoneTemplates.isModified(restoredCenter)
+       && restoredCenter.id == editedCenter.id && restoredCenter.name == "Mine"
+       && restoredCenter.zones.map(\.rect) == ZoneTemplates.zones("wide-center") && restoredCenter.nextSeq == 3
+       && !ZoneTemplates.isModified(ZoneLayout(name: "Blank")))
+
 // MARK: Drag gesture state machine
 
 do {

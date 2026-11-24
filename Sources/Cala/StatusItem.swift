@@ -65,8 +65,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // The editor also works with Zones off (it loads zones.json on its own); the layouts need the module.
         let editor = BlockItem(tx("Zones editor…", "Editor de zonas…")) { ZonesModule.openEditorForPointerScreen() }
         editor.isEnabled = ZonesModule.openEditor != nil
-        return [editor] + NSScreen.screens.map { screen in
-            placeholder(tx("Layout · \(screen.localizedName)", "Distribución · \(screen.localizedName)"))
+        return [editor] + ZoneDisplays.labels(for: NSScreen.screens).map { name in
+            placeholder(tx("\(name): turn on Zones to choose a layout", "\(name): activa Zonas para elegir una distribución"))
         }
     }
 }

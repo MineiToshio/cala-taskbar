@@ -73,7 +73,7 @@ Cala is four modules behind one protocol (`CalaModule`: `id`, `isRunning`, `star
 
 **Dock and menu bar.** Hiding the macOS Dock and menu bar belongs to the Bar: `BarModule.start()` applies them, `stop()` restores them (on a real quit, according to `restoreDockOnQuit` / `restoreMenuBarOnQuit`). When Cala launches with the Bar off it touches nothing, except that it undoes a hidden Dock or menu bar a crash left behind (`DockControl.restoreAfterCrashIfNeeded`, `MenuBarControl.onBarStop`). Tray off restores any hidden macOS menu-bar icons.
 
-**Status item.** `StatusItemController` shows a menu-bar icon when `!bar || zones` (so someone running only Zones or only the Switcher always has Settings and Quit), and removes it otherwise. Its menu is rebuilt each time it opens: Settings…, a Zones section (Zones editor… and one "Layout · monitor" submenu per screen when the module runs; the editor alone, with the layouts disabled, when it does not), Report a Problem… when there is no bar, Quit Cala.
+**Status item.** `StatusItemController` shows a menu-bar icon when `!bar || zones` (so someone running only Zones or only the Switcher always has Settings and Quit), and removes it otherwise. Its menu is rebuilt each time it opens: Settings…, a Zones section (Zones editor… and one "*monitor*: *layout*" submenu per screen, with a picture of each layout at that screen's shape, when the module runs; the editor alone, with the layouts disabled, when it does not), Report a Problem… when there is no bar, Quit Cala.
 
 **Startup and migration** (`ModulePlan.resolve`, pure and checked by `scripts/check-modules.sh`):
 - Keys already stored (`modulesChosen`) win.
