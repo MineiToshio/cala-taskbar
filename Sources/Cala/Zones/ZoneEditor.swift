@@ -14,14 +14,6 @@ final class ZoneEditor: NSObject {
         }
     }
 
-    var linked: Bool {
-        get { ConfigStore.shared.config.zonesEditorLinked }
-        set {
-            ConfigStore.shared.config.zonesEditorLinked = newValue
-            session?.linked = newValue
-        }
-    }
-
     var isOpen: Bool { window != nil }
 
     private var window: ZoneEditorWindow?
@@ -75,7 +67,7 @@ final class ZoneEditor: NSObject {
             return
         }
         guard let screen = NSScreen.screens.first else { return }
-        let session = ZoneEditorSession(state: store.state, gridEnabled: gridEnabled, linked: linked,
+        let session = ZoneEditorSession(state: store.state, gridEnabled: gridEnabled,
                                         theme: BarTheme.named(ConfigStore.shared.config.theme))
         let window = ZoneEditorWindow(contentRect: screen.frame, styleMask: [.borderless],
                                       backing: .buffered, defer: false)
@@ -103,7 +95,6 @@ final class ZoneEditor: NSObject {
         self.barIsRunning = barIsRunning
         session.selectDisplay = { [weak self] key in self?.showDisplay(key: key, selectLayout: true) }
         session.changeGrid = { [weak self] enabled in self?.gridEnabled = enabled }
-        session.changeLinked = { [weak self] linked in self?.linked = linked }
         session.save = { [weak self] in self?.save() }
         session.discard = { [weak self] in self?.close() }
         showDisplay(key: displayKey, selectLayout: true)
@@ -208,7 +199,7 @@ final class ZoneEditor: NSObject {
             state.layouts[index] = layout
         }
         state.defaultLayout = layout.id
-        let session = ZoneEditorSession(state: state, gridEnabled: true, linked: true, theme: .named("graphite"))
+        let session = ZoneEditorSession(state: state, gridEnabled: true, theme: .named("graphite"))
         session.monitors = [.init(key: "sample", name: tx("Right display", "Pantalla derecha"), size: "1280 × 800"),
                             .init(key: "external", name: tx("Left display", "Pantalla izquierda"), size: "3840 × 1080")]
         let bounds = CGRect(origin: .zero, size: size)
@@ -317,6 +308,7 @@ final class ZoneEditorSession {
         case deleteLayout(UUID, name: String)
         case saveError(String)
         case zoneSize(UUID)
+        case cannotLink
     }
 
     let original: ZonesState
@@ -335,15 +327,22 @@ final class ZoneEditorSession {
     var preview: Preview?
     var hudCollapsed = false
     var gridEnabled: Bool
-    /// Linked: shared edges move together and moves never overlap. Free: every zone on its own (`zonesEditorLinked`).
-    var linked: Bool
+    /// Zones besides `selectedZone` picked with ⇧-click, for Merge.
+    var extraSelection: Set<UUID> = []
+    /// Linked mode's split preview: the zone, the cut's direction and its position (a screen fraction).
+    var splitPreview: (zone: UUID, vertical: Bool, position: Double)?
+    /// A short note shown in the panel for a few seconds (e.g. why a Linked zone did not move).
+    var notice: String?
+    /// Bumped when a switch to Linked is refused, so the mode control is redrawn showing Free again.
+    var modeRefusals = 0
+    @ObservationIgnored private var noticeShown: Set<String> = []
+    @ObservationIgnored private var noticeTimer: Timer?
     /// Bumped to put the cursor in the layout-name field (a new or duplicated layout, or "Rename").
     var renameRequest = 0
     private(set) var dialog: Dialog?
 
     var selectDisplay: (String) -> Void = { _ in }
     var changeGrid: (Bool) -> Void = { _ in }
-    var changeLinked: (Bool) -> Void = { _ in }
     var save: () -> Void = {}
     var discard: () -> Void = {}
 
@@ -353,11 +352,10 @@ final class ZoneEditorSession {
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
 
-    init(state: ZonesState, gridEnabled: Bool, linked: Bool, theme: BarTheme) {
+    init(state: ZonesState, gridEnabled: Bool, theme: BarTheme) {
         original = state
         draft = state
         self.gridEnabled = gridEnabled
-        self.linked = linked
         self.theme = theme
         layoutID = state.defaultLayout ?? state.layouts.first?.id
     }
@@ -405,6 +403,8 @@ final class ZoneEditorSession {
     private func show(_ id: UUID?) {
         layoutID = id
         selectedZone = nil
+        extraSelection = []
+        splitPreview = nil
         resetGesture()
     }
 
@@ -480,7 +480,7 @@ final class ZoneEditorSession {
             record()
             if draft.delete(id) { show(draft.layout(forDisplay: displayKey)?.id ?? draft.defaultLayout) }
             dismissDialog()
-        case .saveError, .zoneSize, nil: dismissDialog()
+        case .saveError, .zoneSize, .cannotLink, nil: dismissDialog()
         }
     }
 
@@ -495,7 +495,8 @@ final class ZoneEditorSession {
 
     func createBlankLayout() {
         let name = ZoneEditing.uniqueName(tx("My layout", "Mi distribución"), existing: draft.layouts.map(\.name))
-        insert(ZoneLayout(name: name), rename: true)
+        // A new layout starts Linked with one zone covering the screen: split it to make more.
+        insert(ZoneLayout(name: name, zones: [Zone(rect: ZoneRect(x: 0, y: 0, w: 1, h: 1))], nextSeq: 1), rename: true)
     }
 
     func addBuiltIn(_ template: String) {
@@ -529,6 +530,42 @@ final class ZoneEditorSession {
         present(.deleteLayout(layout.id, name: Self.displayName(layout)))
     }
 
+    // MARK: Mode
+
+    /// The layout's editing model; Linked for a layout not yet chosen.
+    var mode: ZoneLayoutMode { layout?.mode ?? .linked }
+    var linked: Bool { mode == .linked }
+
+    /// Linked → Free is always possible. Free → Linked only when the zones already tile the screen; otherwise
+    /// a message explains why (there is no automatic fix that would not move the user's zones unpredictably).
+    func setMode(_ mode: ZoneLayoutMode) {
+        guard let layoutIndex, draft.layouts[layoutIndex].mode != mode else { return }
+        if mode == .linked && !ZoneTiling.tiles(draft.layouts[layoutIndex].zones.map(\.rect)) {
+            modeRefusals += 1   // the segmented control already shows Linked: rebuild it on Free
+            present(.cannotLink)
+            return
+        }
+        record()
+        draft.layouts[layoutIndex].mode = mode
+        extraSelection = []
+        splitPreview = nil
+        resetGesture()
+        focusCanvas()
+    }
+
+    /// Shows a note in the panel for a few seconds; `once` notes appear only once per editor session.
+    func notify(_ text: String, once: Bool = false) {
+        if once {
+            guard !noticeShown.contains(text) else { return }
+            noticeShown.insert(text)
+        }
+        notice = text
+        noticeTimer?.invalidate()
+        noticeTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.notice = nil }
+        }
+    }
+
     // MARK: Zones
 
     func apply(_ preview: Preview) {
@@ -548,46 +585,147 @@ final class ZoneEditorSession {
         dropIfUnchanged()
     }
 
-    /// Replaces zone rects by index of the current layout's zones (one undo step).
+    /// Replaces zone rects by index of the current layout's zones (one undo step). In Linked mode a result that
+    /// would not tile the screen is refused.
     private func setRects(_ changes: [Int: ZoneRect]) {
         guard let layoutIndex, !changes.isEmpty else { return }
-        record()
-        for (index, rect) in changes where draft.layouts[layoutIndex].zones.indices.contains(index) {
-            draft.layouts[layoutIndex].zones[index].rect = rect
+        var zones = draft.layouts[layoutIndex].zones
+        for (index, rect) in changes where zones.indices.contains(index) { zones[index].rect = rect }
+        if linked && !ZoneTiling.tiles(zones.map(\.rect)) {
+            NSSound.beep()
+            return
         }
+        record()
+        draft.layouts[layoutIndex].zones = zones
         dropIfUnchanged()
         resetGesture()
     }
 
     private var selectedIndex: Int? { layout?.zones.firstIndex { $0.id == selectedZone } }
+    /// The selected zones: the main one plus any ⇧-clicked.
+    var selection: Set<UUID> { extraSelection.union(selectedZone.map { [$0] } ?? []) }
+
+    /// A plain click selects one zone (or none).
+    func selectOnly(_ id: UUID?) {
+        selectedZone = id
+        extraSelection = []
+    }
+
+    /// ⇧-click adds a zone to the selection or takes it out.
+    func toggleSelection(_ id: UUID) {
+        if selectedZone == id {
+            selectedZone = extraSelection.first
+            extraSelection.remove(selectedZone ?? id)
+        } else if extraSelection.contains(id) {
+            extraSelection.remove(id)
+        } else if selectedZone == nil {
+            selectedZone = id
+        } else {
+            extraSelection.insert(id)
+        }
+    }
 
     /// The smallest zone a gesture may leave: 5 % of the screen or 80 pt, whichever is larger.
     var minimumSize: (w: Double, h: Double) {
         (max(0.05, 80 / max(1, Double(usable.width))), max(0.05, 80 / max(1, Double(usable.height))))
     }
 
-    func addZone() {
-        guard let layoutIndex else { return }
+    /// Width / height of the usable area, for "the longer side".
+    var usableAspect: Double { usable.height > 0 ? Double(usable.width / usable.height) : 16.0 / 10 }
+
+    /// "Add zone". Linked: split the selected zone (else the largest) along its longer side, ⇧ the other way.
+    /// Free: a new rectangle in the largest empty gap, else cascaded from the newest zone.
+    func addZone(flip: Bool = false) {
+        guard let layoutIndex, let layout else { return }
+        if linked {
+            let target = layout.zones.first { $0.id == selectedZone } ?? layout.zones.max { $0.rect.area < $1.rect.area }
+            guard let target else { return }
+            split(target.id, vertically: ZoneTiling.splitsVertically(target.rect, aspect: usableAspect) != flip)
+            return
+        }
         record()
-        let rect = ZoneEditing.newZoneRect(existing: draft.layouts[layoutIndex].zones.map(\.rect))
-        selectedZone = draft.layouts[layoutIndex].addZone(rect)
+        let rects = layout.zones.map(\.rect)
+        let newest = layout.zones.max { $0.seq < $1.seq }?.rect
+        let rect = ZoneTiling.freeZoneRect(rects, last: newest, minSize: minimumSize)
+        selectOnly(draft.layouts[layoutIndex].addZone(rect))
         resetGesture()
         focusCanvas()
     }
 
+    /// Cuts a zone in two (Linked's way of adding one); at `position` or the midpoint. Selects the new part.
+    func split(_ id: UUID, vertically: Bool, at position: Double? = nil) {
+        guard let layoutIndex else { return }
+        var copy = draft.layouts[layoutIndex]
+        guard let part = copy.split(id, vertically: vertically, at: position, minSize: minimumSize) else {
+            NSSound.beep()
+            notify(tx("This zone is too small to split.", "Esta zona es demasiado pequeña para dividirla."))
+            return
+        }
+        record()
+        draft.layouts[layoutIndex] = copy
+        selectOnly(part)
+        splitPreview = nil
+        resetGesture()
+        focusCanvas()
+    }
+
+    var canSplitSelection: Bool {
+        guard let zone = layout?.zones.first(where: { $0.id == selectedZone }) else { return linked }
+        return ZoneTiling.split(zone.rect, vertically: true, minSize: minimumSize) != nil
+            || ZoneTiling.split(zone.rect, vertically: false, minSize: minimumSize) != nil
+    }
+
+    /// Whether the selected zones (two or more) make a rectangle together.
+    var canMerge: Bool {
+        guard let zones = layout?.zones, selection.count >= 2 else { return false }
+        let indices = Set(zones.indices.filter { selection.contains(zones[$0].id) })
+        return ZoneTiling.mergedRect(zones.map(\.rect), indices: indices) != nil
+    }
+
+    func mergeSelection() {
+        guard let layoutIndex, canMerge else {
+            NSSound.beep()
+            return
+        }
+        record()
+        let kept = draft.layouts[layoutIndex].merge(selection)
+        selectOnly(kept)
+        resetGesture()
+        focusCanvas()
+    }
+
+    /// Delete in Free mode removes the zone; in Linked mode its space goes to a neighbour sharing a whole side.
+    var canDeleteZone: Bool {
+        guard let index = selectedIndex, let zones = layout?.zones else { return false }
+        return !linked || ZoneTiling.deletionMerge(zones.map(\.rect), index: index) != nil
+    }
+
     func deleteZone() {
         guard let layoutIndex, let selectedZone else { return }
-        record()
-        draft.layouts[layoutIndex].zones.removeAll { $0.id == selectedZone }
-        self.selectedZone = nil
+        if linked {
+            var copy = draft.layouts[layoutIndex]
+            guard let neighbour = copy.removeByMerging(selectedZone) else {
+                NSSound.beep()
+                notify(tx("No neighbour shares a whole side with this zone, so deleting it would leave a hole. Merge or split first.",
+                          "Ninguna vecina comparte un lado entero con esta zona; borrarla dejaría un hueco. Une o divide antes."))
+                return
+            }
+            record()
+            draft.layouts[layoutIndex] = copy
+            selectOnly(neighbour)
+        } else {
+            record()
+            draft.layouts[layoutIndex].zones.removeAll { $0.id == selectedZone }
+            selectOnly(nil)
+        }
         resetGesture()
         focusCanvas()
     }
 
     func duplicateZone() {
-        guard let layoutIndex, let zone = layout?.zones.first(where: { $0.id == selectedZone }) else { return }
+        guard !linked, let layoutIndex, let zone = layout?.zones.first(where: { $0.id == selectedZone }) else { return }
         record()
-        selectedZone = draft.layouts[layoutIndex].addZone(zone.rect)
+        selectOnly(draft.layouts[layoutIndex].addZone(zone.rect))
         resetGesture()
     }
 
@@ -602,25 +740,38 @@ final class ZoneEditorSession {
         setRects(ZoneLinking.equalized(zones, index: index, horizontal: horizontally))
     }
 
-    /// Whether the selected zone has row (or column) mates to share sizes with.
+    /// Whether the selected zone has row (or column) mates to share sizes with (and, Linked, the result tiles).
     func canEqualize(horizontally: Bool) -> Bool {
         guard let index = selectedIndex, let zones = layout?.zones.map(\.rect) else { return false }
+        let changes = ZoneLinking.equalized(zones, index: index, horizontal: horizontally)
         let zone = zones[index]
-        return zones.filter { other in
+        let mates = zones.filter { other in
             horizontally ? abs(other.y - zone.y) <= ZoneLinking.tolerance && abs(other.h - zone.h) <= ZoneLinking.tolerance
                 : abs(other.x - zone.x) <= ZoneLinking.tolerance && abs(other.w - zone.w) <= ZoneLinking.tolerance
         }.count > 1
+        guard mates, linked else { return mates }
+        var result = zones
+        for (i, r) in changes { result[i] = r }
+        return ZoneTiling.tiles(result)
     }
 
-    /// Arrow keys: 8 pt, or a twelfth of the screen with Shift. Linked mode never moves onto another zone.
+    /// Arrow keys: 8 pt, or a twelfth of the screen with Shift. Free mode only (Linked zones move by dividers).
     func nudge(dx: Double, dy: Double, large: Bool) {
         guard let index = selectedIndex, let zones = layout?.zones.map(\.rect), usable.width > 0, usable.height > 0 else { return }
+        guard !linked else {
+            notify(linkedMoveHint, once: true)
+            return
+        }
         let step = large ? (1.0 / 12, 1.0 / 12) : (8 / Double(usable.width), 8 / Double(usable.height))
         let zone = zones[index]
         let moved = ZoneGeometry.clamp(ZoneRect(x: zone.x + dx * step.0, y: zone.y + dy * step.1, w: zone.w, h: zone.h),
                                        minW: 0, minH: 0)
-        let target = linked ? ZoneLinking.move(zones, index: index, to: moved) : moved
-        if target != zone { setRects([index: target]) }
+        if moved != zone { setRects([index: moved]) }
+    }
+
+    var linkedMoveHint: String {
+        tx("Linked zones resize with dividers. Drop a zone on another to swap them, or switch to Free to place zones freely.",
+           "Las zonas unidas cambian de tamaño con los divisores. Suelta una zona sobre otra para intercambiarlas, o cambia a Libres para colocarlas donde quieras.")
     }
 
     func requestSize() {
@@ -628,12 +779,52 @@ final class ZoneEditorSession {
         present(.zoneSize(selectedZone))
     }
 
-    /// The size typed in the size dialog, in points.
+    /// The size typed in the size dialog, in points. Free: around the zone's centre. Linked: by moving the zone's
+    /// right (else left) divider and its bottom (else top) one, so the layout still tiles; neighbours give way
+    /// down to their minimum.
     func setSize(_ id: UUID, width: Double, height: Double) {
-        guard let index = layout?.zones.firstIndex(where: { $0.id == id }), let zone = layout?.zones[index] else { return }
-        setRects([index: ZoneMeasure.resized(zone.rect, to: (width, height), in: usable.size, minSize: minimumSize)])
+        guard let index = layout?.zones.firstIndex(where: { $0.id == id }), let zones = layout?.zones.map(\.rect),
+              usable.width > 0, usable.height > 0 else { return }
+        let zone = zones[index]
+        guard linked else {
+            setRects([index: ZoneMeasure.resized(zone, to: (width, height), in: usable.size, minSize: minimumSize)])
+            dismissDialog()
+            return
+        }
+        let w = width / Double(usable.width), h = height / Double(usable.height)
+        let border = ZoneTiling.borderEdges(zone)
+        var rects = zones
+        func drag(_ edge: ZoneSnapping.Edges, to proposed: ZoneRect) {
+            for (i, r) in ZoneLinking.resize(rects, index: index, edges: edge, proposed: proposed, minSize: minimumSize) { rects[i] = r }
+        }
+        var current = rects[index]
+        if !border.contains(.right) { drag(.right, to: ZoneRect(x: current.x, y: current.y, w: w, h: current.h)) }
+        else if !border.contains(.left) { drag(.left, to: ZoneRect(x: current.maxX - w, y: current.y, w: w, h: current.h)) }
+        current = rects[index]
+        if !border.contains(.bottom) { drag(.bottom, to: ZoneRect(x: current.x, y: current.y, w: current.w, h: h)) }
+        else if !border.contains(.top) { drag(.top, to: ZoneRect(x: current.x, y: current.maxY - h, w: current.w, h: h)) }
+        var changes: [Int: ZoneRect] = [:]
+        for i in rects.indices where rects[i] != zones[i] { changes[i] = rects[i] }
+        if changes.isEmpty { NSSound.beep() } else { setRects(changes) }
         dismissDialog()
     }
 
     func pointSize(of rect: ZoneRect) -> (w: Int, h: Int) { ZoneMeasure.size(rect, in: usable.size) }
+
+    /// Linked split preview while the pointer is over the selected zone: the cut follows the pointer and snaps to
+    /// the zone's middle, the grid and other zones' edges; ⇧ turns it the other way. Nil when it cannot split.
+    func splitCandidate(at point: (x: Double, y: Double), flip: Bool) -> (zone: UUID, vertical: Bool, position: Double)? {
+        guard linked, let zone = layout?.zones.first(where: { $0.id == selectedZone }),
+              point.x >= zone.rect.x, point.x < zone.rect.maxX, point.y >= zone.rect.y, point.y < zone.rect.maxY,
+              usable.width > 0, usable.height > 0 else { return nil }
+        let vertical = ZoneTiling.splitsVertically(zone.rect, aspect: usableAspect) != flip
+        let others = layout?.zones.filter { $0.id != zone.id }.map(\.rect) ?? []
+        let lines = ZoneSnapping.candidates(others: others, grid: gridEnabled)
+        let (value, lower, upper, middle, threshold) = vertical
+            ? (point.x, zone.rect.x + minimumSize.w, zone.rect.maxX - minimumSize.w, zone.rect.x + zone.rect.w / 2, 8 / Double(usable.width))
+            : (point.y, zone.rect.y + minimumSize.h, zone.rect.maxY - minimumSize.h, zone.rect.y + zone.rect.h / 2, 8 / Double(usable.height))
+        guard lower <= upper else { return nil }
+        let snapped = ZoneSnapping.snap(value, to: [middle] + (vertical ? lines.xs : lines.ys), threshold: threshold) ?? value
+        return (zone.id, vertical, min(max(snapped, lower), upper))
+    }
 }

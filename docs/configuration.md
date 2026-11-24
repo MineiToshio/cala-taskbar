@@ -66,7 +66,7 @@ The module keys and the Zones keys are in [Modules and Zones](#modules-and-zones
 | `zonesActivation` | string | `"both"` | How zones mode starts during a window drag: `rightClick`, `shift` or `both`. Any other value becomes `both` |
 | `zonesGap` | number | `8` | Space in points left around each snapped window, 0–40 (clamped; a non-number becomes 8) |
 | `zonesEditorGrid` | bool | `false` | The zones editor snaps to a 12-division grid as well |
-| `zonesEditorLinked` | bool | `true` | The zones editor's **Linked** mode: dragging an edge shared with neighbouring zones moves theirs too, and moving a zone never overlaps another (it slides up to it, or swaps when dropped on one). `false` = **Free**: zones move and resize on their own and may overlap |
+| `zonesEditorLinked` | bool | — | Retired. Earlier versions stored the editor's Linked/Free choice here; it is now stored per layout in `zones.json` (`mode`). An old value is ignored and dropped on the next save |
 
 The effective set is computed from these: the tray runs only if the bar does. The welcome's answer writes `modulesChosen` and the four module keys; the migration of an existing user writes them too. No existing key was renamed.
 

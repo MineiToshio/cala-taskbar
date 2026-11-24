@@ -475,15 +475,6 @@ expect("A corner drag moves both linked dividers: three zones follow the vertica
 expect("A screen-edge resize has no neighbours; an unlinked zone stays put",
        ZoneLinking.resize(thirdsL, index: 0, edges: .left, proposed: rect(0.1, 0, 1.0 / 3 - 0.1, 1), minSize: (0.05, 0.05)).keys.sorted() == [0])
 
-let roomy = [rect(0, 0, 0.25, 1), rect(0.6, 0, 0.2, 0.5)]
-expect("Linked move slides up to a neighbour instead of covering it, and along it on the other axis",
-       near(ZoneLinking.move(roomy, index: 1, to: rect(0.1, 0.3, 0.2, 0.5)), rect(0.25, 0.3, 0.2, 0.5))
-       && near(ZoneLinking.move(roomy, index: 1, to: rect(0.7, 0.2, 0.2, 0.5)), rect(0.7, 0.2, 0.2, 0.5))
-       && near(ZoneLinking.move(thirdsL, index: 1, to: rect(0.4, 0, 1.0 / 3, 1)), thirdsL[1]))
-expect("Zones a Free-mode zone already overlapped do not block its linked move",
-       near(ZoneLinking.move([rect(0, 0, 0.5, 0.5), rect(0.25, 0.25, 0.5, 0.5)], index: 1, to: rect(0.3, 0.3, 0.5, 0.5)),
-            rect(0.3, 0.3, 0.5, 0.5)))
-
 let centreWide = ZoneTemplates.zones("wide-center")
 let equalRow = ZoneLinking.equalized(centreWide, index: 0, horizontal: true)
 expect("Equal widths shares the row evenly and keeps its outer edges; a lone zone is left alone",
@@ -525,6 +516,86 @@ expect("A typed size keeps the centre, stays on screen and respects the minimum"
             rect(0.375, 0.25, 0.25, 0.5))
        && near(ZoneMeasure.resized(rect(0.9, 0, 0.1, 0.1), to: (1920, 10), in: CGSize(width: 3840, height: 1050), minSize: (0.05, 0.05)),
                rect(0.5, 0.025, 0.5, 0.05)))
+
+// MARK: Linked tiling (split, merge, delete-as-merge, dividers, swap) and Free placement
+
+let minT = (w: 0.05, h: 0.05)
+expect("Every built-in tiles; overlaps, holes and an empty layout do not",
+       ZoneTemplates.ids.allSatisfy { ZoneTiling.tiles(ZoneTemplates.zones($0)) }
+       && !ZoneTiling.tiles([rect(0, 0, 0.6, 1), rect(0.5, 0, 0.5, 1)]) && !ZoneTiling.tiles([rect(0, 0, 0.5, 1)])
+       && !ZoneTiling.tiles([]) && ZoneTiling.tiles([rect(0, 0, 0.3333331, 1), rect(0.3333336, 0, 0.6666664, 1)]))
+expect("Mode is inferred from geometry: built-ins Linked, overlapping or blank Free; a stored mode wins",
+       ZoneTemplates.seedState().layouts.allSatisfy { $0.mode == .linked }
+       && ZoneLayout(name: "Overlap", zones: [Zone(rect: rect(0, 0, 0.7, 1)), Zone(rect: rect(0.3, 0, 0.7, 1))]).mode == .free
+       && ZoneLayout(name: "Blank").mode == .free
+       && (try? JSONDecoder().decode(ZoneLayout.self, from: Data(#"{"name":"Old","zones":[{"rect":{"x":0,"y":0,"w":0.5,"h":1}},{"rect":{"x":0.5,"y":0,"w":0.5,"h":1}}]}"#.utf8)))?.mode == .linked
+       && (try? JSONDecoder().decode(ZoneLayout.self, from: Data(#"{"name":"Odd","mode":"spiral","zones":[]}"#.utf8)))?.mode == .free
+       && (try? JSONDecoder().decode(ZoneLayout.self, from: Data(#"{"name":"Kept","mode":"free","zones":[{"rect":{"x":0,"y":0,"w":1,"h":1}}]}"#.utf8)))?.mode == .free)
+var brokenLinked = ZoneTemplates.makeLayout("two-columns", name: "Hand-edited")
+brokenLinked.zones[0].rect = rect(0, 0, 0.7, 1)
+expect("A stored Linked layout that no longer tiles is repaired to Free; adding a rectangle makes a layout Free",
+       ZonesState(layouts: [brokenLinked]).repaired().layouts[0].mode == .free
+       && { var l = ZoneTemplates.makeLayout("two-rows", name: "x"); l.addZone(rect(0.1, 0.1, 0.2, 0.2)); return l.mode == .free }())
+
+var splitLayout = ZoneTemplates.makeLayout("two-columns", name: "Split")
+let splitFirst = splitLayout.zones[0].id
+let splitNew = splitLayout.split(splitFirst, vertically: false, minSize: minT)
+expect("Split cuts a zone in two at its midpoint, the new part follows it, and the layout still tiles",
+       splitNew != nil && splitLayout.zones.count == 3 && splitLayout.zones[1].id == splitNew
+       && near(splitLayout.zones[0].rect, rect(0, 0, 0.5, 0.5)) && near(splitLayout.zones[1].rect, rect(0, 0.5, 0.5, 0.5))
+       && ZoneTiling.tiles(splitLayout.zones.map(\.rect)) && splitLayout.zones[1].seq == 2 && splitLayout.mode == .linked)
+expect("Split follows the longer side on screen, cuts where asked, and refuses parts below the minimum",
+       ZoneTiling.splitsVertically(rect(0, 0, 0.5, 1), aspect: 3840.0 / 1050) && !ZoneTiling.splitsVertically(rect(0, 0, 0.5, 1), aspect: 1)
+       && near(ZoneTiling.split(rect(0, 0, 0.5, 1), vertically: true, at: 0.2, minSize: minT)!.1, rect(0.2, 0, 0.3, 1))
+       && ZoneTiling.split(rect(0, 0, 0.08, 1), vertically: true, minSize: minT) == nil)
+
+let quarters4 = ZoneTemplates.zones("grid-2x2")
+expect("Merge needs the union to be a rectangle: a row merges, a diagonal pair or a single zone does not",
+       near(ZoneTiling.mergedRect(quarters4, indices: [0, 1])!, rect(0, 0, 1, 0.5))
+       && ZoneTiling.mergedRect(quarters4, indices: [0, 3]) == nil && ZoneTiling.mergedRect(quarters4, indices: [0]) == nil
+       && near(ZoneTiling.mergedRect(quarters4, indices: [0, 1, 2, 3])!, rect(0, 0, 1, 1))
+       && ZoneTiling.mergedRect([rect(0, 0, 0.5, 1), rect(0.5, 0, 0.5, 0.5), rect(0.5, 0.5, 0.5, 0.5)], indices: [0, 1]) == nil)
+var mergeLayout = ZoneTemplates.makeLayout("grid-2x2", name: "Merge")
+let mergeIDs = Set([mergeLayout.zones[2].id, mergeLayout.zones[3].id])
+let mergedKept = mergeLayout.merge(mergeIDs)
+expect("Merging keeps the first zone, removes the others and still tiles",
+       mergedKept == mergeLayout.zones.last?.id && mergeLayout.zones.count == 3
+       && near(mergeLayout.zones[2].rect, rect(0, 0.5, 1, 0.5)) && ZoneTiling.tiles(mergeLayout.zones.map(\.rect))
+       && { var l = ZoneTemplates.makeLayout("grid-2x2", name: "x"); return l.merge([l.zones[0].id, l.zones[3].id]) == nil && l.zones.count == 4 }())
+var deleteLayout = ZoneTemplates.makeLayout("main-two-stacked", name: "Delete")
+let stackedTop = deleteLayout.zones[1].id
+let absorbedBy = deleteLayout.removeByMerging(stackedTop)
+var lonely = ZoneLayout(name: "Lonely", zones: [Zone(rect: rect(0, 0, 1, 1))])
+var pinwheel = ZoneLayout(name: "Pinwheel", zones: [rect(0, 0, 0.6, 0.4), rect(0.6, 0, 0.4, 0.6), rect(0.4, 0.6, 0.6, 0.4),
+                                                    rect(0, 0.4, 0.4, 0.6), rect(0.4, 0.4, 0.2, 0.2)].map { Zone(rect: $0) })
+expect("Linked delete gives the space to a neighbour sharing a whole side; none when no side is shared",
+       absorbedBy == deleteLayout.zones[1].id && near(deleteLayout.zones[1].rect, rect(0.5, 0, 0.5, 1))
+       && ZoneTiling.tiles(deleteLayout.zones.map(\.rect))
+       && lonely.removeByMerging(lonely.zones[0].id) == nil && pinwheel.mode == .linked
+       && pinwheel.removeByMerging(pinwheel.zones[4].id) == nil && pinwheel.zones.count == 5)
+expect("Linked delete prefers the smallest neighbour",
+       ZoneTiling.deletionMerge([rect(0, 0, 0.2, 1), rect(0.2, 0, 0.3, 1), rect(0.5, 0, 0.5, 1)], index: 1)?.neighbour == 0)
+
+let dividerTiles = ZoneLinking.resize(ZoneTemplates.zones("main-two-stacked"), index: 1, edges: [.left, .bottom],
+                                      proposed: rect(0.3, 0, 0.7, 0.7), minSize: minT)
+var afterDivider = ZoneTemplates.zones("main-two-stacked")
+for (i, r) in dividerTiles { afterDivider[i] = r }
+var swapped = ZoneTemplates.zones("wide-center")
+swapped.swapAt(0, 2)
+expect("Divider drags and swaps keep a tiling; border edges are reported so they are not dragged",
+       ZoneTiling.tiles(afterDivider) && ZoneTiling.tiles(swapped.enumerated().map { i, _ in ZoneTemplates.zones("wide-center")[[2, 1, 0][i]] })
+       && ZoneTiling.borderEdges(rect(0, 0, 0.5, 1)) == [.left, .top, .bottom] && ZoneTiling.borderEdges(rect(0.2, 0.2, 0.5, 0.5)).isEmpty)
+
+expect("Free add goes into the largest empty gap, shrunk to fit",
+       near(ZoneTiling.freeZoneRect([rect(0, 0, 0.5, 1)], last: rect(0, 0, 0.5, 1), minSize: minT), rect(0.5 + 1.0 / 12, 0.25, 1.0 / 3, 0.5))
+       && near(ZoneTiling.freeZoneRect([rect(0, 0, 0.8, 1)], last: nil, minSize: minT), rect(0.8, 0.25, 0.2, 0.5))
+       && near(ZoneTiling.largestGap([rect(0, 0, 1, 0.3), rect(0, 0.3, 0.4, 0.7)], minSize: minT)!, rect(0.4, 0.3, 0.6, 0.7))
+       && near(ZoneTiling.freeZoneRect([], last: nil, minSize: minT), rect(1.0 / 3, 0.25, 1.0 / 3, 0.5)))
+expect("With no gap, Free add cascades from the newest zone and wraps at the screen's edge",
+       near(ZoneTiling.freeZoneRect(ZoneTemplates.zones("two-columns"), last: rect(0.5, 0, 0.5, 1), minSize: minT),
+            rect(0.5 + 1.0 / 24, 1.0 / 24, 1.0 / 3, 0.5))
+       && near(ZoneTiling.freeZoneRect(ZoneTemplates.zones("two-columns"), last: rect(0.7, 0.6, 0.3, 0.4), minSize: minT),
+               rect(0, 0, 1.0 / 3, 0.5)))
 
 // MARK: Drag gesture state machine
 

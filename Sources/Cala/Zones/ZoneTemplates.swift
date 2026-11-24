@@ -61,6 +61,7 @@ enum ZoneTemplates {
         var copy = layout
         copy.zones = zones(template).enumerated().map { Zone(rect: $0.element, seq: $0.offset) }
         copy.nextSeq = copy.zones.count
+        copy.mode = .linked   // every built-in tiles the screen
         return copy
     }
 

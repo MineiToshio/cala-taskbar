@@ -93,32 +93,6 @@ enum ZoneLinking {
         min(a.maxX, b.maxX) - max(a.x, b.x) > slack && min(a.maxY, b.maxY) - max(a.y, b.y) > slack
     }
 
-    /// A linked move: the zone goes as far towards `proposed` as it can without covering another zone, first
-    /// horizontally then vertically, so it slides along a neighbour instead of stopping dead. Zones it already
-    /// overlapped (a layout made in Free mode) do not block it.
-    static func move(_ zones: [ZoneRect], index: Int, to proposed: ZoneRect) -> ZoneRect {
-        guard zones.indices.contains(index) else { return proposed }
-        let start = zones[index]
-        let blockers = zones.indices.filter { $0 != index && !overlaps(zones[$0], start) }.map { zones[$0] }
-        // Exact here, so a zone slides right up to its neighbour's edge and shares it.
-        func free(_ r: ZoneRect) -> Bool { !blockers.contains { overlaps($0, r, slack: 1e-9) } }
-        if free(proposed) { return proposed }
-        func furthest(from a: ZoneRect, to b: ZoneRect) -> ZoneRect {
-            func at(_ t: Double) -> ZoneRect {
-                ZoneRect(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, w: a.w, h: a.h)
-            }
-            if free(b) { return b }
-            var low = 0.0, high = 1.0
-            for _ in 0..<40 {
-                let mid = (low + high) / 2
-                if free(at(mid)) { low = mid } else { high = mid }
-            }
-            return at(low)
-        }
-        let horizontal = furthest(from: start, to: ZoneRect(x: proposed.x, y: start.y, w: start.w, h: start.h))
-        return furthest(from: horizontal, to: ZoneRect(x: horizontal.x, y: proposed.y, w: start.w, h: start.h))
-    }
-
     /// Zones in the same row as `index` (same top and height) or column (same left and width) get equal sizes:
     /// the row keeps its outer edges and the gaps between its zones, and the zones' total length is shared out
     /// evenly, in left-to-right (top-to-bottom) order. Returns the changed rects; empty if the zone is alone.
@@ -174,5 +148,118 @@ enum ZoneMeasure {
         let h = min(1, max(minSize.h, size.h / Double(usable.height)))
         let cx = r.x + r.w / 2, cy = r.y + r.h / 2
         return ZoneRect(x: min(max(0, cx - w / 2), 1 - w), y: min(max(0, cy - h / 2), 1 - h), w: w, h: h)
+    }
+}
+
+/// The Linked model ("grid" in FancyZones' terms): the zones tile the usable area, with no overlaps and no holes.
+/// Edits that keep that true: dragging a divider (`ZoneLinking.resize`), swapping two zones, splitting one zone in
+/// two and merging zones whose union is a rectangle. The Free model's "add" lives here too: the largest empty gap.
+enum ZoneTiling {
+    private static let slack = ZoneLinking.tolerance
+
+    /// Whether the rects tile the screen: each inside it, no two overlapping, and together covering all of it.
+    static func tiles(_ zones: [ZoneRect]) -> Bool {
+        guard !zones.isEmpty else { return false }
+        for zone in zones where zone.x < -slack || zone.y < -slack || zone.maxX > 1 + slack || zone.maxY > 1 + slack
+            || zone.w <= slack || zone.h <= slack {
+            return false
+        }
+        for i in zones.indices {
+            for j in zones.indices where j > i && ZoneLinking.overlaps(zones[i], zones[j]) { return false }
+        }
+        // Inside the screen and not overlapping, so they cover it exactly when their areas add up to it.
+        return abs(zones.map(\.area).reduce(0, +) - 1) <= 4 * slack
+    }
+
+    /// Edges of the zone that lie on the screen's border. In Linked mode they are not draggable (a hole would open).
+    static func borderEdges(_ r: ZoneRect) -> ZoneSnapping.Edges {
+        var edges: ZoneSnapping.Edges = []
+        if r.x <= slack { edges.insert(.left) }
+        if r.maxX >= 1 - slack { edges.insert(.right) }
+        if r.y <= slack { edges.insert(.top) }
+        if r.maxY >= 1 - slack { edges.insert(.bottom) }
+        return edges
+    }
+
+    /// Splitting along the longer side: a vertical divider (left and right halves) when the zone is wider than tall
+    /// on screen. `aspect` is the usable area's width / height.
+    static func splitsVertically(_ r: ZoneRect, aspect: Double) -> Bool { r.w * aspect >= r.h }
+
+    /// The zone cut in two at `position` (a screen fraction on the cut axis; the midpoint when nil), as the
+    /// left/top part then the right/bottom one. Nil when either part would be smaller than the minimum.
+    static func split(_ r: ZoneRect, vertically: Bool, at position: Double? = nil,
+                      minSize: (w: Double, h: Double)) -> (ZoneRect, ZoneRect)? {
+        if vertically {
+            let cut = position ?? (r.x + r.w / 2)
+            guard cut - r.x >= minSize.w - 1e-9, r.maxX - cut >= minSize.w - 1e-9 else { return nil }
+            return (ZoneRect(x: r.x, y: r.y, w: cut - r.x, h: r.h), ZoneRect(x: cut, y: r.y, w: r.maxX - cut, h: r.h))
+        }
+        let cut = position ?? (r.y + r.h / 2)
+        guard cut - r.y >= minSize.h - 1e-9, r.maxY - cut >= minSize.h - 1e-9 else { return nil }
+        return (ZoneRect(x: r.x, y: r.y, w: r.w, h: cut - r.y), ZoneRect(x: r.x, y: cut, w: r.w, h: r.maxY - cut))
+    }
+
+    /// The rectangle that merging these zones makes, or nil when they are fewer than two, overlap each other, leave
+    /// holes in their bounding box, or another zone reaches into it.
+    static func mergedRect(_ zones: [ZoneRect], indices: Set<Int>) -> ZoneRect? {
+        let chosen = indices.filter(zones.indices.contains).sorted()
+        guard chosen.count >= 2 else { return nil }
+        let parts = chosen.map { zones[$0] }
+        let x = parts.map(\.x).min()!, y = parts.map(\.y).min()!
+        let box = ZoneRect(x: x, y: y, w: parts.map(\.maxX).max()! - x, h: parts.map(\.maxY).max()! - y)
+        for i in parts.indices { for j in parts.indices where j > i && ZoneLinking.overlaps(parts[i], parts[j]) { return nil } }
+        guard abs(parts.map(\.area).reduce(0, +) - box.area) <= 4 * slack else { return nil }
+        for i in zones.indices where !indices.contains(i) && ZoneLinking.overlaps(zones[i], box) { return nil }
+        return box
+    }
+
+    /// Deleting a zone in Linked mode hands its space to a neighbour that shares a whole side with it (so the result
+    /// is still a rectangle): the smallest such neighbour, then the first. Nil when there is none.
+    static func deletionMerge(_ zones: [ZoneRect], index: Int) -> (neighbour: Int, rect: ZoneRect)? {
+        guard zones.indices.contains(index) else { return nil }
+        let candidates = zones.indices.filter { $0 != index }.compactMap { j -> (Int, ZoneRect)? in
+            mergedRect(zones, indices: [index, j]).map { (j, $0) }
+        }
+        guard let best = candidates.min(by: { a, b in
+            zones[a.0].area < zones[b.0].area - 1e-12 || (abs(zones[a.0].area - zones[b.0].area) <= 1e-12 && a.0 < b.0)
+        }) else { return nil }
+        return (best.0, best.1)
+    }
+
+    /// The largest empty rectangle on the screen (corners on the screen's or zones' edges), or nil if none is
+    /// at least `minSize`.
+    static func largestGap(_ zones: [ZoneRect], minSize: (w: Double, h: Double)) -> ZoneRect? {
+        let xs = Array(Set([0, 1] + zones.flatMap { [$0.x, $0.maxX] }.map { min(max($0, 0), 1) })).sorted()
+        let ys = Array(Set([0, 1] + zones.flatMap { [$0.y, $0.maxY] }.map { min(max($0, 0), 1) })).sorted()
+        var best: ZoneRect?
+        for (a, x0) in xs.enumerated() {
+            for x1 in xs[(a + 1)...] where x1 - x0 >= minSize.w - 1e-9 {
+                for (c, y0) in ys.enumerated() {
+                    for y1 in ys[(c + 1)...] where y1 - y0 >= minSize.h - 1e-9 {
+                        let r = ZoneRect(x: x0, y: y0, w: x1 - x0, h: y1 - y0)
+                        if r.area > (best?.area ?? 0) + 1e-12, !zones.contains(where: { ZoneLinking.overlaps($0, r, slack: 1e-9) }) {
+                            best = r
+                        }
+                    }
+                }
+            }
+        }
+        return best
+    }
+
+    /// Free mode's "Add zone": a third of the width and half the height, centred in the largest empty gap (shrunk
+    /// to fit it); with no gap, cascaded a twenty-fourth down and right from `last` (the newest zone).
+    static func freeZoneRect(_ zones: [ZoneRect], last: ZoneRect?, minSize: (w: Double, h: Double)) -> ZoneRect {
+        let size = (w: 1.0 / 3, h: 0.5)
+        if let gap = largestGap(zones, minSize: minSize) {
+            let w = min(size.w, gap.w), h = min(size.h, gap.h)
+            return ZoneRect(x: gap.x + (gap.w - w) / 2, y: gap.y + (gap.h - h) / 2, w: w, h: h)
+        }
+        guard let last else { return ZoneEditing.newZoneRect(existing: zones) }
+        let step = 1.0 / 24
+        var x = last.x + step, y = last.y + step
+        if x + size.w > 1 + 1e-9 { x = 0 }
+        if y + size.h > 1 + 1e-9 { y = 0 }
+        return ZoneRect(x: x, y: y, w: size.w, h: size.h)
     }
 }

@@ -90,6 +90,9 @@ private struct ZoneEditorArtwork: View {
         let grid = session.gridEnabled
         let dark = scheme == .dark
         let equalColor = StatusColor.color(.ok, dark: dark)
+        let selection = session.selection
+        let cut = session.splitPreview
+        let cutHint = tx("Click to split · ⇧ turns the cut", "Clic para dividir · ⇧ gira el corte")
         Canvas { context, size in
             func flipped(_ rect: CGRect) -> CGRect {
                 ZoneGeometry.axRect(fromAppKit: rect, primaryHeight: size.height)
@@ -149,7 +152,7 @@ private struct ZoneEditorArtwork: View {
             /// The zone number, and under it its size in the monitor's points. A width or height equal to the
             /// selected (or dragged) zone's is shown in green, so equal side zones are easy to make.
             func drawZone(_ rect: CGRect, zone: ZoneRect, number: Int, active: Bool, affected: Bool = false) {
-                let width: CGFloat = active ? 2 : 1
+                let width: CGFloat = active || affected ? 2 : 1
                 func align(_ position: CGFloat) -> CGFloat { (position * scale).rounded() / scale }
                 let aligned = CGRect(x: align(rect.minX), y: align(rect.minY),
                                      width: align(rect.maxX) - align(rect.minX),
@@ -168,16 +171,37 @@ private struct ZoneEditorArtwork: View {
                 let sameW = !active && activeSize?.w == size.w
                 let sameH = !active && activeSize?.h == size.h
                 let font = Font.system(size: 12, weight: active ? .semibold : .medium).monospacedDigit()
-                let text = Text("\(size.w)").foregroundStyle(sameW ? equalColor : base)
-                    + Text(" × ").foregroundStyle(base)
-                    + Text("\(size.h)").foregroundStyle(sameH ? equalColor : base)
+                // Verbatim: a size is "1512 × 949", never "1,512 × 949".
+                let text = Text(verbatim: String(size.w)).foregroundStyle(sameW ? equalColor : base)
+                    + Text(verbatim: " × ").foregroundStyle(base)
+                    + Text(verbatim: String(size.h)).foregroundStyle(sameH ? equalColor : base)
                 context.draw(text.font(font), at: CGPoint(x: rect.midX, y: rect.midY + (active ? 18 : 15)))
             }
 
             for (index, zone) in zones.enumerated() where zone.id != activeID {
                 let moved = preview?.others[zone.id]
                 drawZone(frame(moved ?? zone.rect), zone: moved ?? zone.rect, number: index + 1, active: false,
-                         affected: moved != nil)
+                         affected: moved != nil || (preview == nil && selection.contains(zone.id)))
+            }
+            // Linked split preview: a dashed cut across the selected zone with a short hint next to it.
+            if preview == nil, let cut, let zone = zones.first(where: { $0.id == cut.zone }) {
+                let line = cut.vertical ? ZoneRect(x: cut.position, y: zone.rect.y, w: 0, h: zone.rect.h)
+                    : ZoneRect(x: zone.rect.x, y: cut.position, w: zone.rect.w, h: 0)
+                let r = frame(line)
+                var path = Path()
+                path.move(to: CGPoint(x: r.minX, y: r.minY))
+                path.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+                context.stroke(path, with: .color(theme.accent), style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [7, 5]))
+                let text = context.resolve(Text(cutHint).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.white))
+                let size = text.measure(in: CGSize(width: 400, height: 40))
+                let zoneFrame = frame(zone.rect)
+                // Beside the cut, clear of the zone's number and size in its middle.
+                let anchor = cut.vertical ? CGPoint(x: r.midX + size.width / 2 + 18, y: zoneFrame.midY + 64)
+                    : CGPoint(x: zoneFrame.minX + size.width / 2 + 24, y: r.midY - 18)
+                let pill = CGRect(x: anchor.x - size.width / 2 - 8, y: anchor.y - size.height / 2 - 4,
+                                  width: size.width + 16, height: size.height + 8)
+                context.fill(Path(roundedRect: pill, cornerRadius: pill.height / 2), with: .color(.black.opacity(0.72)))
+                context.draw(text, at: anchor)
             }
             if let activeRect {
                 let rect = frame(activeRect)
@@ -223,6 +247,10 @@ final class ZoneCanvasView: NSView {
         /// The layout's zones when the gesture began, and whether Linked mode applies to it.
         let zones: [Zone]
         let linked: Bool
+        /// Linked: the zone was already the only selection when pressed, so a click without a drag splits it.
+        var splitsOnClick = false
+        /// Free ⇧-press: a click without a drag toggles this zone in the selection (a drag draws).
+        var toggles: UUID?
         var last: Point?
     }
 
@@ -284,7 +312,10 @@ final class ZoneCanvasView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) { updateCursor(for: event) }
-    override func mouseMoved(with event: NSEvent) { updateCursor(for: event) }
+    override func mouseMoved(with event: NSEvent) {
+        updateCursor(for: event)
+        updateSplitPreview(for: event)
+    }
     override func cursorUpdate(with event: NSEvent) { updateCursor(for: event) }
     override func mouseExited(with event: NSEvent) {
         if gesture == nil { NSCursor.arrow.set() }
@@ -297,41 +328,76 @@ final class ZoneCanvasView: NSView {
         session.preview = nil
         let point = appKitPoint(for: event)
         guard let layout = session.layout, !session.usable.isEmpty else { return }
-        let hit = editorHit(at: point, in: layout, drawing: event.modifierFlags.contains(.shift))
+        let shift = event.modifierFlags.contains(.shift)
+        let linked = session.linked
+        if linked && shift {
+            // Linked ⇧-click builds a selection to merge.
+            if let zone = ZonePicking.chosen(point, zones: layout.zones, usable: session.usable) { session.toggleSelection(zone.id) }
+            session.splitPreview = nil
+            return
+        }
+        let hit = editorHit(at: point, in: layout, drawing: shift && !linked)
         guard hit != nil || isOnCanvas(point) else { return }
-        session.selectedZone = hit?.zone.id
-        if event.clickCount == 2, hit != nil {
-            session.requestSize()   // double-click a zone: type its exact size
+        let alreadyOnly = hit.map { session.selectedZone == $0.zone.id && session.extraSelection.isEmpty } ?? false
+        var toggles: UUID?
+        if shift {
+            toggles = ZonePicking.chosen(point, zones: layout.zones, usable: session.usable)?.id
+        } else {
+            session.selectOnly(hit?.zone.id)
+        }
+        if !linked, event.clickCount == 2, hit != nil {
+            session.requestSize()   // Free: double-click a zone to type its exact size
             return
         }
         gesture = Gesture(start: fraction(point), hit: hit,
                           others: layout.zones.filter { $0.id != hit?.zone.id }.map(\.rect),
-                          zones: layout.zones, linked: session.linked)
+                          zones: layout.zones, linked: linked,
+                          splitsOnClick: linked && alreadyOnly && hit?.edges.isEmpty == true, toggles: toggles)
+        if !(gesture?.splitsOnClick ?? false) { session.splitPreview = nil }
     }
 
-    /// Right-click a zone: exact size, centring and equal sizes.
+    /// Right-click a zone. Linked: size, split, merge, equal sizes, delete. Free: size, centring, equal sizes,
+    /// merge, duplicate, delete.
     override func menu(for event: NSEvent) -> NSMenu? {
         guard session.dialog == nil, let layout = session.layout else { return nil }
         let point = appKitPoint(for: event)
         guard let zone = ZonePicking.chosen(point, zones: layout.zones, usable: session.usable) else { return nil }
         resetGesture()
-        session.selectedZone = zone.id
+        session.splitPreview = nil
+        if !session.selection.contains(zone.id) { session.selectOnly(zone.id) }
         let session = session
         let menu = NSMenu()
         menu.autoenablesItems = false
-        menu.addItem(BlockItem(tx("Size…", "Tamaño…")) { session.requestSize() })
+        func add(_ title: String, enabled: Bool = true, _ action: @escaping () -> Void) {
+            let item = BlockItem(title, action)
+            item.isEnabled = enabled
+            menu.addItem(item)
+        }
+        add(tx("Size…", "Tamaño…")) { session.requestSize() }
         menu.addItem(.separator())
-        menu.addItem(BlockItem(tx("Center Horizontally", "Centrar horizontalmente")) { session.centerZone(horizontally: true) })
-        menu.addItem(BlockItem(tx("Center Vertically", "Centrar verticalmente")) { session.centerZone(horizontally: false) })
-        let widths = BlockItem(tx("Equal Widths in This Row", "Igualar anchos de esta fila")) { session.equalizeZones(horizontally: true) }
-        widths.isEnabled = session.canEqualize(horizontally: true)
-        menu.addItem(widths)
-        let heights = BlockItem(tx("Equal Heights in This Column", "Igualar altos de esta columna")) { session.equalizeZones(horizontally: false) }
-        heights.isEnabled = session.canEqualize(horizontally: false)
-        menu.addItem(heights)
+        if session.linked {
+            let canSplitV = ZoneTiling.split(zone.rect, vertically: true, minSize: session.minimumSize) != nil
+            let canSplitH = ZoneTiling.split(zone.rect, vertically: false, minSize: session.minimumSize) != nil
+            add(tx("Split into Left and Right", "Dividir en izquierda y derecha"), enabled: canSplitV) {
+                session.split(zone.id, vertically: true)
+            }
+            add(tx("Split into Top and Bottom", "Dividir en arriba y abajo"), enabled: canSplitH) {
+                session.split(zone.id, vertically: false)
+            }
+        } else {
+            add(tx("Center Horizontally", "Centrar horizontalmente")) { session.centerZone(horizontally: true) }
+            add(tx("Center Vertically", "Centrar verticalmente")) { session.centerZone(horizontally: false) }
+        }
+        add(tx("Merge Selected Zones", "Unir zonas seleccionadas"), enabled: session.canMerge) { session.mergeSelection() }
+        add(tx("Equal Widths in This Row", "Igualar anchos de esta fila"), enabled: session.canEqualize(horizontally: true)) {
+            session.equalizeZones(horizontally: true)
+        }
+        add(tx("Equal Heights in This Column", "Igualar altos de esta columna"), enabled: session.canEqualize(horizontally: false)) {
+            session.equalizeZones(horizontally: false)
+        }
         menu.addItem(.separator())
-        menu.addItem(BlockItem(tx("Duplicate Zone", "Duplicar zona")) { session.duplicateZone() })
-        menu.addItem(BlockItem(tx("Delete Zone", "Eliminar zona")) { session.deleteZone() })
+        if !session.linked { add(tx("Duplicate Zone", "Duplicar zona")) { session.duplicateZone() } }
+        add(tx("Delete Zone", "Eliminar zona"), enabled: session.canDeleteZone) { session.deleteZone() }
         return menu
     }
 
@@ -349,6 +415,7 @@ final class ZoneCanvasView: NSView {
     override func flagsChanged(with event: NSEvent) {
         guard let gesture, let last = gesture.last else {
             updateCursor(for: event)
+            updateSplitPreview(for: event)
             super.flagsChanged(with: event)
             return
         }
@@ -359,12 +426,24 @@ final class ZoneCanvasView: NSView {
         defer {
             resetGesture()
             updateCursor(for: event)
+            updateSplitPreview(for: event)
         }
         guard let gesture, gesture.last != nil else {
             session.preview = nil   // a click without a drag never leaves a picture of a change behind
+            if let gesture, let id = gesture.toggles {
+                session.toggleSelection(id)
+            } else if gesture?.splitsOnClick == true, let cut = session.splitPreview, cut.zone == gesture?.hit?.zone.id {
+                session.split(cut.zone, vertically: cut.vertical, at: cut.position)
+            }
             return
         }
         update(gesture, to: fraction(appKitPoint(for: event)), snapping: !event.modifierFlags.contains(.option))
+        if gesture.linked, gesture.hit?.edges.isEmpty == true, session.preview?.others.isEmpty ?? true {
+            // A Linked zone body dropped on nothing: nothing moves; say once how Linked zones change.
+            session.preview = nil
+            session.notify(session.linkedMoveHint, once: true)
+            return
+        }
         if let preview = session.preview { session.apply(preview) }
         session.preview = nil
     }
@@ -387,11 +466,33 @@ final class ZoneCanvasView: NSView {
         }
     }
 
-    /// Shift draws a new zone anywhere, also over existing ones (every built-in layout fills the whole screen).
+    /// Free: Shift draws a new zone anywhere, also over existing ones. Linked: an edge on the screen's border is not
+    /// a divider (dragging it would open a hole), so grabbing there counts as grabbing the zone.
     private func editorHit(at point: CGPoint, in layout: ZoneLayout, drawing: Bool) -> ZonePicking.EditorHit? {
         guard !drawing else { return nil }
-        return ZonePicking.editorHit(at: point, zones: layout.zones, usable: session.usable,
-                                     selectedID: session.selectedZone)
+        guard var hit = ZonePicking.editorHit(at: point, zones: layout.zones, usable: session.usable,
+                                              selectedID: session.selectedZone) else { return nil }
+        if layout.mode == .linked { hit.edges.subtract(ZoneTiling.borderEdges(hit.zone.rect)) }
+        return hit
+    }
+
+    /// Linked: over the selected zone (away from its dividers) a dashed line shows where a click would split it.
+    private func updateSplitPreview(for event: NSEvent) {
+        guard gesture == nil, session.linked, session.dialog == nil, let layout = session.layout,
+              let window, !session.usable.isEmpty else {
+            if gesture == nil, session.splitPreview != nil { session.splitPreview = nil }
+            return
+        }
+        let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        let point = ZoneGeometry.appKitPoint(fromCG: location, primaryHeight: bounds.height)
+        let onBody = !session.hudFrame.contains(location)
+            && editorHit(at: point, in: layout, drawing: false).map { $0.edges.isEmpty && $0.zone.id == session.selectedZone } == true
+            && session.extraSelection.isEmpty
+        let next = onBody ? session.splitCandidate(at: fraction(point), flip: NSEvent.modifierFlags.contains(.shift)) : nil
+        if next?.zone != session.splitPreview?.zone || next?.vertical != session.splitPreview?.vertical
+            || next?.position != session.splitPreview?.position {
+            session.splitPreview = next
+        }
     }
 
     private func isOnCanvas(_ point: CGPoint) -> Bool {
@@ -418,9 +519,14 @@ final class ZoneCanvasView: NSView {
         cursor.set()
     }
 
+    /// Free: crosshair to draw, hands to move, arrows to resize. Linked: a plain arrow over a zone (it does not
+    /// move), a closed hand while dragging it onto another to swap, resize arrows on dividers.
     private func cursor(for hit: ZonePicking.EditorHit?, dragging: Bool) -> NSCursor {
-        guard let edges = hit?.edges else { return .crosshair }
-        guard !edges.isEmpty else { return dragging ? .closedHand : .openHand }
+        guard let edges = hit?.edges else { return session.linked ? .arrow : .crosshair }
+        guard !edges.isEmpty else {
+            if session.linked { return dragging ? .closedHand : .arrow }
+            return dragging ? .closedHand : .openHand
+        }
         return ZoneEditorResizeCursor.forEdges(edges)
     }
 
@@ -449,15 +555,18 @@ final class ZoneCanvasView: NSView {
         let rects = gesture.zones.map(\.rect)
         let delta = (dx: point.x - gesture.start.x, dy: point.y - gesture.start.y)
         if hit.edges.isEmpty {
-            // Linked: dropping a zone on another swaps them; otherwise it slides up to its neighbours.
-            if gesture.linked, let target = swapTarget(at: point, excluding: hit.zone.id, in: gesture.zones) {
-                session.preview = .init(zoneID: hit.zone.id, rect: target.rect, guides: [], others: [target.id: hit.zone.rect])
+            // Linked zones never move freely: dropping one on another swaps the two, anything else does nothing.
+            if gesture.linked {
+                if let target = swapTarget(at: point, excluding: hit.zone.id, in: gesture.zones) {
+                    session.preview = .init(zoneID: hit.zone.id, rect: target.rect, guides: [], others: [target.id: hit.zone.rect])
+                } else {
+                    session.preview = nil
+                }
                 return
             }
             let result = ZoneSnapping.move(hit.zone.rect, by: delta, others: gesture.others,
                                            grid: grid, snapping: snapping, threshold: threshold)
-            let rect = gesture.linked ? ZoneLinking.move(rects, index: index, to: result.0) : result.0
-            session.preview = .init(zoneID: hit.zone.id, rect: rect, guides: rect == result.0 ? result.1 : [])
+            session.preview = .init(zoneID: hit.zone.id, rect: result.0, guides: result.1)
             return
         }
         guard gesture.linked else {

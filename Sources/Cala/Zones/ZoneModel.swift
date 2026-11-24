@@ -31,23 +31,38 @@ struct Zone: Codable, Equatable, Identifiable {
     }
 }
 
+/// How a layout is edited. `linked`: the zones tile the usable area (no overlaps, no holes) and are changed by
+/// dragging dividers, splitting and merging. `free`: rectangles anywhere, overlaps allowed.
+enum ZoneLayoutMode: String, Codable {
+    case linked, free
+
+    /// Linked when the zones tile the screen, otherwise Free.
+    static func inferred(from zones: [Zone]) -> ZoneLayoutMode {
+        ZoneTiling.tiles(zones.map(\.rect)) ? .linked : .free
+    }
+}
+
 struct ZoneLayout: Codable, Equatable, Identifiable {
     var id: UUID
     var name: String
     var zones: [Zone]
     var nextSeq: Int
     var template: String?
+    var mode: ZoneLayoutMode
     var isTemplate: Bool { template != nil }
 
-    init(id: UUID = UUID(), name: String, zones: [Zone] = [], nextSeq: Int = 0, template: String? = nil) {
+    /// Without a `mode`, it is inferred from the zones (see `ZoneLayoutMode.inferred`).
+    init(id: UUID = UUID(), name: String, zones: [Zone] = [], nextSeq: Int = 0, template: String? = nil,
+         mode: ZoneLayoutMode? = nil) {
         self.id = id
         self.name = name
         self.zones = zones
         self.nextSeq = nextSeq
         self.template = template
+        self.mode = mode ?? .inferred(from: zones)
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, zones, nextSeq, template }
+    private enum CodingKeys: String, CodingKey { case id, name, zones, nextSeq, template, mode }
 
     init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
@@ -56,6 +71,9 @@ struct ZoneLayout: Codable, Equatable, Identifiable {
         zones = try fields.decodeIfPresent([Zone].self, forKey: .zones) ?? []
         nextSeq = try fields.decodeIfPresent(Int.self, forKey: .nextSeq) ?? 0
         template = try fields.decodeIfPresent(String.self, forKey: .template)
+        // Older files have no mode, and an unknown value must not cost the whole file: infer it then.
+        mode = (try? fields.decodeIfPresent(String.self, forKey: .mode)).flatMap { $0 }
+            .flatMap(ZoneLayoutMode.init(rawValue:)) ?? .inferred(from: zones)
     }
 
     @discardableResult
@@ -64,7 +82,47 @@ struct ZoneLayout: Codable, Equatable, Identifiable {
         let zone = Zone(rect: rect, seq: nextSeq)
         zones.append(zone)
         nextSeq += 1
+        // An added rectangle always overlaps a tiling, so the layout becomes Free (Linked layouts split instead).
+        if mode == .linked && !ZoneTiling.tiles(zones.map(\.rect)) { mode = .free }
         return zone.id
+    }
+
+    /// Cuts a zone in two (see `ZoneTiling.split`); the new part follows it in the list. Returns its id, or nil
+    /// when the parts would be too small.
+    @discardableResult
+    mutating func split(_ id: UUID, vertically: Bool, at position: Double? = nil,
+                        minSize: (w: Double, h: Double)) -> UUID? {
+        guard let index = zones.firstIndex(where: { $0.id == id }),
+              let (first, second) = ZoneTiling.split(zones[index].rect, vertically: vertically, at: position,
+                                                      minSize: minSize) else { return nil }
+        repairCreationOrder()
+        zones[index].rect = first
+        let part = Zone(rect: second, seq: nextSeq)
+        nextSeq += 1
+        zones.insert(part, at: index + 1)
+        return part.id
+    }
+
+    /// Merges zones whose union is a rectangle into the first of them in the list. Returns its id.
+    @discardableResult
+    mutating func merge(_ ids: Set<UUID>) -> UUID? {
+        let indices = Set(zones.indices.filter { ids.contains(zones[$0].id) })
+        guard let rect = ZoneTiling.mergedRect(zones.map(\.rect), indices: indices), let keep = indices.min() else { return nil }
+        let kept = zones[keep].id
+        zones[keep].rect = rect
+        zones.removeAll { ids.contains($0.id) && $0.id != kept }
+        return kept
+    }
+
+    /// Linked delete: the zone's space goes to a neighbour (see `ZoneTiling.deletionMerge`). Returns that neighbour.
+    @discardableResult
+    mutating func removeByMerging(_ id: UUID) -> UUID? {
+        guard let index = zones.firstIndex(where: { $0.id == id }),
+              let (neighbour, rect) = ZoneTiling.deletionMerge(zones.map(\.rect), index: index) else { return nil }
+        let kept = zones[neighbour].id
+        zones[neighbour].rect = rect
+        zones.remove(at: index)
+        return kept
     }
 
     mutating func repairCreationOrder() {
@@ -128,6 +186,8 @@ struct ZonesState: Codable, Equatable {
                 return zone
             }
             layout.repairCreationOrder()
+            // A Linked layout must tile; one that no longer does (edited by hand) is edited as Free.
+            if layout.mode == .linked && !ZoneTiling.tiles(layout.zones.map(\.rect)) { layout.mode = .free }
             return layout
         }
         if state.layouts.isEmpty {

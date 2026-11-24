@@ -94,7 +94,7 @@ Why fractions:
 
 ## Storage: `zones.json`
 
-`~/Library/Application Support/Cala/zones.json`. It is a separate file from `config.json` so that a damaged zones file can never cost you your bar settings, and nested arrays do not fit the flat per-field recovery `config.json` uses. Written atomically, pretty-printed with sorted keys, and only when something is committed (editor Save, a layout choice, duplicate, delete); each change is written before it goes live. The scalar preferences (`zonesEnabled`, `zonesActivation`, `zonesGap`, `zonesEditorGrid`, `zonesEditorLinked`) stay in `config.json`.
+`~/Library/Application Support/Cala/zones.json`. It is a separate file from `config.json` so that a damaged zones file can never cost you your bar settings, and nested arrays do not fit the flat per-field recovery `config.json` uses. Written atomically, pretty-printed with sorted keys, and only when something is committed (editor Save, a layout choice, duplicate, delete); each change is written before it goes live. The scalar preferences (`zonesEnabled`, `zonesActivation`, `zonesGap`, `zonesEditorGrid`) stay in `config.json`.
 
 ```json
 {
@@ -106,6 +106,7 @@ Why fractions:
       "name": "Two columns",
       "nextSeq": 2,
       "template": "two-columns",
+      "mode": "linked",
       "zones": [
         { "id": "…", "seq": 0, "rect": { "x": 0,   "y": 0, "w": 0.5, "h": 1 } },
         { "id": "…", "seq": 1, "rect": { "x": 0.5, "y": 0, "w": 0.5, "h": 1 } }
@@ -118,6 +119,7 @@ Why fractions:
 
 - `activeByDisplay`: monitor key → layout id, or `"off"`. A monitor with no entry uses `defaultLayout`.
 - `seq`/`nextSeq`: creation order, used only to break ties between equal-size overlapping zones. `template` is informational.
+- `mode`: how the editor edits the layout, `"linked"` (the zones tile the usable area) or `"free"`. A file without it (older versions) or with an unknown value gets it inferred from the zones: Linked when they tile the screen (no overlaps, no holes), Free otherwise. A Linked layout that no longer tiles (edited by hand) is repaired to Free.
 - **Read only when the module starts** (and when the editor opens with Zones off). With Zones off, nothing reads this file.
 - **Repair on load:** rectangles that are not finite numbers are dropped; the rest are clamped into the screen with a minimum size of 5 %; duplicate layout or zone ids are dropped; assignments pointing at a missing layout are removed; with no layouts left the templates are seeded again; a missing default becomes the first layout.
 - **Damaged file:** if it cannot be decoded it is moved to `zones.json.bad` (replacing an older `.bad`), the templates are seeded and a new file is written. If the move itself fails, saving is disabled for that run so the original is not overwritten (same policy as `config.json`). If `zones.json` cannot be loaded at all, the module logs `zones: could not load zones.json` and does not start.
@@ -141,19 +143,32 @@ It is a borderless window that covers the chosen monitor, above everything inclu
 There is one concept, the **layout**, and one panel at the top (collapsible):
 - **Name** of the layout on the canvas, editable in place (click it; Return goes back to the canvas). Next to it **Duplicate**, **Delete** (with confirmation; staged until Save), **Undo** and **Redo** (also **⌘Z** / **⇧⌘Z**; every change in this editor session, layouts included; the name field keeps its own text undo while you type in it).
 - **Gallery:** every layout as a picture at this monitor's shape, the one on the canvas ringed. **Clicking a picture shows that layout on the canvas and makes it the one this monitor uses** (on Save); there is no separate layout picker or "use on this monitor" step. **+** (always visible at the start) adds a blank layout and puts the cursor in its name; while a built-in layout is missing it is a menu that can also add it back. Each picture's context menu: Rename, Duplicate, Restore original zones (edited built-ins), Delete.
-- **Monitor** picker (only with more than one monitor; "Left display — 3840 × 1080"), **Linked | Free**, **Grid** (the grid icon), **Cancel** (reads **Close** when nothing changed) and **Save**.
-- **Linked** (default, remembered as `zonesEditorLinked`) keeps zones that touch joined. Dragging an edge moves every edge at the same position that is connected to it through overlapping spans: in three columns the divider resizes both columns; in a 2 × 2 grid only the dragged row; a tall zone next to two stacked ones drags the whole divider. The drag stops where any zone involved would get smaller than the minimum. Moving a zone never covers another: it slides up to its neighbours (horizontally first, then vertically, so it glides along an edge), and **dropping it on another zone swaps the two**. Zones a layout already overlapped (made in Free mode) do not block. Drawing a new zone is the same in both modes. **Free** is the earlier behaviour: each zone moves and resizes on its own and may overlap. Shared edges are equal coordinates within 0.05 % of the screen (`ZoneLinking`, checked).
-- Under the gallery: **Add zone** (a centred, grid-aligned zone, selected), **Delete zone** (enabled with a selection) and a one-line hint. If zones are off on this monitor, the ring is dashed and a note says that clicking a layout turns them on.
+- **Monitor** picker (only with more than one monitor; "Left display — 3840 × 1080"), **Linked | Free** (this layout's model, stored in the layout), **Grid** (the grid icon), **Cancel** (reads **Close** when nothing changed) and **Save**.
+- Under the gallery, the mode's tools (below), **Delete zone** and a one-line hint for the mode. Short notes (why something did not happen) replace the hint for a few seconds. If zones are off on this monitor, the ring is dashed and a note says that clicking a layout turns them on.
 
-On the canvas:
-- **Draw:** drag on an empty area. Every built-in layout fills the whole screen, so **hold ⇧ (Shift)** to draw over existing zones (for overlap), or use **Add zone**. An empty layout says "Drag on the screen to draw a zone" in the middle of the screen.
+**Two models, one per layout** (after FancyZones' Grid and Canvas editors). Tooltips: Linked "Zones tile the screen. Split, merge, drag dividers."; Free "Place rectangles anywhere. Overlap allowed."
+- Every built-in layout, and any layout whose zones tile the screen, opens **Linked**; a layout with overlaps or holes opens **Free**. A new layout (**+**) starts Linked with one zone covering the screen.
+- Linked → Free is instant. Free → Linked only when the zones already tile the screen; otherwise a message explains that they overlap or leave gaps and how to fix it (make them meet edge to edge in Free mode, snapping helps, or start a new layout). There is no automatic "snap to tiles": it would move zones unpredictably.
+- Each split, merge, divider drag, swap, delete and mode change is one undo step.
+
+**Linked** (the zones always tile the usable area: no overlaps, no holes; `ZoneTiling`, checked):
+- **Select** a zone by clicking it. **Split:** with a zone selected, the pointer over it shows a dashed cut and "Click to split · ⇧ turns the cut"; clicking splits it there. The cut follows the zone's longer side on screen (⇧ the other way) and snaps to the zone's middle, the grid and other zones' edges. So: first click selects, a click on the selected zone splits; a drag never splits. **Split** in the panel (and right-click → Split into Left and Right / Top and Bottom) cuts the selected zone, or the largest one, at its middle along its longer side (⇧-click the button for the other way). Parts are never smaller than the minimum.
+- **Dividers:** drag an edge shared with other zones. Every edge at the same position that is joined to it through overlapping spans moves with it (three columns: the divider resizes both; 2 × 2 grid: only the dragged row; a tall zone next to two stacked ones: the whole divider), stopping where a zone involved would get smaller than the minimum. Edges on the screen's border are not dividers.
+- **Merge:** ⇧-click zones to select two or more, then **Merge** (or right-click → Merge Selected Zones). Enabled only when together they make a rectangle; the tooltip says why otherwise.
+- **Delete zone** gives the zone's space to a neighbour that shares a whole side with it (the smallest such neighbour). If none does, it is disabled and a note explains (merge or split first).
+- **Swap:** drag a zone onto another and drop it: they trade places (a closed hand while dragging). Zones do not move otherwise: dropping on nothing changes nothing and, once per session, a note says "Linked zones resize with dividers. Drop a zone on another to swap them, or switch to Free to place zones freely."
+- Exact size (right-click → Size…) moves the zone's right (else left) and bottom (else top) dividers, so neighbours give way; Equal Widths/Heights apply only when the result still tiles. Drawing, arrow-key nudges, centring and duplicating are Free-only.
+
+**Free** (rectangles anywhere, overlaps allowed):
+- **Add zone** puts a zone a third of the screen wide and half as tall in the middle of the largest empty space (shrunk to fit it); with no empty space, it is cascaded a twenty-fourth down and right from the newest zone. It is selected at once.
+- **Draw:** drag on an empty area, or hold **⇧** to draw over existing zones. An empty layout says "Drag on the screen to draw a zone". ⇧-click (without dragging) adds a zone to the selection for Merge.
 - **Move:** drag a zone. **Resize:** drag one of the selected zone's eight handles (corners and edge midpoints) or any zone's border. The cursor shows what a drag will do (crosshair, open hand, resize arrows).
-- **Select** a zone by clicking it; clicking empty space deselects. **Delete** or **Forward Delete** removes it; **⌘D** duplicates it.
+- **Delete** or **Forward Delete** removes the selected zone; **⌘D** duplicates it. **Arrow keys** move it 8 pt, or a twelfth of the screen with **⇧**. Double-click a zone to type its exact size (it keeps its centre).
+- **Right-click a zone:** Size…, Center Horizontally, Center Vertically, Merge Selected Zones, Equal Widths in This Row (zones with the same top and height share the row's width evenly, keeping its outer edges and gaps), Equal Heights in This Column, Duplicate, Delete.
+
+**Both:**
 - Zones cannot leave the screen, and cannot be smaller than the larger of 5 % of the usable size and 80 pt.
 - **Sizes:** under each zone's number, its width × height in the monitor's points (the size macOS and Settings show for the monitor, e.g. a 3840 × 1080 display; edges are rounded first, so zones that share an edge add up exactly). It updates live while dragging, and a width or height equal to the selected zone's is shown in green, so two side zones are easy to make the same.
-- **Exact size:** double-click a zone (or right-click → Size…) and type width and height; the zone keeps its centre and stays on the screen.
-- **Right-click a zone:** Size…, Center Horizontally, Center Vertically, Equal Widths in This Row (zones with the same top and height share the row's width evenly, keeping its outer edges and gaps), Equal Heights in This Column, Duplicate, Delete.
-- **Arrow keys** move the selected zone 8 pt, or a twelfth of the screen with **⇧** (Linked mode stops at neighbours).
 - **Snapping:** within 8 pt, an edge snaps to another zone's edges, the screen's edges and its centre line (½); with **Grid** on, also to the twelfths of a 12 × 12 grid. A moved zone's **centre** snaps to the screen's centre on either axis (dash-dotted guide). A resized or drawn zone snaps to the **same width or height as another zone** (green guide, and the matching size turns green). Active snap lines show as dashed guides. Hold **⌥ (Option)** to turn snapping off while dragging. The grid choice is remembered (`zonesEditorGrid`).
 - Overlapping zones use the same "smallest wins" rule to decide which one you grab.
 
@@ -171,7 +186,6 @@ All in `config.json`; full reference in [configuration.md](configuration.md#modu
 | `zonesActivation` | `"both"` | `rightClick`, `shift` or `both`. Anything else becomes `both` |
 | `zonesGap` | `8` | Space around snapped windows, 0 to 40 pt (clamped) |
 | `zonesEditorGrid` | `false` | The editor's 12-division snapping |
-| `zonesEditorLinked` | `true` | The editor's Linked mode (shared edges move together, no overlaps); `false` = Free |
 
 Settings → **Zones** has the module switch, the gesture picker, the gap slider, one layout picker per monitor, **Edit zones…**, and a note about macOS's own edge tiling.
 
@@ -283,7 +297,8 @@ Do this from the **console** session (a background Fast User Switching session r
 **6. Editor**
 - [ ] Click each picture in the gallery: the canvas shows it at once and, after Save, the monitor uses it.
 - [ ] Draw on empty space, ⇧-draw over a zone, Add zone; move, resize from all eight handles; zones cannot leave the screen; ⌥ disables snapping; dashed guides show; the grid toggle works and is remembered.
-- [ ] Linked: drag the divider of Wide center, the neighbour shrinks; drop a zone on another, they swap; Free: they overlap. Sizes show under the numbers and equal ones turn green; centre snap, Size… (double-click), Equal Widths, arrows and ⌘Z / ⇧⌘Z work.
+- [ ] Linked (a built-in): click a zone, click it again to split at the dashed line (⇧ turns it); Split button; drag a divider, the neighbour shrinks; ⇧-click two zones and Merge (disabled when they do not make a rectangle); Delete gives the space to a neighbour; drop a zone on another, they swap; dragging a zone onto nothing shows the note once. Free: Add zone lands in the largest gap; zones overlap; Free → Linked refuses with a message while zones overlap.
+- [ ] Sizes show under the numbers and equal ones turn green; centre snap, Size… (double-click), Equal Widths, arrows and ⌘Z / ⇧⌘Z work.
 - [ ] + (blank layout, name ready to type), duplicate, rename in place, delete with confirmation (the last one cannot be deleted); delete a built-in and add it back from +; edit a built-in and restore its original zones.
 - [ ] Settings → Zones and the menu-bar icon show the layouts as pictures per monitor, and two monitors with the same name read as Left / Right display.
 - [ ] Cancel with changes asks to discard; Save keeps them; dragging a window while the editor is open does nothing.

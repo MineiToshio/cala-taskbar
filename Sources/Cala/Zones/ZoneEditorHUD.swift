@@ -86,22 +86,23 @@ struct ZoneEditorHUD: View {
             .accessibilityLabel(title)
     }
 
-    /// Linked: zones that touch stay joined (a shared edge moves both; a moved zone never covers another and swaps
-    /// places when dropped on one). Free: each zone on its own, overlaps allowed.
+    /// The layout's model. Linked (FancyZones' "grid"): zones tile the screen; split, merge, drag dividers.
+    /// Free ("canvas"): rectangles anywhere, overlaps allowed. Stored per layout.
     private var linkPicker: some View {
-        Picker(tx("Zones", "Zonas"), selection: Binding(get: { session.linked }, set: session.changeLinked)) {
-            Text(tx("Linked", "Unidas")).tag(true)
-            Text(tx("Free", "Libres")).tag(false)
+        Picker(tx("Zones", "Zonas"), selection: Binding(get: { session.mode }, set: session.setMode)) {
+            Text(tx("Linked", "Unidas")).tag(ZoneLayoutMode.linked)
+            Text(tx("Free", "Libres")).tag(ZoneLayoutMode.free)
         }
         .pickerStyle(.segmented)
         .labelsHidden()
         .fixedSize()
+        .id(session.modeRefusals)
         .help(session.linked
-              ? tx("Linked: dragging a shared edge resizes the neighbouring zones too; zones never overlap (drop one on another to swap them)",
-                   "Unidas: al arrastrar un borde compartido también cambian las zonas vecinas; nunca se superponen (suelta una sobre otra para intercambiarlas)")
-              : tx("Free: each zone moves and resizes on its own and may overlap others",
-                   "Libres: cada zona se mueve y cambia de tamaño por su cuenta y puede superponerse"))
-        .accessibilityLabel(tx("Zone editing mode", "Modo de edición de zonas"))
+              ? tx("Linked: zones tile the screen. Split, merge, drag dividers.",
+                   "Unidas: las zonas cubren la pantalla. Divide, une, arrastra divisores.")
+              : tx("Free: place rectangles anywhere. Overlap allowed.",
+                   "Libres: coloca rectángulos donde quieras. Se pueden superponer."))
+        .accessibilityLabel(tx("How this layout is edited", "Cómo se edita esta distribución"))
     }
 
     private var monitorPicker: some View {
@@ -142,19 +143,41 @@ struct ZoneEditorHUD: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Button { session.addZone() } label: {
-                Label(tx("Add zone", "Añadir zona"), systemImage: "plus.rectangle")
+            if session.linked {
+                Button { session.addZone(flip: NSEvent.modifierFlags.contains(.shift)) } label: {
+                    Label(tx("Split", "Dividir"), systemImage: "rectangle.split.2x1")
+                }
+                .disabled(session.layout == nil || !session.canSplitSelection)
+                .help(tx("Split the selected zone (or the largest) along its longer side; ⇧ splits the other way",
+                         "Divide la zona seleccionada (o la mayor) por su lado largo; con ⇧, en el otro sentido"))
+                Button { session.mergeSelection() } label: {
+                    Label(tx("Merge", "Unir"), systemImage: "rectangle.compress.vertical")
+                }
+                .disabled(!session.canMerge)
+                .help(session.selection.count < 2
+                      ? tx("⇧-click zones to select two or more, then merge them", "Haz ⇧-clic en dos o más zonas y únelas")
+                      : session.canMerge ? tx("Merge the selected zones into one", "Une las zonas seleccionadas en una")
+                      : tx("The selected zones must form a rectangle", "Las zonas seleccionadas deben formar un rectángulo"))
+            } else {
+                Button { session.addZone() } label: {
+                    Label(tx("Add zone", "Añadir zona"), systemImage: "plus.rectangle")
+                }
+                .disabled(session.layout == nil)
+                .help(tx("A new zone in the largest empty space", "Una zona nueva en el mayor espacio libre"))
             }
-            .disabled(session.layout == nil)
             Button(role: .destructive) { session.deleteZone() } label: {
                 Label(tx("Delete zone", "Eliminar zona"), systemImage: "minus.rectangle")
             }
-            .disabled(session.selectedZone == nil)
-            Text(hint)
-                .font(.caption)
-                .flyoutSecondary()
+            .disabled(!session.canDeleteZone)
+            .help(session.linked
+                  ? tx("Its space goes to a neighbour that shares a whole side", "Su espacio pasa a una vecina que comparte un lado entero")
+                  : tx("Delete the selected zone", "Elimina la zona seleccionada"))
+            Text(session.notice ?? hint)
+                .font(.caption.weight(session.notice == nil ? .regular : .medium))
+                .foregroundStyle(session.notice == nil ? FlyoutStyle.secondary(dark: scheme == .dark) : StatusColor.color(.attention, dark: scheme == .dark))
                 .lineLimit(2)
                 .padding(.leading, 6)
+                .animation(.easeOut(duration: 0.15), value: session.notice)
             Spacer(minLength: 0)
             if session.isOff {
                 Label(tx("Zones are off on this monitor: click a layout to turn them on",
@@ -168,12 +191,20 @@ struct ZoneEditorHUD: View {
     }
 
     private var hint: String {
+        if session.linked {
+            if session.selectedZone == nil {
+                return tx("Click a zone to select it · Drag a divider to resize · ⇧-click several to merge · Drop a zone on another to swap",
+                          "Haz clic en una zona para seleccionarla · Arrastra un divisor para cambiar tamaños · ⇧-clic en varias para unirlas · Suelta una zona sobre otra para intercambiarlas")
+            }
+            return tx("Click inside the selected zone to split it there (⇧ turns the cut) · Drag dividers · ⌥ no snapping · Right-click: more",
+                      "Haz clic dentro de la zona seleccionada para dividirla ahí (⇧ gira el corte) · Arrastra divisores · ⌥ sin ajuste · Clic derecho: más")
+        }
         if session.layout?.zones.isEmpty ?? true {
             return tx("Drag on the screen to draw a zone · Hold ⌥ to turn off snapping",
                       "Arrastra sobre la pantalla para dibujar una zona · Mantén ⌥ para desactivar el ajuste")
         }
-        return tx("Drag a zone or its edges · Empty space or ⇧ draws · ⌥ no snapping · Arrows nudge · Double-click: exact size · Right-click: centre, equal widths",
-                  "Arrastra una zona o sus bordes · Espacio vacío o ⇧ dibuja · ⌥ sin ajuste · Flechas: mover · Doble clic: tamaño exacto · Clic derecho: centrar, igualar anchos")
+        return tx("Drag a zone or its edges · Empty space or ⇧ draws · ⌥ no snapping · Arrows nudge · Double-click: exact size · Right-click: more",
+                  "Arrastra una zona o sus bordes · Espacio vacío o ⇧ dibuja · ⌥ sin ajuste · Flechas: mover · Doble clic: tamaño exacto · Clic derecho: más")
     }
 }
 
@@ -344,6 +375,7 @@ struct ZoneEditorDialog: View {
         case .deleteLayout: tx("Delete layout?", "¿Eliminar la distribución?")
         case .saveError: tx("Couldn’t save zones", "No se pudieron guardar las zonas")
         case .zoneSize: ""
+        case .cannotLink: tx("This layout can’t be Linked yet", "Esta distribución aún no puede ser Unidas")
         }
     }
 
@@ -354,6 +386,9 @@ struct ZoneEditorDialog: View {
             tx("“\(name)” will be removed when you save.", "«\(name)» se eliminará al guardar.")
         case let .saveError(message): message
         case .zoneSize: nil
+        case .cannotLink:
+            tx("Its zones overlap or leave gaps, and Linked zones must cover the screen exactly. In Free mode, make them meet edge to edge (snapping helps), then switch to Linked; or start a new layout with +.",
+               "Sus zonas se superponen o dejan huecos, y las zonas Unidas deben cubrir la pantalla exactamente. En Libres, haz que se toquen borde con borde (el ajuste ayuda) y cambia a Unidas; o crea una distribución nueva con +.")
         }
     }
 
@@ -361,7 +396,7 @@ struct ZoneEditorDialog: View {
         switch dialog {
         case .discard: tx("Discard changes", "Descartar cambios")
         case .deleteLayout: tx("Delete layout", "Eliminar distribución")
-        case .saveError, .zoneSize: nil
+        case .saveError, .zoneSize, .cannotLink: nil
         }
     }
 }
