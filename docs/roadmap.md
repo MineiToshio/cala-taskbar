@@ -1,7 +1,20 @@
 # Roadmap
 
 ## Done
-Taskbar with auto-hide, pinned apps, hover previews with thumbnails (including minimized windows), peek (real window on hover), context menus with dynamic "New…" items, Shift+click and middle-click new window, middle-click to close a preview, notification badges, show desktop (minimize/restore), reserve space (approximation), system tray (keyboard, Wi-Fi, Bluetooth, brightness, sound, AI usage, profiles with Fast User Switching, battery, clock with calendar and upcoming events), multi-screen with per-screen alignment, pointer cursor, drag-to-reorder icons, running-without-windows dot, nine themes, transparency, themed panels and previews, Settings window (General, Appearance, Screens, Usage, Calendar, Permissions, Advanced), AI plan usage indicator (Claude + Codex), EventKit upcoming events with Join links, installation to `~/Applications` via `install.sh`, shared opaque flyout surface, start at login switch, window switcher (Option+Tab / optional Cmd+Tab, with search, close/quit/minimize keys and larger previews), hide/restore the macOS Dock from the app, mail in the tray (Gmail, iCloud, Yahoo over IMAP), reopening the app opens Settings.
+Taskbar with auto-hide, pinned apps, hover previews with thumbnails (including minimized windows), peek (real window on hover), context menus with dynamic "New…" items, Shift+click and middle-click new window, middle-click to close a preview, notification badges, show desktop (minimize/restore), reserve space (approximation), system tray (keyboard, Wi-Fi, Bluetooth, brightness, sound, AI usage, profiles with Fast User Switching, battery, clock with calendar and upcoming events), multi-screen with per-screen alignment, pointer cursor, drag-to-reorder icons, running-without-windows dot, nine themes, transparency, themed panels and previews, Settings window (General, Zones, Appearance, Screens, Tray, Usage, Calendar, Mail, Permissions, Advanced), AI plan usage indicator (Claude + Codex), EventKit upcoming events with Join links, installation to `~/Applications` via `install.sh`, shared opaque flyout surface, start at login switch, window switcher (Option+Tab / optional Cmd+Tab, with search, close/quit/minimize keys and larger previews), hide/restore the macOS Dock from the app, mail in the tray (Gmail, iCloud, Yahoo over IMAP), reopening the app opens Settings, **modules** (Bar, Tray, Switcher and Zones start and stop on their own, with a menu-bar status item when the Bar is off, a welcome that asks what you want to use, and existing users migrated without changes), **Zones** (drag a window into a zone of a per-monitor layout, with templates, an editor, ⌘ multi-zone span and restore on drag out; see [zones.md](zones.md)).
+
+## Zones: out of scope for now
+Ideas that were deliberately left out of the first version of [Zones](zones.md):
+- **Per-Space or per-app layouts** (today a layout belongs to a monitor, whatever Space or app is in front).
+- **Keyboard shortcuts** to move the front window into a zone, or to the next or previous zone.
+- **Auto-snap new windows** (an app always opens in its zone) and remember which zone each window is in across restarts.
+- **Resize several snapped windows together** when you drag a shared edge.
+
+Natural follow-ups:
+- **Keyboard and VoiceOver navigation in the editor** (today the canvas is one accessibility element; zones can only be moved and resized with the mouse).
+- **Esc to cancel zones mode** while dragging (needs a keyboard mask on the tap, which would change the permission analysis, see [zones.md](zones.md#permissions)).
+- If the owner's manual test shows the right-click gesture does not work, make **Shift the only gesture** and drop the swallowing.
+- Compensate for the few points macOS can inset an auto-hidden Dock; stable ids for identical monitors; import and export of layouts.
 
 ## Pending ideas
 1. **Win+number shortcuts** (Ctrl+1…9 activates the Nth icon). Needs a global key monitor.

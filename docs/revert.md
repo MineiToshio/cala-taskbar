@@ -5,7 +5,7 @@
 Everything is reversible. By hand, do these in order.
 
 ## 1. Stop the taskbar
-Settings → Advanced → "Salir…" (there is no Quit in the right-click menu). To open it again: Spotlight or Launchpad, search "Cala", or `open ~/Applications/Cala.app`.
+Settings → Advanced → "Salir…" (there is no Quit in the bar's right-click menu; when the Bar is off or Zones is on, the Cala icon in the menu bar also has **Quit Cala**). To open it again: Spotlight or Launchpad, search "Cala", or `open ~/Applications/Cala.app`.
 
 ## 2. Remove start at login
 Settings → General → switch off "Open at login", or System Settings → General → Login Items → remove Cala.

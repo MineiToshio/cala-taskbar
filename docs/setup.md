@@ -23,13 +23,13 @@ After a code change, run `./install.sh` again.
 **Re-grant after moving to a new path:** macOS ties Accessibility / Screen Recording grants to the app's path and signature. The first time you run the copy in `~/Applications`, the Permissions pane may report missing grants; add `~/Applications/Cala.app` in System Settings > Privacy & Security (and remove the old `build/` entry). If a grant looks on but does not work, reset it with the `tccutil` commands below and grant it again.
 
 ## Permissions (System Settings > Privacy & Security)
-The first launch shows a welcome that asks for each permission with its reason and a button to the exact pane; status updates live (PermissionCenter, `Sources/Cala/Permissions.swift`). Nothing is requested at launch after that: every optional permission is also asked the first time its feature is used. Settings → Permissions lists all seven (Accessibility, Screen Recording, Calendar, Location, Bluetooth, Finder automation, Notifications).
+The first launch shows a welcome that first asks "What do you want to use?" (Bar, Zones or both; nothing runs until you answer), then asks only for the permissions that choice needs (Bar: Accessibility and Screen Recording; Zones alone: Accessibility), each with its reason and a button to the exact pane; status updates live (PermissionCenter, `Sources/Cala/Permissions.swift`). Nothing is requested at launch after that: every optional permission is also asked the first time its feature is used. Settings → Permissions lists what the running modules need (Accessibility and Screen Recording for the Bar or the Switcher; Accessibility alone for Zones) and, while the Tray is on, the five optional ones (Calendar, Location, Bluetooth, Finder automation, Notifications). Input Monitoring is never requested.
 
 To test the welcome from scratch:
 ```bash
 pkill -x Cala
 tccutil reset All local.cala                     # only Cala's grants
-defaults delete local.cala                       # onboarding flag, crash bookkeeping
+defaults delete local.cala                       # onboardingCompleted / onboardingPending, crash bookkeeping
 mv "$HOME/Library/Application Support/Cala" "$HOME/Library/Application Support/Cala.bak"
 open ~/Applications/Cala.app
 ```

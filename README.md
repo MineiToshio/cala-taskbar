@@ -6,6 +6,8 @@
 
 **A taskbar for your Mac.** Your apps at the bottom with a thumbnail of every window, and on the right Wi‑Fi, sound, battery, disk, calendar and a panel that tells you why your Mac is slow.
 
+**Cala is a set of modules you switch on separately:** the bar (with its tray and Option+Tab) and **Zones**, which snaps the windows you drag into layouts. Only want Zones? Turn the bar off.
+
 Free · Source available · No accounts · Nothing leaves your Mac · macOS 14 or later · Apple silicon and Intel
 
 ### [⬇︎ Download the latest version](https://github.com/MineiToshio/cala-taskbar/releases/latest)
@@ -33,6 +35,8 @@ Free · Source available · No accounts · Nothing leaves your Mac · macOS 14 o
 **Your mail, in the tray.** An envelope with the unread count of your Gmail, iCloud or Yahoo accounts; read, archive or delete without opening a browser. See [Mail](#mail).
 
 **Why is my Mac slow?** The CPU and memory panel tells you which app weighs the most and recommends a restart when it is worth it.
+
+**Zones.** Drag a window, right-click or hold Shift, and drop it into a zone: halves, thirds, a grid or a layout you draw, with a different layout on each monitor. It works with or without the bar. See [Zones](#zones).
 
 </td>
 <td width="50%" valign="top">
@@ -71,7 +75,7 @@ It downloads the latest version, checks that the file is the one published here 
 
    After that, Cala opens normally for good. (Option 1 skips this step.)
 
-4. **Follow the welcome.** Four short steps, and you can skip any of them.
+4. **Follow the welcome.** A few short steps. It first asks **what you want to use** (the bar, Zones or both) and then asks only for the permissions that choice needs.
 
 <details>
 <summary>Prefer Terminal? One command does the same as step 3</summary>
@@ -97,6 +101,27 @@ Click the envelope in the tray to see the latest emails in your inbox, with filt
 
 ---
 
+## Zones
+
+Zones lets you place windows without resizing them by hand. Turn it on in the welcome, or in *Settings → General → What Cala does*.
+
+1. **Drag a window** by its title bar.
+2. **While you hold the button, right-click** (or **hold Shift**). Your zones appear on that monitor.
+3. **Move over a zone and release.** The window takes its position and size.
+
+Hold **⌘** to cover several neighbouring zones at once. Right-click again, release Shift, or release outside every zone to cancel: the window stays where you dropped it. Drag a snapped window out and it gets its old size back.
+
+- **Layouts:** eight ready-made ones (two and three columns, a 2 × 2 grid, main + side, two rows...) and as many of your own as you like. Draw them in the editor (*Settings → Zones → Edit zones…*, or the Cala icon in the menu bar): drag to draw, move and resize with guides that snap to the other zones, an optional 12-division grid and one layout per monitor (or none).
+- **Without the bar:** turn the bar off in *Settings → General* and Cala lives in the menu bar, with no taskbar and no reserved space. The Dock and menu bar stay as macOS has them.
+- **With the bar:** zones never go under the bar when it is always visible.
+- **Permission:** only **Accessibility**. Zones never records the screen or reads the keyboard.
+- **macOS 15 and later** can also tile a window dropped near a screen edge. If that gets in the way, turn off *Drag windows to screen edges to tile* in *System Settings → Desktop & Dock → Windows* (*Settings → Zones* has a button).
+- If a right-click ever misbehaves while dragging, choose **Hold Shift** in *Settings → Zones → Activate zones with*.
+
+More in [docs/zones.md](docs/zones.md).
+
+---
+
 ## Permissions
 
 <img src="docs/images/permissions.jpg" alt="Permissions in the welcome window" width="380" align="right">
@@ -105,7 +130,7 @@ Cala asks for each permission with a sentence on what it is for and a button tha
 
 | Permission | What for | If you skip it |
 |---|---|---|
-| **Accessibility** | See, focus, minimize and close windows; Option+Tab | The bar still opens your apps, without managing windows |
+| **Accessibility** | See, focus, minimize and close windows; Option+Tab; move windows into zones | The bar still opens your apps, without managing windows; Zones cannot move windows |
 | **Screen Recording** | Window thumbnails | No thumbnails. Cala never records or sends your screen |
 | Calendar | Upcoming events and the Join button | The clock shows no events |
 | Location | macOS only reveals Wi‑Fi network names with this permission | No network names |
@@ -115,7 +140,7 @@ Cala asks for each permission with a sentence on what it is for and a button tha
 
 For **Accessibility** and **Screen Recording**, macOS opens a list: turn on **Cala** (it asks for Touch ID or your password). If macOS offers **Quit & Reopen** after Screen Recording, accept it.
 
-Said no to something? Everything else keeps working. Turn it on whenever you like in **Settings → Permissions** (right-click an empty part of the bar → Settings…).
+Only the permissions of the modules you use are requested: **Zones alone needs just Accessibility**. Said no to something? Everything else keeps working. Turn it on whenever you like in **Settings → Permissions** (right-click an empty part of the bar → Settings…, or the Cala icon in the menu bar).
 
 <br clear="right">
 
@@ -127,7 +152,8 @@ After each Cala update, macOS shows *"Cala wants to access key "Cala Mail" in yo
 
 ## Everyday use
 
-- **Settings**: right-click an empty part of the bar → *Settings…*, or open Cala again from Applications.
+- **Settings**: right-click an empty part of the bar → *Settings…*, or click the Cala icon in the menu bar (shown when the bar is off or Zones is on), or open Cala again from Applications.
+- **Modules**: *Settings → General → What Cala does* has one switch each for Bar, Tray, Window switcher and Zones; they start and stop at once. The Tray lives inside the Bar. If you were already using Cala, nothing changed: Bar, Tray and switcher stay on and Zones is off until you turn it on.
 - **Open at login**: chosen in the welcome or in *Settings → General*. It shows up in *System Settings → General → Login Items*.
 - **Language**: English or Spanish, following your Mac by default. Change it in *Settings → General → Language*.
 - **Hide the macOS Dock**: *Settings → General*. Turning it off, or quitting Cala, brings the Dock back exactly as it was.
@@ -149,6 +175,7 @@ Nothing leaves your Mac unless you send it. *Report a problem* shows you exactly
 
 - **"Cala can't be opened" / "Apple could not verify…"**: that is the one-time block; see step 3 of [Install](#install), or install with the Option 1 command, which avoids it.
 - **No thumbnails**: turn on Screen Recording in *Settings → Permissions*.
+- **Zones does nothing**: it needs Accessibility (*Settings → Permissions*); it starts by itself once you allow it. Check that Zones is on in *Settings → General → What Cala does*.
 - **The Dock disappeared**: Cala only hides it if you asked. Turn it off in *Settings → General*, or quit Cala.
 - **macOS asks for my Mac password for "Cala Mail"**: it is expected after each update; see [The Keychain prompt](#the-keychain-prompt-mail). Type your Mac password and choose **Always Allow**; it goes to macOS, not to Cala.
 - **Something is wrong**: right-click the bar → *Report a problem…*, or open an [issue](https://github.com/MineiToshio/cala-taskbar/issues).

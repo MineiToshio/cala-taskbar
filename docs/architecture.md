@@ -1,12 +1,18 @@
 # Architecture
 
-Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 14+. SwiftPM executable target `Cala`. AppKit for windows and events, SwiftUI inside `NSHostingView` for the UI. About 5,300 lines across the 17 Swift sources (including comments and blank lines).
+Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 14+. SwiftPM executable target `Cala`. AppKit for windows and events, SwiftUI inside `NSHostingView` for the UI. About 22,000 lines across 69 Swift sources (including comments and blank lines). Cala is a set of **modules** (Bar, Tray, Switcher, Zones) that start and stop on their own: see [Modules](#modules).
 
 ## Source layout (`Sources/Cala/`)
 
 | File | Role |
 |---|---|
-| `main.swift` | `BarPanel`, `Bar` (one per screen), `AppDelegate`: panels, tick loop, click/scroll handling, menus, show desktop, space reservation |
+| `main.swift` | `AppDelegate` (launch, SIGTERM, welcome, reopen), the `--snapshot` renderer and the app entry point. No bar logic |
+| `ModulePlan.swift` | Pure module logic (Foundation only, checked): `ModuleID`, `ModuleSet`, the `CalaModule` protocol, migration rule, start/stop order, which permissions a set needs, welcome pages, startup log line |
+| `ModuleRegistry.swift` | `ModuleRegistry`: main-thread owner of the modules, applies a `ModuleSet` live, shared thumbnail watcher, shutdown |
+| `StatusItem.swift` | Menu-bar status item (Settings…, Zones editor…, layout per monitor, Quit) shown when the Bar is off or Zones is on |
+| `BarModule.swift` | `BarModule` and `BarController`, plus `BarPanel` and `Bar` (one per screen): panels, tick loop, click/scroll handling, menus, show desktop, space reservation |
+| `TrayModule.swift` | `TrayModule`: starts and stops the tray's services (Wi-Fi, calendar, system monitor, usage, mail) inside the running bar |
+| `Zones/*.swift` | The Zones module, see [Zones](#zones) |
 | `BarView.swift` | Bar UI: icons, start button, tray, clock, desk strip, badges; frame reporting |
 | `CalendarEvents.swift` | Lazy EventKit service, permission lifecycle, calendar/event value snapshots and safe navigation |
 | `CalendarViews.swift` | Upcoming event list and Calendar settings section, sharing flyout styles |
@@ -43,10 +49,63 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `Badges.swift` | Reads notification badges from the Dock's accessibility tree |
 | `Config.swift` | `Config` (JSON) and `ConfigStore`; `NSScreen.key` (display UUID) |
 | `Theme.swift` | `BarTheme` (nine themes), `themeAccent`, shared `FlyoutStyle`, `flyoutSection()` and `themedPanel()` modifiers |
-| `SettingsWindow.swift` | Settings window (SwiftUI in an `NSWindow`), its nine panes, `LoginItem` |
+| `SettingsWindow.swift` | Settings window (SwiftUI in an `NSWindow`), its ten panes (those of a module that is off are hidden), the "What Cala does" module switches, `LoginItem` |
+| `Onboarding.swift` | First-run welcome: "What do you want to use?", only the permissions that choice needs, optional extras, open at login |
 | `Switcher.swift` | Window switcher: `CGEventTap`, window ordering, panel and cards |
 | `MenuBarControl.swift` | Hide / restore the macOS menu bar (auto-hide preferences + live-apply notifications) |
 | `DockControl.swift` | Hide / restore / adopt the native Dock through `CFPreferences` |
+
+## Modules
+Cala is four modules behind one protocol (`CalaModule`: `id`, `isRunning`, `start()`, `stop()`):
+
+| Module | Owns |
+|---|---|
+| **Bar** (`BarModule` → `BarController`) | One panel per screen, the tick timer, the local event monitors, previews and peek, show desktop, space reservation, Dock and menu-bar hiding, the screen-change observer |
+| **Tray** (`TrayModule`) | Wi-Fi, calendar, system monitor, disk, usage, mail, menu-bar icon hiding and the flyouts. **Depends on the Bar**: it only runs inside a running bar |
+| **Switcher** (`WindowSwitcher`) | The Option+Tab (and optional Cmd+Tab / Cmd+M) `CGEventTap`, its 3 s retry timer, its panel |
+| **Zones** (`ZonesModule`) | The drag tap and its thread, the worker queue, the overlay panels, the zones store; see [Zones](#zones) |
+
+**Registry.** `ModuleRegistry` (main thread only) holds the desired `ModuleSet` (keys `barEnabled`, `switcherEnabled`, `trayEnabled`, `zonesEnabled` in `config.json`) and reconciles reality with it. A sink on `ConfigStore` re-applies whenever those keys change, so a Settings switch takes effect live. Applications are serialized: a change that arrives while one is running is coalesced and applied right after, using the latest value. `ModulePlan.effective` turns the tray off when the bar is off. `ModulePlan.startOrder` stops in the order Zones, Tray, Switcher, Bar and starts in the order Bar, Tray, Switcher, Zones, so the tray never outlives its bar.
+
+**A stopped module holds nothing:** no monitors, timers, observers, event taps or windows (each module's `stop()` removes the ones its `start()` created; the debug log shows `module X: stopped`). The only things that outlive modules are the shell: `ConfigStore`, `PermissionCenter`, the Settings and welcome windows, feedback and crash reporting, the watchdog, the login item, the SIGTERM source and the status item controller.
+
+**Shared thumbnail watcher.** `MinimizeWatcher` (AX observers and the 3 s sync timer) runs while the Bar **or** the Switcher runs (`ModulePlan.needsThumbnails`), because both need minimized-window thumbnails; it is created and torn down by the registry, not by either module.
+
+**Dock and menu bar.** Hiding the macOS Dock and menu bar belongs to the Bar: `BarModule.start()` applies them, `stop()` restores them (on a real quit, according to `restoreDockOnQuit` / `restoreMenuBarOnQuit`). When Cala launches with the Bar off it touches nothing, except that it undoes a hidden Dock or menu bar a crash left behind (`DockControl.restoreAfterCrashIfNeeded`, `MenuBarControl.onBarStop`). Tray off restores any hidden macOS menu-bar icons.
+
+**Status item.** `StatusItemController` shows a menu-bar icon when `!bar || zones` (so someone running only Zones or only the Switcher always has Settings and Quit), and removes it otherwise. Its menu is rebuilt each time it opens: Settings…, a Zones section (Zones editor… and one "Layout · monitor" submenu per screen when the module runs; the editor alone, with the layouts disabled, when it does not), Report a Problem… when there is no bar, Quit Cala.
+
+**Startup and migration** (`ModulePlan.resolve`, pure and checked by `scripts/check-modules.sh`):
+- Keys already stored (`modulesChosen`) win.
+- An existing user (`onboardingCompleted`, or a `config.json` that existed at launch plus Accessibility, unless a first-run welcome was left unanswered) is migrated: Bar and Tray on, Switcher as stored (an old `switcherEnabled = false` is kept), Zones off, welcome not shown. Nothing is renamed: the new keys are added and `modulesChosen` is set.
+- A fresh install runs **nothing** until the welcome's "What do you want to use?" is answered (Bar, Zones or both, at least one). The answer writes the module keys; `onboardingPending` (UserDefaults) marks an unanswered welcome, and `onboardingCompleted` is written only when the answer is saved, so quitting before choosing shows the welcome again. Only the chosen modules' permissions are requested.
+- At launch the registry logs one line to the debug log: `modules: active=bar,switcher,tray off=zones source=migrated` (`source` is `stored`, `migrated` or `provisional (waiting for onboarding)`). Live changes log `modules: apply active=… off=… reason=…` and `module <id>: started` / `stopped`.
+
+## Zones
+Files in `Sources/Cala/Zones/`. The first group is pure (Foundation and CoreGraphics only) and compiled by `scripts/check-zones.sh`; the rest is AppKit.
+
+| File | Role |
+|---|---|
+| `ZoneModel.swift` | `ZoneRect` (fractions), `Zone`, `ZoneLayout`, `ZonesState`, `ZoneActivation`, repair on load, duplicate and delete rules |
+| `ZoneGeometry.swift` | Usable rectangle, fraction ↔ frame, gap insets, AppKit ↔ Accessibility flips, screen for a point, clamping |
+| `ZonePicking.swift` | Zones under a point, the overlap rule, ⌘ span, the target frame, editor hit-testing and handles |
+| `ZoneSnapping.swift` | Editor snapping candidates (edges, centre, 12-grid), move, resize and draw operations, guides |
+| `ZoneTemplates.swift` | The eight templates and the first-run seed |
+| `ZoneRestore.swift` | Snap records (bounded to 200), "still snapped?" and the restored frame that keeps the grab point |
+| `ZoneDisplayKeys.swift` | Display key suffixes for identical monitors |
+| `ZoneDragMachine.swift` | The pure drag state machine (idle / pressed / dragging, right-click toggle, Shift, ⌘, swallow rules), the ⌘ span anchor, window fitting |
+| `ZonesStore.swift` | `zones.json` load, repair, `.bad` backup, atomic writes, layout CRUD, per-display assignment, editor merge |
+| `ZoneDisplays.swift` | `NSScreen` ↔ display keys (reuses `NSScreen.key`) |
+| `ZoneDragTap.swift` | The active `CGEventTap` on its own thread and run loop, with an O(1) callback |
+| `ZoneWindowMover.swift` | Worker: window lookup, drag confirmation, AX resolution and eligibility, snap, restore |
+| `ZoneOverlay.swift` | Click-through per-screen panels drawn with `CAShapeLayer`s |
+| `ZonesModule.swift` | The module: lifecycle, session, status menu items, tap retry |
+| `ZoneEditor.swift`, `ZoneEditorCanvas.swift`, `ZoneEditorHUD.swift` | The editor window, its canvas (AppKit input, SwiftUI drawing) and its panel |
+| `ZonesSettingsPane.swift` | Settings → Zones |
+
+**Threads.** The tap callback runs on the dedicated thread `Cala.zones.tap` and only updates a small state under an `OSAllocatedUnfairLock` and hands off with `async`: no Accessibility calls, no `CGWindowList`, no logging. Every `CGWindowList` and AX call (find the window under the press, confirm the drag, resolve the AX element, snap, restore) runs on the serial queue `Cala.zones.worker`. Main owns the overlay, the store, the editor and the status menu, and receives the pointer as one coalesced update. A press generation counter makes stale worker results harmless; stopping the module cancels the worker (`ModuleCancellation`) and disables, invalidates and joins the tap thread. Details and the permission analysis are in [zones.md](zones.md).
+
+**Data flow of one drag.** left-down → tap (state + `press` to worker) → worker records the window under the point → left-dragged (coalesced) → worker re-reads its bounds, confirms a move of ≥ 3 pt with unchanged size, resolves AX and may restore a snapped window's size → `confirmDrag` promotes the press → right-down (swallowed) or Shift in the event flags turns zones mode on → main shows the overlay and updates the target from the pointer → left-up (always passed through) → main picks the final zone and the worker snaps 40 ms later.
 
 ## Panels
 - Bars are borderless `NSPanel`s: `nonactivatingPanel`, level `.statusBar`, `canJoinAllSpaces`, `fullScreenAuxiliary`, `stationary`. `BarPanel` never becomes key or main, so clicking it never steals focus.
@@ -91,7 +150,7 @@ Hiding apps with `NSRunningApplication.hide()` proved unreliable (System Setting
 `SettingsWindowController` creates one `NSWindow` (titled, full-size content view, transparent titlebar) hosting `SettingsView` (sidebar + `PaneBody`). It follows the system appearance, not the bar theme. Bindings write to `ConfigStore` (Usage folder drafts apply on submit or focus loss), which saves atomically and publishes, so the bars update live. Decoding recovers missing or mistyped fields individually and clamps the bar's numeric preferences to supported ranges; the Dock backup fields are kept verbatim. A file that cannot be decoded is preserved as `config.json.bad`; if preservation fails, saves are disabled to avoid overwriting it. Dock adoption is skipped after a load failure or recovery of invalid fields. Launch flags: `--settings` opens it at start; `--snapshot <dir>` renders each pane to PNG with `ImageRenderer` and exits (native controls appear as placeholders in those images).
 
 ## Window switcher
-`WindowSwitcher` installs a `CGEventTap` (HID level, head insert, active filter, main run loop) for keyDown/keyUp/flagsChanged; it needs Accessibility. `ensureTap()` runs at launch and every 3 s, retries enabling a disabled tap, and removes the run-loop source and invalidates/recreates the port if it is invalid or cannot be enabled. Timeout/user-input disable notifications cancel an active switcher before recovery.
+`WindowSwitcher` is the Switcher module: `start()` installs a `CGEventTap` (HID level, head insert, active filter, main run loop) for keyDown/keyUp/flagsChanged; it needs Accessibility. `stop()` cancels any open switcher, removes the tap, the retry timer and the panel. While it runs, `ensureTap()` runs at start and every 3 s, retries enabling a disabled tap, and removes the run-loop source and invalidates/recreates the port if it is invalid or cannot be enabled. Timeout/user-input disable notifications cancel an active switcher before recovery.
 
 The callback decides which events to swallow and defers switcher actions to the main queue. Window collection runs on a background queue with one collection in flight; generation checks discard canceled results, and navigation / modifier release received during collection are applied when it completes. While it is active, only Tab, Shift+Tab, arrows, Esc, Return, Backspace and typed letters/digits/space// pressed with the trigger modifier still held are swallowed; the release is recorded synchronously in the callback, so from then on every key (including during a slow collection, whose pick is committed when the list arrives) reaches the app. Only keyUps matching swallowed keyDowns are swallowed, including after the panel closes; the set is cleared whenever the tap is re-enabled or recreated, and a passed-through non-repeat keyDown drops its keycode from it. Option+Tab (or optionally Cmd+Tab) opens it, navigation changes the selection, and releasing the trigger modifier commits. The list comes from `CGWindowListCopyWindowInfo(onScreenOnly)` z-order matched to AX windows, followed by remaining AX windows of regular apps (including minimized windows and windows on other Spaces), capped at 20. Thumbnails use `ThumbCache`; picking calls `WindowService.raise`.
 
@@ -100,7 +159,7 @@ Inside the open switcher, typed characters (read with `NSEvent.charactersIgnorin
 Cmd+M interception is enabled only with the switcher setting. The callback only checks that another app is frontmost, swallows the key (repeats included) and moves the work to a background queue: it checks the focused window, a false fullscreen attribute and an enabled AX minimize button (0.25 s messaging timeout per element), then calls `WindowService.minimize` (snapshot, then minimize; pressing the button if the window id is unknown). If a check fails or times out before acting, the original Cmd+M is re-posted to the app with `postToPid`, tagged through `eventSourceUserData` so the tap ignores it. Once the minimize is issued nothing is re-posted, even on a timeout (unknown result), so one Cmd+M never minimizes two windows. The global AX messaging timeout is also set to 0.25 s at launch; helpers can use a more specific timeout.
 
 ## Hiding the Dock
-`DockControl` writes `autohide=true` and `autohide-delay=1000` in `com.apple.dock` with `CFPreferencesSetValue`, then runs `killall Dock`. The first time it saves the previous values in `config.json`; restoring writes them back (nil removes the key). At a fresh process launch it re-applies the choice or adopts an already-hidden Dock; reopening the running instance only shows Settings. On quit it restores when `restoreDockOnQuit` is on. A main-queue DispatchSource handles SIGTERM by calling `NSApp.terminate`, so normal termination cleanup also runs for that signal; crashes and force-quit cannot run it.
+This belongs to the Bar module (see [Modules](#modules)). `DockControl` writes `autohide=true` and `autohide-delay=1000` in `com.apple.dock` with `CFPreferencesSetValue`, then runs `killall Dock`. The first time it saves the previous values in `config.json`; restoring writes them back (nil removes the key). At a fresh process launch it re-applies the choice or adopts an already-hidden Dock; reopening the running instance only shows Settings. On quit it restores when `restoreDockOnQuit` is on. A main-queue DispatchSource handles SIGTERM by calling `NSApp.terminate`, so normal termination cleanup also runs for that signal; crashes and force-quit cannot run it.
 
 ## Space reservation
 Only when auto-hide is off and only on the primary screen: every 0.6 s, if the focused window extends below the bar top, its height is reduced through AX. Skips full-screen windows and does nothing while a mouse button is pressed. Window IDs whose resized height fails a delayed verification are remembered and skipped for the rest of the process lifetime. This is an approximation, not a true reserved area.
@@ -128,7 +187,7 @@ The monitor tracks continuous critical memory pressure and thermal state separat
 
 `RestartAdvisor.swift` bounds the reasons viewport and shows a scroll hint when reasons extend below it. The permission message and action buttons sit outside the scroll area.
 
-`scripts/check-rules.sh` compiles the pure sources with `CalendarText.swift` and `Checks/SystemRules/main.swift` using `swiftc`, and `PanelPolicy.swift` with `Checks/PanelDismiss/main.swift`. `scripts/check-mail.sh` compiles `MailMIME`, `MailIMAP`, `MailService`, `AppPaths` and `CalendarText` with `Checks/MailParsing/main.swift`; `MailMIME.swift` must only import Foundation. The checks live outside the SwiftPM executable target. The debug `--render-system <dir>` entry point runs before `AppDelegate` and uses `NSHostingView` to capture the fixtures as PNGs.
+`scripts/check-rules.sh` compiles the pure sources with `CalendarText.swift` and `Checks/SystemRules/main.swift` using `swiftc`, and `PanelPolicy.swift` with `Checks/PanelDismiss/main.swift`. `scripts/check-mail.sh` compiles `MailMIME`, `MailIMAP`, `MailService`, `AppPaths` and `CalendarText` with `Checks/MailParsing/main.swift`; `MailMIME.swift` must only import Foundation. `scripts/check-modules.sh` compiles `ModulePlan.swift` alone (it must only import Foundation) with `Checks/Modules/main.swift`: migration, effective set, start/stop order, permissions, welcome choice and the startup line. `scripts/check-zones.sh` compiles the pure Zones sources (`ZoneModel`, `ZoneGeometry`, `ZonePicking`, `ZoneSnapping`, `ZoneTemplates`, `ZoneRestore`, `ZonesStore`, `ZoneDisplayKeys`, `ZoneDragMachine`, plus `AppPaths`; Foundation and CoreGraphics only) with `Checks/Zones/main.swift`: geometry and coordinate flips, overlap and span, editor snapping, templates and repair, the drag state machine, and the store with a corrupt-file backup. The checks live outside the SwiftPM executable target. The debug `--render-system <dir>` entry point runs before `AppDelegate` and uses `NSHostingView` to capture the fixtures as PNGs.
 
 ## Code signing and permissions
 Ad-hoc signed with a fixed designated requirement (`designated => identifier "local.cala"`) so macOS keeps Accessibility / Screen Recording grants across rebuilds. Without it, every rebuild invalidates the grants. Private CoreGraphics cursor symbols are resolved with checked `dlopen` / `dlsym`, rather than mandatory link-time symbols.
@@ -139,7 +198,7 @@ Ad-hoc signed with a fixed designated requirement (`designated => identifier "lo
 `LSUIElement` (no Dock icon), `NSScreenCaptureUsageDescription`, `NSLocationWhenInUseUsageDescription`, `NSLocationUsageDescription`, `NSBluetoothAlwaysUsageDescription`, `NSCalendarsFullAccessUsageDescription`, `NSCalendarsUsageDescription`. A missing Bluetooth key makes the app crash on launch (TCC violation).
 
 ## Debug log
-`~/Library/Application Support/Cala/debug.log` records clicks (app, window count, trust state), close attempts, show-desktop passes and diagnostics, without window titles or window dumps. Writes are serialized on a dedicated queue; when the existing file exceeds 1,000,000 bytes it rotates to `debug.log.1`, replacing the previous backup.
+`~/Library/Application Support/Cala/debug.log` records the `modules:` and `module …:` lines, `zones:` lines (layouts loaded, tap state, snaps, ignored drags), clicks (app, window count, trust state), close attempts, show-desktop passes and diagnostics, without window titles or window dumps. Writes are serialized on a dedicated queue; when the existing file exceeds 1,000,000 bytes it rotates to `debug.log.1`, replacing the previous backup.
 
 ## Reopen behavior
 `applicationShouldHandleReopen` opens the Settings window, so launching the app again (Spotlight, Launchpad) while it runs gives access to the settings and the Quit button.

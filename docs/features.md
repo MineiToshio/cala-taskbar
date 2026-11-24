@@ -1,5 +1,24 @@
 # Features
 
+## Modules
+Cala is a set of four modules. Each one starts and stops on its own, live, from Settings → General → **What Cala does**; a stopped module holds no event taps, timers, observers or windows.
+
+| Module | What it is | Permissions |
+|---|---|---|
+| **Bar** | The taskbar at the bottom of every screen (everything under "Bar basics" onwards) | Accessibility, Screen Recording |
+| **Tray** | The right side of the bar: Wi-Fi, sound, battery, disk, calendar, usage, mail. Needs the Bar (its switch is disabled while the Bar is off) | Optional ones asked when used |
+| **Switcher** | Option+Tab (optionally Cmd+Tab) window switcher | Accessibility, Screen Recording |
+| **Zones** | Drag a window and drop it into a zone of a layout. See [zones.md](zones.md) | Accessibility only |
+
+- **First run.** The welcome asks "What do you want to use?" (Bar, Zones, or both; at least one). Choosing Bar turns on the Bar, its tray and the switcher. Both boxes start unchecked. Nothing runs, and nothing is requested, until you answer, and only the permissions the chosen modules need are asked for. Until then only the menu-bar icon (Settings…, Quit) is there, and quitting before answering shows the welcome again.
+- **Upgrading.** Existing users keep exactly what they had: Bar, Tray and Switcher on (a switcher you had turned off stays off), Zones off, no welcome. No setting was renamed.
+- **Bar off.** No bar is created and no space is reserved; the macOS Dock and menu bar are left alone (and put back if a crash left them hidden). Cala lives in the menu bar: a status icon with **Settings…**, **Zones editor…**, one layout menu per monitor, **Report a Problem…** and **Quit Cala**. The same icon also shows while the Bar is on if Zones is on. Someone who only wants zones turns the Bar off and has nothing else on screen.
+- **Settings follows the modules.** The Appearance and Screens panes need the Bar, Tray, Usage, Calendar and Mail need the Tray; they are hidden while those are off. General, Zones, Permissions and Advanced are always there.
+- The debug log starts each launch with `modules: active=… off=… source=…`, and each live change logs `module <name>: started` or `stopped`.
+
+## Zones
+Drag a window of another app by its title bar, **right-click or hold Shift** to show the zones of that monitor, and release over one: the window takes its position and size (with a configurable gap). Hold **⌘** to cover several adjacent zones; drag a snapped window out and it gets its old size back. Layouts are named sets of free rectangles (overlap allowed, smallest zone wins), eight templates come built in, you can draw your own in a full-screen editor (snap guides, optional 12-division grid), and every monitor has its own layout or none. Zones needs only Accessibility. Everything is described in [zones.md](zones.md), including the gesture prototype's one still-unmeasured result and a manual test checklist.
+
 ## Bar basics
 - One bar per screen, at the bottom, above normal windows (status-bar level), on every Space.
 - **Icons only.** The app name and window previews show on hover.
@@ -33,8 +52,9 @@
 Hide automatically, Theme (submenu), Transparency (submenu), **Configuración…** (opens the Settings window). There is deliberately no Quit here, so nobody exits by accident.
 
 ## Settings window
-Sidebar with nine sections (General, Appearance, Screens, Tray, Usage, Calendar, Mail, Permissions, About); every change applies instantly (no save button).
-- **General:** auto-hide; window switcher (Option+Tab, optional Cmd+Tab); open at login (System Settings → Login Items); hide the macOS Dock (with "return the Dock when the bar quits"); preview delay.
+Sidebar with ten sections (General, Zones, Appearance, Screens, Tray, Usage, Calendar, Mail, Permissions, Advanced; the ones whose module is off are hidden); every change applies instantly (no save button).
+- **General:** language; **What Cala does** (one switch each for Bar, Tray, Window switcher and Zones, with the permissions the running modules still miss); open at login (System Settings → Login Items); while the Bar is on, auto-hide, the macOS Dock (with "return the Dock when the bar quits") and menu bar options and preview delay; Cmd+Tab replacement while the switcher is on.
+- **Zones:** module switch, gesture (right-click, Shift or both), gap, the layout shown on each monitor, **Edit zones…** and a note about macOS's own edge tiling.
 - **Appearance:** live mock-up of the bar; nine theme swatches; transparency; icon size; preview size.
 - **Screens:** one card per connected screen with an icon-alignment picker (drawn as small diagrams).
 - **Usage:** AI usage indicator switches, custom Claude/Codex folders, optional Claude Code statusLine (see below).
@@ -51,7 +71,7 @@ Like Cmd+Tab, but **per window instead of per app**: two windows of the same edi
 - Hold **Option** and press **Tab**: a panel with one thumbnail card per window (app icon + title), most recently used first, minimized windows included. The first Tab selects the previous window.
 - Tab / right / down = next; Shift+Tab / left / up = previous; click a card to pick it; Esc cancels; releasing Option opens the selected window. These keys belong to the switcher only while Option is held: plain Tab and anything typed after releasing Option go to the app, even if the window list is still loading.
 - While the switcher is open: **W** closes the selected window, **Q** quits its app, **M** minimizes or restores it (the card stays in the list). **Type** any letters to filter by window title or app name (Backspace edits, Esc clears the search first, then cancels); once a search has started W/Q/M are just letters, and `/` starts a search explicitly so you can look for a name that begins with w, q or m.
-- Optional **Cmd+Tab replacement** (Settings → General → Cambiar de ventana): the app intercepts Cmd+Tab before macOS and shows this switcher instead.
+- Optional **Cmd+Tab replacement** (Settings → General → Switch windows): the app intercepts Cmd+Tab before macOS and shows this switcher instead.
 - Uses the active theme. Needs Accessibility. Up to 20 windows: current-Space windows in front-to-back order first, followed by other windows reported by Accessibility, including minimized windows and windows on other Spaces. Picking one on another Space can switch Spaces.
 
 ## Notification badges
@@ -197,7 +217,7 @@ For sustained CPU load, the message distinguishes how long the Mac has been busy
 The panel’s **Cerrar** button is available for a single eligible app instance and asks for confirmation. For a standalone tool with a known launcher, **Ir a** brings that app forward. Memory guidance prefers the largest eligible app and shows its footprint.
 
 ## Checking the system panel
-From the repository root, run `scripts/check-rules.sh` (system rules and panel policy) and `scripts/check-mail.sh` (mail parsing) to check the rules with `swiftc`. To render the sample panels in light and dark mode, build and run the debug executable:
+From the repository root, run `scripts/check-rules.sh` (system rules and panel policy), `scripts/check-mail.sh` (mail parsing), `scripts/check-modules.sh` (module plan: migration, start/stop order, permissions) and `scripts/check-zones.sh` (zones geometry, picking, snapping, drag state machine and store) to check the rules with `swiftc`. To render the sample panels in light and dark mode, build and run the debug executable:
 
 ```sh
 swift build && .build/debug/Cala --render-system "$TMPDIR/cala-system" -AppleLanguages '(es)'

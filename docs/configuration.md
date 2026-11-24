@@ -4,7 +4,7 @@ File: `~/Library/Application Support/Cala/config.json`. Created on first run and
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `pinned` | array of bundle IDs | Finder, Chrome, Zed, Slack, Spotify | Pinned apps |
+| `pinned` | array of bundle IDs | Finder, Safari, System Settings (`com.apple.finder`, `com.apple.Safari`, `com.apple.systempreferences`) | Pinned apps (any not installed are skipped) |
 | `order` | array of ids | `[]` | Custom icon order set by dragging (ids not listed keep their natural place) |
 | `autoHide` | bool | `true` | Hide the bar until the mouse touches the bottom edge |
 | `iconSize` | number | `28` | Icon size in points, 20–44 (bar height = size + 20) |
@@ -29,7 +29,7 @@ File: `~/Library/Application Support/Cala/config.json`. Created on first run and
 | `diskFolders` | array of paths | `[]` | Extra folders measured in the storage panel (`~` allowed) |
 | `barOpacity` | number | `1` | Bar background opacity (1 = solid, 0.2 = very transparent) |
 | `hideNativeDock` | bool | `false` | Keep the macOS Dock hidden while the bar runs |
-| `switcherEnabled` | bool | `true` | Option+Tab window switcher |
+| `switcherEnabled` | bool | `true` | The Switcher module (Option+Tab). Off: no event tap at all, and Cmd+M interception goes with it |
 | `switcherReplaceCmdTab` | bool | `false` | Also take over Cmd+Tab |
 | `restoreDockOnQuit` | bool | `true` | Give the Dock back when the bar quits |
 | `dockBackupSaved`, `dockBackupAutohide`, `dockBackupDelay` | internal | | Original Dock values, used to restore it exactly. Do not edit |
@@ -50,7 +50,26 @@ Example:
 
 Find an app's bundle ID: `osascript -e 'id of app "Notes"'`.
 
-Not in `config.json`: the login item lives in System Settings → General → Login Items (SMAppService), and the welcome-done flag in the app's UserDefaults (`onboardingCompleted`).
+Not in `config.json`: the login item lives in System Settings → General → Login Items (SMAppService), and the welcome state in the app's UserDefaults (domain `local.cala`): `onboardingCompleted` (written when the "What do you want to use?" answer is saved, or for an upgrade) and `onboardingPending` (a first-run welcome was shown and not answered yet; cleared when it is).
+
+The module keys and the Zones keys are in [Modules and Zones](#modules-and-zones) below.
+
+## Modules and Zones
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `modulesChosen` | bool | `false` | The module keys below are final. `false` means Cala has not decided yet: an existing user is migrated (Bar, Tray and Switcher on as stored, Zones off) and a first-run user sees the welcome's "What do you want to use?" and nothing runs meanwhile |
+| `barEnabled` | bool | `true` | Bar module. Off: no bar, no reserved space, the macOS Dock and menu bar left alone, status item in the menu bar |
+| `trayEnabled` | bool | `true` | Tray module. Only effective while the Bar is on (the stored value is kept) |
+| `switcherEnabled` | bool | `true` | Switcher module (see the main table) |
+| `zonesEnabled` | bool | `false` | Zones module. Off: no event tap, no zones, `zones.json` is not read |
+| `zonesActivation` | string | `"both"` | How zones mode starts during a window drag: `rightClick`, `shift` or `both`. Any other value becomes `both` |
+| `zonesGap` | number | `8` | Space in points left around each snapped window, 0–40 (clamped; a non-number becomes 8) |
+| `zonesEditorGrid` | bool | `false` | The zones editor snaps to a 12-division grid as well |
+
+The effective set is computed from these: the tray runs only if the bar does. The welcome's answer writes `modulesChosen` and the four module keys; the migration of an existing user writes them too. No existing key was renamed.
+
+The zones themselves (layouts, per-monitor assignment) are not in `config.json`: they live in `~/Library/Application Support/Cala/zones.json`, described in [zones.md](zones.md#storage-zonesjson). A zones file that cannot be decoded is kept as `zones.json.bad` and the templates are seeded again.
 
 ## Usage settings
 
