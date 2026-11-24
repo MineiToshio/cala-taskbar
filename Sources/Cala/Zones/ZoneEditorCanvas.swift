@@ -27,6 +27,10 @@ struct ZoneEditorScene: View {
                         .padding(.top, usable.minY)
                         .allowsHitTesting(false)
                 }
+                if session.dialog == nil, session.preview == nil, let bar = selectionBarCenter(screen: proxy.size) {
+                    ZoneSelectionBar(session: session)
+                        .position(bar)
+                }
                 if session.dialog != nil {
                     Color.black.opacity(0.32)
                         .onTapGesture {}
@@ -54,6 +58,28 @@ struct ZoneEditorScene: View {
             .coordinateSpace(name: coordinateSpace)
             .environment(\.colorScheme, scheme)
         }
+    }
+}
+
+extension ZoneEditorScene {
+    /// Where the selection's action bar sits: centred near the bottom inside the selection, or just below it when
+    /// the selection is short, kept on the usable area and clear of the panel.
+    fileprivate func selectionBarCenter(screen: CGSize) -> CGPoint? {
+        guard let zones = session.layout?.zones else { return nil }
+        let chosen = zones.filter { session.selection.contains($0.id) }.map(\.rect)
+        guard let first = chosen.first else { return nil }
+        let box = chosen.dropFirst().reduce(first) { a, b in
+            let x = min(a.x, b.x), y = min(a.y, b.y)
+            return ZoneRect(x: x, y: y, w: max(a.maxX, b.maxX) - x, h: max(a.maxY, b.maxY) - y)
+        }
+        let frame = ZoneGeometry.axRect(fromAppKit: ZoneGeometry.frame(for: box, in: session.usable), primaryHeight: screen.height)
+        let work = ZoneGeometry.axRect(fromAppKit: session.usable, primaryHeight: screen.height)
+        let half: CGFloat = 18
+        var y = frame.height >= 150 ? frame.maxY - 22 - half : frame.maxY + 10 + half
+        if y + half > work.maxY - 4 { y = frame.minY - 10 - half }
+        y = max(y, session.hudFrame.maxY + 10 + half)
+        let x = min(max(frame.midX, work.minX + 200), work.maxX - 200)
+        return CGPoint(x: x, y: min(y, work.maxY - 4 - half))
     }
 }
 

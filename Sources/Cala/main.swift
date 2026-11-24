@@ -96,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// `Cala --snapshot <dir>`: every Settings pane in the current language (the Zones pane reads zones.json directly for
 /// its per-monitor layout menus; no module starts), the General and Zones panes and the welcome's module question and zones-only permission page in English
-/// and Spanish, plus the zones editor (`zones-editor-en/es`) at 1512 × 982, as 2x PNGs. Views are drawn through an offscreen NSHostingView so AppKit controls (switches, menus,
+/// and Spanish, plus the zones editor (`zones-editor-en/es`, and `zones-editor-light-en/es` in the Snow theme) at 1512 × 982, as 2x PNGs. Views are drawn through an offscreen NSHostingView so AppKit controls (switches, menus,
 /// sliders) render as they do on screen.
 @MainActor
 enum Snapshots {
@@ -142,6 +142,8 @@ enum Snapshots {
             write(pane(.zones), "zones-\(code)", width: 640)
             try? ZoneEditor.renderSnapshot(to: URL(fileURLWithPath: "\(dir)/zones-editor-\(code).png"),
                                            size: CGSize(width: 1512, height: 982), scale: 2)
+            try? ZoneEditor.renderSnapshot(to: URL(fileURLWithPath: "\(dir)/zones-editor-light-\(code).png"),
+                                           size: CGSize(width: 1512, height: 982), scale: 2, theme: "snow")
         }
         appLanguageOverride = language
     }

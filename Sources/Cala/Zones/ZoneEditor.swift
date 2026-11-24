@@ -180,7 +180,7 @@ final class ZoneEditor: NSObject {
     }
 
     static func renderSnapshot(to url: URL, size: CGSize = CGSize(width: 1280, height: 800),
-                               scale: CGFloat = 1) throws {
+                               scale: CGFloat = 1, theme: String = "graphite") throws {
         let width = (size.width * scale).rounded()
         let height = (size.height * scale).rounded()
         guard size.width > 0, size.height > 0, scale > 0,
@@ -199,7 +199,7 @@ final class ZoneEditor: NSObject {
             state.layouts[index] = layout
         }
         state.defaultLayout = layout.id
-        let session = ZoneEditorSession(state: state, gridEnabled: true, theme: .named("graphite"))
+        let session = ZoneEditorSession(state: state, gridEnabled: true, theme: .named(theme))
         session.monitors = [.init(key: "sample", name: tx("Right display", "Pantalla derecha"), size: "1280 × 800"),
                             .init(key: "external", name: tx("Left display", "Pantalla izquierda"), size: "3840 × 1080")]
         let bounds = CGRect(origin: .zero, size: size)
@@ -208,7 +208,7 @@ final class ZoneEditor: NSObject {
         let usable = ZoneGeometry.usableRect(frame: bounds, visibleFrame: visible, barHeight: 34, barReserves: true)
         session.place(on: "sample", usable: usable, aspect: Double(size.width / size.height), selectLayout: true)
         session.selectedZone = selected
-        session.preview = .init(zoneID: selected, rect: overlap, guides: guides)
+        _ = guides   // the action bar shows only without a drag in progress
 
         // Give AppKit-backed controls the same backing scale as the SwiftUI canvas.
         let window = ZoneEditorSnapshotWindow(contentRect: bounds, styleMask: .borderless,
@@ -770,8 +770,8 @@ final class ZoneEditorSession {
     }
 
     var linkedMoveHint: String {
-        tx("Linked zones resize with dividers. Drop a zone on another to swap them, or switch to Free to place zones freely.",
-           "Las zonas unidas cambian de tamaño con los divisores. Suelta una zona sobre otra para intercambiarlas, o cambia a Libres para colocarlas donde quieras.")
+        tx("In Tiles, zones resize with the lines between them. Drop a zone on another to swap them, or switch to Free to place zones anywhere.",
+           "En Mosaico, las zonas cambian de tamaño con las líneas entre ellas. Suelta una zona sobre otra para intercambiarlas, o cambia a Libre para colocarlas donde quieras.")
     }
 
     func requestSize() {

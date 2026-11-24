@@ -1,25 +1,47 @@
 import SwiftUI
 
-/// The editor's single panel: the layout's name, a gallery of every layout pictured at this monitor's shape,
-/// the zone tools and Cancel / Save. Clicking a picture puts that layout on the canvas and makes it the one this
-/// monitor uses; there is no separate "layout" picker or "use on this monitor" step.
+/// Names for the two layout models. Stored values stay `linked` / `free`; people see "Tiles" / "Free".
+enum ZoneModeText {
+    static func name(_ mode: ZoneLayoutMode) -> String {
+        mode == .linked ? tx("Tiles", "Mosaico") : tx("Free", "Libre")
+    }
+
+    static func symbol(_ mode: ZoneLayoutMode) -> String {
+        mode == .linked ? "square.grid.2x2" : "square.on.square.dashed"
+    }
+
+    /// One line under the mode control.
+    static func summary(_ mode: ZoneLayoutMode) -> String {
+        mode == .linked ? tx("Zones cover the screen without overlapping.", "Las zonas cubren la pantalla sin solaparse.")
+            : tx("Place zones anywhere; they can overlap.", "Coloca zonas donde quieras; pueden solaparse.")
+    }
+}
+
+/// The editor's panel, in three bands: which layout (name, its menu, the monitor, help); the gallery of every
+/// layout pictured at this monitor's shape; and how to edit it (the mode and its tools) next to Cancel and Save.
+/// Actions on the selected zones float next to them on the canvas (`ZoneSelectionBar`). Rarely used commands
+/// (rename, duplicate, delete, restore, undo, redo, grid) live in the layout's "…" menu and keep their shortcuts.
 struct ZoneEditorHUD: View {
     let session: ZoneEditorSession
     @Environment(\.colorScheme) private var scheme
     @FocusState private var nameFocused: Bool
+    @State private var showsHelp = false
 
     var body: some View {
         if session.hudCollapsed {
-            collapseButton
-                .padding(7)
-                .themedPanel(radius: 10, theme: session.theme)
+            HStack(spacing: 8) {
+                collapseButton
+                saveButton
+            }
+            .padding(7)
+            .themedPanel(radius: 12, theme: session.theme)
         } else {
             expanded
         }
     }
 
     private var expanded: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             header
             ZoneEditorGallery(session: session)
             Divider()
@@ -27,44 +49,27 @@ struct ZoneEditorHUD: View {
         }
         .controlSize(.small)
         .buttonStyle(.bordered)
-        .frame(maxWidth: 980)
-        .padding(.horizontal, 14)
+        .frame(maxWidth: 1000)
+        .padding(.horizontal, 16)
         .padding(.top, 12)
-        .padding(.bottom, 10)
-        .themedPanel(radius: 14, theme: session.theme)
+        .padding(.bottom, 14)
+        .themedPanel(radius: 16, theme: session.theme)
         .onChange(of: session.renameRequest) {
             nameFocused = true
         }
     }
 
-    // MARK: Header: name and layout actions, then monitor, grid, Cancel and Save
+    // MARK: Which layout
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             nameField
-            iconButton(tx("Duplicate layout", "Duplicar distribución"), "plus.square.on.square") { session.duplicateLayout() }
-            iconButton(tx("Delete layout…", "Eliminar distribución…"), "trash") { session.requestDeleteLayout() }
-                .disabled(session.draft.layouts.count <= 1)
-            iconButton(tx("Undo (⌘Z)", "Deshacer (⌘Z)"), "arrow.uturn.backward") { session.undo() }
-                .disabled(!session.canUndo)
-            iconButton(tx("Redo (⇧⌘Z)", "Rehacer (⇧⌘Z)"), "arrow.uturn.forward") { session.redo() }
-                .disabled(!session.canRedo)
+            layoutMenu
             Spacer(minLength: 12)
             if session.monitors.count > 1 { monitorPicker }
-            linkPicker
-            Toggle(isOn: Binding(get: { session.gridEnabled }, set: session.changeGrid)) {
-                Label(tx("Grid", "Cuadrícula"), systemImage: "grid").labelStyle(.iconOnly)
-            }
-            .toggleStyle(.button)
-            .accessibilityLabel(tx("12 × 12 grid", "Cuadrícula de 12 × 12"))
-            .help(tx("Grid: also snap to a 12 × 12 grid", "Cuadrícula: ajustar también a una cuadrícula de 12 × 12"))
-            Button(session.hasChanges ? tx("Cancel", "Cancelar") : tx("Close", "Cerrar"), action: session.requestCancel)
-                .keyboardShortcut(.cancelAction)
-            Button(tx("Save", "Guardar"), action: session.save)
-                .buttonStyle(.borderedProminent)
+            helpButton
             collapseButton
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var nameField: some View {
@@ -72,11 +77,11 @@ struct ZoneEditorHUD: View {
         return TextField(title, text: Binding(get: { session.layoutName }, set: { session.layoutName = $0 }),
                          prompt: Text(ZoneEditorSession.untitled))
             .textFieldStyle(.plain)
-            .font(.system(size: 16, weight: .semibold))
+            .font(.system(size: 17, weight: .semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(nameFocused ? 0.08 : 0.04)))
-            .frame(width: 230)   // fixed, so the buttons beside it never shift as the name changes
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(nameFocused ? 0.08 : 0)))
+            .frame(width: 240)   // fixed, so nothing beside it shifts as the name changes
             .focused($nameFocused)
             .onSubmit {
                 nameFocused = false
@@ -86,35 +91,57 @@ struct ZoneEditorHUD: View {
             .accessibilityLabel(title)
     }
 
-    /// The layout's model. Linked (FancyZones' "grid"): zones tile the screen; split, merge, drag dividers.
-    /// Free ("canvas"): rectangles anywhere, overlaps allowed. Stored per layout.
-    private var linkPicker: some View {
-        Picker(tx("Zones", "Zonas"), selection: Binding(get: { session.mode }, set: session.setMode)) {
-            Text(tx("Linked", "Unidas")).tag(ZoneLayoutMode.linked)
-            Text(tx("Free", "Libres")).tag(ZoneLayoutMode.free)
+    /// The layout's quieter commands, each with its shortcut where it has one.
+    private var layoutMenu: some View {
+        Menu {
+            Button(tx("Rename", "Cambiar nombre")) { session.rename(session.layoutID ?? UUID()) }
+            Button(tx("Duplicate Layout", "Duplicar distribución")) { session.duplicateLayout() }
+            if let layout = session.layout, ZoneTemplates.isModified(layout) {
+                Button(tx("Restore Original Zones", "Restaurar las zonas originales")) { session.restoreOriginal(layout.id) }
+            }
+            Button(tx("Delete Layout…", "Eliminar distribución…"), role: .destructive) { session.requestDeleteLayout() }
+                .disabled(session.draft.layouts.count <= 1)
+            Divider()
+            Button(tx("Undo", "Deshacer")) { session.undo() }
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!session.canUndo)
+            Button(tx("Redo", "Rehacer")) { session.redo() }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(!session.canRedo)
+            Divider()
+            Toggle(tx("Snap to a 12 × 12 Grid", "Ajustar a una cuadrícula de 12 × 12"),
+                   isOn: Binding(get: { session.gridEnabled }, set: session.changeGrid))
+        } label: {
+            Image(systemName: "ellipsis.circle")
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
-        .id(session.modeRefusals)
-        .help(session.linked
-              ? tx("Linked: zones tile the screen. Split, merge, drag dividers.",
-                   "Unidas: las zonas cubren la pantalla. Divide, une, arrastra divisores.")
-              : tx("Free: place rectangles anywhere. Overlap allowed.",
-                   "Libres: coloca rectángulos donde quieras. Se pueden superponer."))
-        .accessibilityLabel(tx("How this layout is edited", "Cómo se edita esta distribución"))
+        .help(tx("Layout: rename, duplicate, delete, undo, grid", "Distribución: renombrar, duplicar, eliminar, deshacer, cuadrícula"))
+        .accessibilityLabel(tx("Layout actions", "Acciones de la distribución"))
     }
 
     private var monitorPicker: some View {
         Picker(tx("Monitor", "Pantalla"), selection: Binding(get: { session.displayKey }, set: session.selectDisplay)) {
             ForEach(session.monitors) { monitor in
-                Text("\(monitor.name) — \(monitor.size)").tag(monitor.key)
+                Label("\(monitor.name) — \(monitor.size)", systemImage: "display").tag(monitor.key)
             }
         }
         .labelsHidden()
         .fixedSize()
         .help(tx("Edit the zones of another monitor", "Editar las zonas de otra pantalla"))
         .accessibilityLabel(tx("Monitor", "Pantalla"))
+    }
+
+    private var helpButton: some View {
+        Button { showsHelp.toggle() } label: {
+            Image(systemName: "questionmark")
+        }
+        .buttonStyle(.bordered)
+        .clipShape(Circle())
+        .help(tx("Mouse and keyboard shortcuts", "Atajos de ratón y teclado"))
+        .accessibilityLabel(tx("Shortcuts", "Atajos"))
+        .popover(isPresented: $showsHelp, arrowEdge: .bottom) { ZoneEditorShortcuts() }
     }
 
     private var collapseButton: some View {
@@ -131,80 +158,129 @@ struct ZoneEditorHUD: View {
         .help(title)
     }
 
-    private func iconButton(_ title: String, _ symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: symbol).labelStyle(.iconOnly)
-        }
-        .buttonStyle(.borderless)
-        .help(title)
-    }
-
-    // MARK: Footer: zone tools and how to draw
+    // MARK: How to edit it, and finishing
 
     private var footer: some View {
-        HStack(spacing: 8) {
-            if session.linked {
-                Button { session.addZone(flip: NSEvent.modifierFlags.contains(.shift)) } label: {
-                    Label(tx("Split", "Dividir"), systemImage: "rectangle.split.2x1")
-                }
-                .disabled(session.layout == nil || !session.canSplitSelection)
-                .help(tx("Split the selected zone (or the largest) along its longer side; ⇧ splits the other way",
-                         "Divide la zona seleccionada (o la mayor) por su lado largo; con ⇧, en el otro sentido"))
-                Button { session.mergeSelection() } label: {
-                    Label(tx("Merge", "Unir"), systemImage: "rectangle.compress.vertical")
-                }
-                .disabled(!session.canMerge)
-                .help(session.selection.count < 2
-                      ? tx("⇧-click zones to select two or more, then merge them", "Haz ⇧-clic en dos o más zonas y únelas")
-                      : session.canMerge ? tx("Merge the selected zones into one", "Une las zonas seleccionadas en una")
-                      : tx("The selected zones must form a rectangle", "Las zonas seleccionadas deben formar un rectángulo"))
-            } else {
+        HStack(alignment: .center, spacing: 12) {
+            modePicker
+            VStack(alignment: .leading, spacing: 2) {
+                Label(ZoneModeText.summary(session.mode), systemImage: ZoneModeText.symbol(session.mode))
+                    .font(.callout.weight(.medium))
+                Text(session.notice ?? hint)
+                    .font(.caption)
+                    .foregroundStyle(session.notice == nil ? FlyoutStyle.secondary(dark: scheme == .dark)
+                                     : StatusColor.color(.attention, dark: scheme == .dark))
+                    .lineLimit(2)
+                    .animation(.easeOut(duration: 0.15), value: session.notice)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            if !session.linked {
                 Button { session.addZone() } label: {
-                    Label(tx("Add zone", "Añadir zona"), systemImage: "plus.rectangle")
+                    Label(tx("Add Zone", "Añadir zona"), systemImage: "plus.rectangle")
                 }
+                .controlSize(.regular)
                 .disabled(session.layout == nil)
                 .help(tx("A new zone in the largest empty space", "Una zona nueva en el mayor espacio libre"))
             }
-            Button(role: .destructive) { session.deleteZone() } label: {
-                Label(tx("Delete zone", "Eliminar zona"), systemImage: "minus.rectangle")
-            }
-            .disabled(!session.canDeleteZone)
-            .help(session.linked
-                  ? tx("Its space goes to a neighbour that shares a whole side", "Su espacio pasa a una vecina que comparte un lado entero")
-                  : tx("Delete the selected zone", "Elimina la zona seleccionada"))
-            Text(session.notice ?? hint)
-                .font(.caption.weight(session.notice == nil ? .regular : .medium))
-                .foregroundStyle(session.notice == nil ? FlyoutStyle.secondary(dark: scheme == .dark) : StatusColor.color(.attention, dark: scheme == .dark))
-                .lineLimit(2)
-                .padding(.leading, 6)
-                .animation(.easeOut(duration: 0.15), value: session.notice)
-            Spacer(minLength: 0)
+            Spacer(minLength: 12)
             if session.isOff {
-                Label(tx("Zones are off on this monitor: click a layout to turn them on",
-                         "Las zonas están desactivadas en esta pantalla: haz clic en una distribución para activarlas"),
-                      systemImage: "pause.circle")
+                Label(tx("Off on this monitor", "Desactivadas en esta pantalla"), systemImage: "pause.circle")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(StatusColor.color(.attention, dark: scheme == .dark))
-                    .lineLimit(2)
+                    .help(tx("Zones are off on this monitor: click a layout to turn them on",
+                             "Las zonas están desactivadas en esta pantalla: haz clic en una distribución para activarlas"))
+            }
+            Button(session.hasChanges ? tx("Cancel", "Cancelar") : tx("Close", "Cerrar"), action: session.requestCancel)
+                .controlSize(.large)
+                .keyboardShortcut(.cancelAction)
+            saveButton
+        }
+    }
+
+    private var saveButton: some View {
+        Button(action: session.save) {
+            Text(tx("Save", "Guardar")).frame(minWidth: 72)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(session.hudCollapsed ? .small : .large)
+        .help(tx("Save and close (Return or ⌘S)", "Guardar y cerrar (Retorno o ⌘S)"))
+    }
+
+    /// Tiles (FancyZones' grid) or Free (its canvas), stored per layout.
+    private var modePicker: some View {
+        Picker(tx("Layout type", "Tipo de distribución"), selection: Binding(get: { session.mode }, set: session.setMode)) {
+            ForEach([ZoneLayoutMode.linked, .free], id: \.self) { mode in
+                Label(ZoneModeText.name(mode), systemImage: ZoneModeText.symbol(mode)).tag(mode)
             }
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.regular)
+        .fixedSize()
+        .id(session.modeRefusals)
+        .help(tx("Tiles: zones cover the screen; split, merge and drag the lines between them. Free: place zones anywhere, overlapping allowed.",
+                 "Mosaico: las zonas cubren la pantalla; divide, une y arrastra las líneas entre ellas. Libre: coloca zonas donde quieras, pueden solaparse."))
+        .accessibilityLabel(tx("Layout type", "Tipo de distribución"))
     }
 
     private var hint: String {
         if session.linked {
-            if session.selectedZone == nil {
-                return tx("Click a zone to select it · Drag a divider to resize · ⇧-click several to merge · Drop a zone on another to swap",
-                          "Haz clic en una zona para seleccionarla · Arrastra un divisor para cambiar tamaños · ⇧-clic en varias para unirlas · Suelta una zona sobre otra para intercambiarlas")
-            }
-            return tx("Click inside the selected zone to split it there (⇧ turns the cut) · Drag dividers · ⌥ no snapping · Right-click: more",
-                      "Haz clic dentro de la zona seleccionada para dividirla ahí (⇧ gira el corte) · Arrastra divisores · ⌥ sin ajuste · Clic derecho: más")
+            return session.selectedZone == nil
+                ? tx("Click a zone to select it. Drag the line between two zones to resize them.",
+                     "Haz clic en una zona para seleccionarla. Arrastra la línea entre dos zonas para cambiar su tamaño.")
+                : tx("Click inside the selected zone to split it there. ⇧-click other zones to merge them.",
+                     "Haz clic dentro de la zona seleccionada para dividirla ahí. ⇧-clic en otras zonas para unirlas.")
         }
         if session.layout?.zones.isEmpty ?? true {
-            return tx("Drag on the screen to draw a zone · Hold ⌥ to turn off snapping",
-                      "Arrastra sobre la pantalla para dibujar una zona · Mantén ⌥ para desactivar el ajuste")
+            return tx("Drag on the screen to draw a zone.", "Arrastra sobre la pantalla para dibujar una zona.")
         }
-        return tx("Drag a zone or its edges · Empty space or ⇧ draws · ⌥ no snapping · Arrows nudge · Double-click: exact size · Right-click: more",
-                  "Arrastra una zona o sus bordes · Espacio vacío o ⇧ dibuja · ⌥ sin ajuste · Flechas: mover · Doble clic: tamaño exacto · Clic derecho: más")
+        return tx("Drag on empty space to draw a zone; drag a zone or its edges to move or resize it.",
+                  "Arrastra en un espacio vacío para dibujar una zona; arrastra una zona o sus bordes para moverla o cambiar su tamaño.")
+    }
+}
+
+/// The "?" popover: everything the mouse and keyboard can do, grouped.
+private struct ZoneEditorShortcuts: View {
+    var body: some View {
+        let rows: [(String, [(String, String)])] = [
+            (tx("Both types", "Ambos tipos"), [
+                (tx("Click", "Clic"), tx("Select a zone", "Seleccionar una zona")),
+                (tx("⇧-click", "⇧-clic"), tx("Add a zone to the selection", "Añadir una zona a la selección")),
+                (tx("Right-click", "Clic derecho"), tx("The selected zone's actions", "Acciones de la zona seleccionada")),
+                ("⌥", tx("While dragging: no snapping", "Al arrastrar: sin ajuste")),
+                ("⌘Z  ⇧⌘Z", tx("Undo, redo", "Deshacer, rehacer")),
+                ("⌫", tx("Delete the selected zone", "Eliminar la zona seleccionada")),
+                (tx("Return  Esc", "Retorno  Esc"), tx("Save, cancel", "Guardar, cancelar"))
+            ]),
+            (ZoneModeText.name(.linked), [
+                (tx("Click the selected zone", "Clic en la zona seleccionada"), tx("Split it at the dashed line (⇧ turns it)", "Dividirla por la línea discontinua (⇧ la gira)")),
+                (tx("Drag a line between zones", "Arrastrar una línea entre zonas"), tx("Resize the zones on both sides", "Cambiar el tamaño de las zonas de ambos lados")),
+                (tx("Drop a zone on another", "Soltar una zona sobre otra"), tx("Swap them", "Intercambiarlas"))
+            ]),
+            (ZoneModeText.name(.free), [
+                (tx("Drag on empty space", "Arrastrar en un espacio vacío"), tx("Draw a zone (⇧ also over zones)", "Dibujar una zona (con ⇧ también sobre zonas)")),
+                (tx("Arrow keys", "Flechas"), tx("Move 8 pt (⇧ a twelfth of the screen)", "Mover 8 pt (⇧ una doceava parte)")),
+                (tx("Double-click", "Doble clic"), tx("Type an exact size", "Escribir un tamaño exacto")),
+                ("⌘D", tx("Duplicate the zone", "Duplicar la zona"))
+            ])
+        ]
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(rows, id: \.0) { section in
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(section.0).font(.headline)
+                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
+                        ForEach(section.1, id: \.0) { row in
+                            GridRow {
+                                Text(row.0).font(.callout.weight(.medium))
+                                Text(row.1).font(.callout).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 470, alignment: .leading)
     }
 }
 
@@ -375,7 +451,7 @@ struct ZoneEditorDialog: View {
         case .deleteLayout: tx("Delete layout?", "¿Eliminar la distribución?")
         case .saveError: tx("Couldn’t save zones", "No se pudieron guardar las zonas")
         case .zoneSize: ""
-        case .cannotLink: tx("This layout can’t be Linked yet", "Esta distribución aún no puede ser Unidas")
+        case .cannotLink: tx("This layout can’t be Tiles yet", "Esta distribución aún no puede ser Mosaico")
         }
     }
 
@@ -387,8 +463,8 @@ struct ZoneEditorDialog: View {
         case let .saveError(message): message
         case .zoneSize: nil
         case .cannotLink:
-            tx("Its zones overlap or leave gaps, and Linked zones must cover the screen exactly. In Free mode, make them meet edge to edge (snapping helps), then switch to Linked; or start a new layout with +.",
-               "Sus zonas se superponen o dejan huecos, y las zonas Unidas deben cubrir la pantalla exactamente. En Libres, haz que se toquen borde con borde (el ajuste ayuda) y cambia a Unidas; o crea una distribución nueva con +.")
+            tx("Its zones overlap or leave gaps, and Tiles must cover the screen exactly. In Free, make the zones meet edge to edge (snapping helps), then switch to Tiles; or start a new layout with +.",
+               "Sus zonas se solapan o dejan huecos, y un Mosaico debe cubrir la pantalla exactamente. En Libre, haz que las zonas se toquen borde con borde (el ajuste ayuda) y cambia a Mosaico; o crea una distribución nueva con +.")
         }
     }
 

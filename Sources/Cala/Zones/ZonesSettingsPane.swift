@@ -10,6 +10,8 @@ struct ZonesSettingsPane: View {
     @ObservedObject private var center = PermissionCenter.shared
     /// Bumped when layouts, the module or the screens change: ZonesStore is not observable.
     @State private var tick = 0
+    /// The monitor whose layout gallery is open in a popover.
+    @State private var choosingFor: String?
     @State private var tilingOn = ZonesModule.nativeTilingOn
 
     private var module: ZonesModule { ModuleRegistry.shared.zones }
@@ -121,24 +123,58 @@ struct ZonesSettingsPane: View {
         .onDisappear { center.endWatching() }
     }
 
-    /// One monitor: its name and size, "Edit zones…" for it, and every layout as a picture of its shape.
+    /// One compact row per monitor: its current layout pictured at its shape, its name and size, **Change…**
+    /// (a popover with every layout as a picture, plus Off) and **Edit Zones…** for that monitor. The full gallery
+    /// appears only on demand, so three or four monitors stay a short list.
     private func monitorSection(_ monitor: Monitor, layoutStore: ZonesStore?) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(monitor.name).font(.system(size: 13, weight: .medium))
-                    Text(ZoneDisplays.sizeText(monitor.screen)).font(.system(size: 11.5)).foregroundStyle(.secondary)
+        let aspect = ZoneThumbnailRenderer.aspect(of: monitor.screen.frame)
+        let off = layoutStore?.state.activeByDisplay[monitor.key] == ZonesState.off
+        let current = off ? nil : layoutStore?.layout(forDisplay: monitor.key)
+        let currentName = current.map(ZoneEditorSession.displayName) ?? tx("Off", "Desactivadas")
+        return HStack(spacing: 14) {
+            Group {
+                if let current {
+                    ZoneThumbnailView(zones: current.zones, aspect: aspect, box: CGSize(width: 72, height: 40))
+                } else {
+                    Image(systemName: layoutStore == nil ? "display" : "nosign").font(.system(size: 18)).foregroundStyle(.secondary)
+                        .frame(width: 72, height: 40)
                 }
-                Spacer(minLength: 12)
-                Button(tx("Edit zones…", "Editar zonas…")) { ZonesModule.openEditor?(monitor.key) }
-                    .disabled(ZonesModule.openEditor == nil)
-                    .accessibilityLabel(tx("Edit zones on \(monitor.name)", "Editar zonas en \(monitor.name)"))
             }
+            .padding(4)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.04)))
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(monitor.name).font(.system(size: 13, weight: .medium))
+                Text(layoutStore == nil ? ZoneDisplays.sizeText(monitor.screen)
+                     : "\(currentName) · \(ZoneDisplays.sizeText(monitor.screen))")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
             if let store = layoutStore {
-                layoutGrid(monitor, store: store)
+                Button(tx("Change…", "Cambiar…")) { choosingFor = monitor.key }
+                    .accessibilityLabel(tx("Change the layout on \(monitor.name)", "Cambiar la distribución en \(monitor.name)"))
+                    .popover(isPresented: Binding(get: { choosingFor == monitor.key },
+                                                  set: { if !$0 { choosingFor = nil } }), arrowEdge: .trailing) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(tx("Layout on \(monitor.name)", "Distribución en \(monitor.name)")).font(.headline)
+                            layoutGrid(monitor, store: store)
+                            HStack {
+                                Spacer()
+                                Button(tx("Edit Zones…", "Editar zonas…")) {
+                                    choosingFor = nil
+                                    ZonesModule.openEditor?(monitor.key)
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .frame(width: 470)
+                    }
             }
+            Button(tx("Edit Zones…", "Editar zonas…")) { ZonesModule.openEditor?(monitor.key) }
+                .disabled(ZonesModule.openEditor == nil)
+                .accessibilityLabel(tx("Edit zones on \(monitor.name)", "Editar zonas en \(monitor.name)"))
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, 16).padding(.vertical, 10)
     }
 
     private func layoutGrid(_ monitor: Monitor, store: ZonesStore) -> some View {
@@ -152,6 +188,7 @@ struct ZonesSettingsPane: View {
                     ZoneThumbnailView(zones: layout.zones, aspect: aspect, box: LayoutTileMetrics.box)
                 } action: {
                     module.setLayout(layout.id, forDisplay: monitor.key)
+                    choosingFor = nil
                 }
             }
             LayoutTile(name: tx("Off", "Desactivadas"), selected: off) {
@@ -159,6 +196,7 @@ struct ZonesSettingsPane: View {
                     .frame(width: LayoutTileMetrics.box.width, height: LayoutTileMetrics.box.height)
             } action: {
                 module.setLayout(nil, forDisplay: monitor.key)
+                choosingFor = nil
             }
         }
         .accessibilityElement(children: .contain)
