@@ -36,6 +36,8 @@ struct Config: Codable, Equatable {
     var zonesActivation = "both"
     var zonesGap: Double = 8
     var zonesEditorGrid = false
+    /// During a zones drag, show the display's layouts in a strip at the top so one can be switched by hovering.
+    var zonesLayoutStrip = true
 
     var modules: ModuleSet {
         ModuleSet(bar: barEnabled, switcher: switcherEnabled, tray: trayEnabled, zones: zonesEnabled)
@@ -103,7 +105,7 @@ struct Config: Codable, Equatable {
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
         case mailLoadsRemoteImages
-        case modulesChosen, barEnabled, trayEnabled, zonesEnabled, zonesActivation, zonesGap, zonesEditorGrid
+        case modulesChosen, barEnabled, trayEnabled, zonesEnabled, zonesActivation, zonesGap, zonesEditorGrid, zonesLayoutStrip
     }
 }
 
@@ -142,6 +144,7 @@ extension Config {
         if !["rightClick", "shift", "both"].contains(zonesActivation) { zonesActivation = "both"; invalid = true }
         zonesGap = clamped(field(Double.self, .zonesGap) ?? zonesGap, 0...40, 8)
         zonesEditorGrid = field(Bool.self, .zonesEditorGrid) ?? zonesEditorGrid
+        zonesLayoutStrip = field(Bool.self, .zonesLayoutStrip) ?? zonesLayoutStrip
         restoreDockOnQuit = field(Bool.self, .restoreDockOnQuit) ?? restoreDockOnQuit
         dockBackupSaved = field(Bool.self, .dockBackupSaved) ?? dockBackupSaved
         dockOverridePending = field(Bool.self, .dockOverridePending)

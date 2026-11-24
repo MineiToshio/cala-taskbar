@@ -21,7 +21,7 @@ final class ZoneOverlay {
 
         /// Theme accent from Theme.swift, resolved for the current light/dark appearance.
         static func make(theme: String) -> Palette {
-            let accent: NSColor = theme == "system" ? .controlAccentColor : NSColor(BarTheme.named(theme).accent)
+            let accent = ZoneOverlay.accent(theme: theme)
             var palette: Palette?
             NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
                 palette = Palette(strongFill: accent.withAlphaComponent(0.35).cgColor,
@@ -35,40 +35,76 @@ final class ZoneOverlay {
         }
     }
 
+    /// The theme's accent (Theme.swift); the system accent for the "system" theme.
+    static func accent(theme: String) -> NSColor {
+        theme == "system" ? .controlAccentColor : NSColor(BarTheme.named(theme).accent)
+    }
+
     private var panels: [Int: (panel: NSPanel, view: ZoneOverlayView)] = [:]
-    var isVisible: Bool { !panels.isEmpty }
+    /// Panels fading out after a layout switch; closed when the fade ends or with everything else.
+    private var retiring: [NSPanel] = []
+    var isVisible: Bool { !panels.isEmpty || !retiring.isEmpty }
 
     func show(_ screens: [Screen], palette: Palette) {
         precondition(Thread.isMainThread)
         close()
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        for screen in screens where !screen.zones.isEmpty && screen.usable.width > 0 && screen.usable.height > 0 {
-            let panel = NSPanel(contentRect: screen.usable, styleMask: [.borderless, .nonactivatingPanel],
-                                backing: .buffered, defer: false)
-            panel.isReleasedWhenClosed = false
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-            panel.hasShadow = false
-            panel.ignoresMouseEvents = true
-            panel.hidesOnDeactivate = false
-            panel.animationBehavior = .none
-            // Above normal windows and Cala's bar, below the switcher (+2).
-            panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-            let local = screen.zones.map { (id: $0.id, frame: $0.frame.offsetBy(dx: -screen.usable.minX, dy: -screen.usable.minY)) }
-            let view = ZoneOverlayView(frame: CGRect(origin: .zero, size: screen.usable.size), zones: local, palette: palette)
-            panel.contentView = view
-            panel.setFrame(screen.usable, display: false)
-            panel.alphaValue = reduceMotion ? 1 : 0
-            panel.orderFrontRegardless()
-            if !reduceMotion {
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.12
-                    panel.animator().alphaValue = 1
-                }
-            }
-            panels[screen.index] = (panel, view)
+        for screen in screens {
+            if let entry = makePanel(screen, palette: palette, fadeIn: 0.12) { panels[screen.index] = entry }
         }
+    }
+
+    /// Swaps one screen's zones (a layout switched mid-drag) with a ~150 ms crossfade.
+    func replace(_ screen: Screen, palette: Palette) {
+        precondition(Thread.isMainThread)
+        let old = panels.removeValue(forKey: screen.index)
+        if let entry = makePanel(screen, palette: palette, fadeIn: 0.15) { panels[screen.index] = entry }
+        guard let old else { return }
+        retiring.append(old.panel)
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = reduceMotion ? 0 : 0.15
+            old.panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            self?.retire(old.panel)
+        })
+    }
+
+    private func retire(_ panel: NSPanel) {
+        guard let index = retiring.firstIndex(where: { $0 === panel }) else { return }
+        retiring.remove(at: index)
+        panel.orderOut(nil)
+        panel.contentView = nil
+        panel.close()
+    }
+
+    private func makePanel(_ screen: Screen, palette: Palette, fadeIn: TimeInterval) -> (panel: NSPanel, view: ZoneOverlayView)? {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard !screen.zones.isEmpty && screen.usable.width > 0 && screen.usable.height > 0 else { return nil }
+        let panel = NSPanel(contentRect: screen.usable, styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.animationBehavior = .none
+        // Above normal windows and Cala's bar, below the switcher (+2).
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        let local = screen.zones.map { (id: $0.id, frame: $0.frame.offsetBy(dx: -screen.usable.minX, dy: -screen.usable.minY)) }
+        let view = ZoneOverlayView(frame: CGRect(origin: .zero, size: screen.usable.size), zones: local, palette: palette)
+        panel.contentView = view
+        panel.setFrame(screen.usable, display: false)
+        panel.alphaValue = reduceMotion ? 1 : 0
+        panel.orderFrontRegardless()
+        if !reduceMotion {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = fadeIn
+                panel.animator().alphaValue = 1
+            }
+        }
+        return (panel, view)
     }
 
     /// Highlights `target` on screen `index` (frame in AppKit global coordinates); other screens show no choice.
@@ -82,12 +118,13 @@ final class ZoneOverlay {
     }
 
     func close() {
-        for (_, entry) in panels {
-            entry.panel.orderOut(nil)
-            entry.panel.contentView = nil
-            entry.panel.close()
+        for panel in panels.values.map(\.panel) + retiring {
+            panel.orderOut(nil)
+            panel.contentView = nil
+            panel.close()
         }
         panels.removeAll()
+        retiring.removeAll()
     }
 }
 

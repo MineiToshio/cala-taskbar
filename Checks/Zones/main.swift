@@ -766,6 +766,78 @@ do {
                && !ZoneWindowFit.matches(CGRect(x: 720, y: 25, width: 700, height: 875), zoneAX))
 }
 
+// MARK: Layout strip
+
+do {
+    let usable = CGRect(x: 0, y: 0, width: 1512, height: 944)
+    let grip = ZoneStripGeometry.collapsed(usable: usable)
+    expect("Strip: the grip sits at the top centre of the usable area, below its top edge",
+           abs(grip.body.midX - usable.midX) <= 0.5 && grip.body.maxY == usable.maxY - ZoneStripGeometry.topGap
+               && grip.panel == grip.body.insetBy(dx: -16, dy: -16))
+    let eight = ZoneStripGeometry.expanded(usable: usable, count: 8, current: 2)
+    expect("Strip: eight layouts fit at full size, centred, in order",
+           eight.scale == 1 && eight.items.map(\.index) == Array(0..<8) && abs(eight.body.midX - usable.midX) <= 0.5
+               && eight.body.maxY == usable.maxY - ZoneStripGeometry.topGap)
+    expect("Strip: items do not overlap and stay inside the body",
+           zip(eight.items, eight.items.dropFirst()).allSatisfy { $0.frame.maxX < $1.frame.minX }
+               && eight.items.allSatisfy { eight.body.contains($0.frame) })
+    let medium = ZoneStripGeometry.expanded(usable: CGRect(x: 0, y: 0, width: 600, height: 900), count: 8, current: 0)
+    expect("Strip: a medium display shrinks items so all eight still fit",
+           medium.items.count == 8 && medium.scale < 1 && medium.scale >= ZoneStripGeometry.minScale && medium.body.width <= 600)
+    let narrow = CGRect(x: -1080, y: 0, width: 400, height: 1920)
+    let shrunk = ZoneStripGeometry.expanded(usable: narrow, count: 8, current: 7)
+    expect("Strip: a narrow display shrinks items, then shows a window around the current layout",
+           shrunk.scale == ZoneStripGeometry.minScale && shrunk.items.count < 8 && shrunk.items.last?.index == 7
+               && shrunk.body.minX >= narrow.minX && shrunk.body.maxX <= narrow.maxX)
+    let many = ZoneStripGeometry.expanded(usable: CGRect(x: 0, y: 0, width: 5120, height: 1440), count: 20, current: 0)
+    expect("Strip: at most nine items are visible", many.items.count == 9 && many.items.first?.index == 0)
+    let first = eight.items[0].frame
+    expect("Strip: item hit-testing, gaps between items hit nothing",
+           ZoneStripGeometry.item(at: CGPoint(x: first.midX, y: first.midY), in: eight) == 0
+               && ZoneStripGeometry.item(at: CGPoint(x: first.maxX + 3, y: first.midY), in: eight) == nil)
+    let inMargin = CGPoint(x: eight.body.midX, y: eight.body.minY - 8)
+    expect("Strip: the transparent 16 pt margin is not part of the hit area",
+           eight.panel.contains(inMargin)
+               && !ZoneStripGeometry.inside(inMargin, expanded: true, usable: usable, count: 8, current: 2))
+    let onGrip = CGPoint(x: grip.body.midX, y: grip.body.midY)
+    expect("Strip: the collapsed grip never suspends zone picking (top-edge zones stay reachable)",
+           ZoneStripGeometry.inside(onGrip, expanded: false, usable: usable, count: 8, current: 2)
+               && !ZoneStripGeometry.suspendsPicking(onGrip, expanded: false, usable: usable, count: 8, current: 2))
+    expect("Strip: inside the expanded strip picking is suspended, outside it is not",
+           ZoneStripGeometry.suspendsPicking(CGPoint(x: first.midX, y: first.midY), expanded: true, usable: usable, count: 8, current: 2)
+               && !ZoneStripGeometry.suspendsPicking(CGPoint(x: 700, y: 400), expanded: true, usable: usable, count: 8, current: 2))
+
+    var d = ZoneStripDwell()
+    expect("Dwell: entering an item starts its progress at once", d.update(item: 3, now: 0, current: 0) == .progress(item: 3, fraction: 0))
+    expect("Dwell: progress grows with time", d.update(item: 3, now: 0.175, current: 0) == .progress(item: 3, fraction: 0.5))
+    expect("Dwell: switches after 350 ms", d.update(item: 3, now: 0.36, current: 0) == .switchTo(3))
+    expect("Dwell: does not fire again while the cursor stays on that item", d.update(item: 3, now: 1.0, current: 0) == .idle)
+    d.reset()
+    expect("Dwell: the current layout never fires", d.update(item: 0, now: 0, current: 0) == .idle
+               && d.update(item: 0, now: 1, current: 0) == .idle)
+    d.reset()
+    _ = d.update(item: 1, now: 0, current: 0)
+    expect("Dwell: moving to another item waits the hysteresis, nothing fires meanwhile",
+           d.update(item: 2, now: 0.30, current: 0) == .idle && d.update(item: 2, now: 0.36, current: 0) == .idle
+               && d.hovered == 1)
+    expect("Dwell: after the hysteresis the new item starts from zero",
+           d.update(item: 2, now: 0.41, current: 0) == .progress(item: 2, fraction: 0) && d.hovered == 2)
+    expect("Dwell: a brief crossing back keeps the hovered item", d.update(item: 1, now: 0.45, current: 0) == .idle
+               && d.update(item: 2, now: 0.48, current: 0) == .progress(item: 2, fraction: (0.48 - 0.41) / 0.35))
+    d.reset()
+    _ = d.update(item: 4, now: 0, current: 0)
+    _ = d.update(item: 4, now: 0.4, current: 0)
+    _ = d.update(item: nil, now: 0.5, current: 4)
+    _ = d.update(item: nil, now: 0.65, current: 4)
+    _ = d.update(item: 5, now: 0.70, current: 4)
+    expect("Dwell: leaving the item that fired re-arms it",
+           d.update(item: 5, now: 0.80, current: 4) == .progress(item: 5, fraction: (0.80 - 0.70) / 0.35))
+    d.reset()
+    _ = d.update(item: 6, now: 0, current: 0)
+    d.reset()
+    expect("Dwell: leaving the strip (reset) cancels the dwell", d.hovered == nil && d.update(item: nil, now: 1, current: 0) == .idle)
+}
+
 // MARK: Store and displays
 
 func checkStore() throws {

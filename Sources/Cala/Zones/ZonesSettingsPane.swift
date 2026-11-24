@@ -77,6 +77,14 @@ struct ZonesSettingsPane: View {
                         .accessibilityElement(children: .combine)
                         .accessibilityLabel(tx("Gap between zones", "Separación entre zonas"))
                 }
+                RowDivider()
+                SettingRow(title: tx("Show layouts while dragging", "Mostrar layouts al arrastrar"),
+                           caption: tx("In zones mode, a strip at the top of the screen lists that monitor's layouts. Hold the pointer on one to switch to it, then drop the window into one of its zones.",
+                                       "En modo zonas, una franja arriba de la pantalla muestra las distribuciones de esa pantalla. Deja el puntero sobre una para cambiar a ella y suelta la ventana en una de sus zonas.")) {
+                    Toggle("", isOn: Binding(get: { store.config.zonesLayoutStrip }, set: { store.config.zonesLayoutStrip = $0 }))
+                        .toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(tx("Show layouts while dragging", "Mostrar layouts al arrastrar"))
+                }
             }
             SectionTitle(text: tx("Layout per monitor", "Distribución por pantalla"))
             Card {

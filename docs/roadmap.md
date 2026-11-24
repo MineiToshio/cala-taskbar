@@ -7,6 +7,8 @@ Taskbar with auto-hide, pinned apps, hover previews with thumbnails (including m
 Ideas that were deliberately left out of the first version of [Zones](zones.md):
 - **Per-Space or per-app layouts** (today a layout belongs to a monitor, whatever Space or app is in front).
 - **Keyboard shortcuts** to move the front window into a zone, or to the next or previous zone.
+- **Keyboard shortcuts per layout** (⌃⌥⌘1…9 switch the monitor under the pointer to layout 1…9, with the same name toast as the layout strip).
+- **Mouse wheel to cycle layouts while dragging** (scroll in zones mode to step through the monitor's layouts; would add the scroll-wheel event to the tap's mask).
 - **Auto-snap new windows** (an app always opens in its zone) and remember which zone each window is in across restarts.
 - **Resize several snapped windows together** when you drag a shared edge.
 

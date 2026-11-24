@@ -40,12 +40,28 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         var screenKey: String?
     }
 
+    private struct StripState {
+        var screenIndex: Int
+        var key: String
+        var layouts: [UUID]
+        var current: Int?
+        var expanded = false
+        var dwell = ZoneStripDwell()
+        var point = CGPoint.zero
+    }
+
     private let config: ConfigStore
     private unowned let bar: BarModule
     private var tap: ZoneDragTap?
     private var mover: ZoneWindowMover?
     private let overlay = ZoneOverlay()
+    private let strip = ZoneLayoutStrip()
+    private let toast = ZoneToast()
     private var session: Session?
+    /// The layout strip of the display under the cursor while zones mode is on (setting `zonesLayoutStrip`).
+    private var stripState: StripState?
+    /// Runs only while the strip is expanded: the dwell must progress while the pointer rests (no mouse events).
+    private var stripTimer: Timer?
     private var runID: UUID?
     private var retryTimer: Timer?
     private var screenObserver: NSObjectProtocol?
@@ -132,6 +148,8 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         mover?.stop()             // cancels queued AX work and drops snap records
         mover = nil
         overlay.close()           // orders out, closes and releases every panel
+        closeStrip()              // the layout strip panel and its dwell timer
+        toast.close()
         session = nil
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
@@ -212,7 +230,9 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         var usable: CGRect?
         if release.zonesMode {
             if session?.generation != release.generation { session = makeSession(release.generation) }
-            if let picked = updateTarget(point: release.point, command: release.command, show: false),
+            if stripSuspendsPicking(at: release.point) {
+                log("zones: released over the layout strip, the window stays")
+            } else if let picked = updateTarget(point: release.point, command: release.command, show: false),
                let height = Self.primaryHeight {
                 target = ZoneGeometry.axRect(fromAppKit: picked.target.frame, primaryHeight: height)
                 usable = ZoneGeometry.axRect(fromAppKit: picked.usable, primaryHeight: height)
@@ -244,6 +264,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
     private func endSession() {
         session = nil
         if overlay.isVisible { overlay.close() }
+        closeStrip()
     }
 
     private func cancelMode(_ run: UUID, reason: String) {
@@ -278,6 +299,12 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         let screen = index.map { session.screens[$0] }
         session.screenKey = screen?.key
         var result: (ZonePicking.Target, CGRect)?
+        self.session = session
+        // The expanded layout strip takes the pointer: no zone is highlighted (and a release there snaps nothing).
+        if show, let screen, updateStrip(point: point, screen: screen) {
+            overlay.update(screen: screen.index, target: nil)
+            return nil
+        }
         if let screen, !screen.zones.isEmpty {
             // A pointer over the menu bar, Cala's bar strip or the Dock picks the nearest zone edge.
             let pick = ZoneWindowFit.clampPoint(point, into: screen.usable)
@@ -293,6 +320,118 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         self.session = session
         if show { overlay.update(screen: screen?.index, target: result?.0) }
         return result
+    }
+
+    // MARK: Layout strip (main)
+
+    /// Shows the strip on the display under the cursor, expands it when the cursor enters it and collapses it when
+    /// the cursor leaves. Returns true while the cursor is inside the expanded strip (zone picking suspended).
+    private func updateStrip(point: CGPoint, screen: SessionScreen) -> Bool {
+        guard config.config.zonesLayoutStrip, let store, !store.state.layouts.isEmpty else {
+            closeStrip()
+            return false
+        }
+        if stripState?.screenIndex != screen.index { openStrip(on: screen, store: store) }
+        guard var state = stripState else { return false }
+        state.point = point
+        let count = state.layouts.count
+        let inside = ZoneStripGeometry.inside(point, expanded: state.expanded, usable: screen.usable,
+                                              count: count, current: state.current)
+        if inside != state.expanded {
+            state.expanded = inside
+            state.dwell.reset()
+            strip.setExpanded(inside)
+        }
+        stripState = state
+        if state.expanded {
+            stripTick()
+            if stripTimer == nil {
+                stripTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.stripTick() }
+            }
+        } else {
+            stripTimer?.invalidate()
+            stripTimer = nil
+        }
+        return state.expanded
+    }
+
+    private func openStrip(on screen: SessionScreen, store: ZonesStore) {
+        closeStrip()
+        let layouts = store.state.layouts
+        let active = activeLayout(forDisplay: screen.key)
+        let current = layouts.firstIndex { $0.id == active }
+        let aspect = ZoneThumbnailRenderer.aspect(of: screen.frame)
+        let accent = ZoneOverlay.accent(theme: config.config.theme)
+        let entries = layouts.map { layout in
+            ZoneLayoutStrip.Entry(id: layout.id, name: ZoneEditorSession.displayName(layout),
+                                  picture: ZoneThumbnailRenderer.image(layout.zones, aspect: aspect,
+                                                                       fitting: ZoneStripGeometry.picture, accent: accent))
+        }
+        strip.show(usable: screen.usable, entries: entries, current: current, accent: accent)
+        stripState = StripState(screenIndex: screen.index, key: screen.key, layouts: layouts.map(\.id), current: current)
+    }
+
+    private func stripSuspends(_ point: CGPoint, state: StripState, usable: CGRect) -> Bool {
+        ZoneStripGeometry.suspendsPicking(point, expanded: state.expanded, usable: usable,
+                                          count: state.layouts.count, current: state.current)
+    }
+
+    /// For a release: whether the cursor (CG point) is inside the expanded strip.
+    private func stripSuspendsPicking(at cgPoint: CGPoint) -> Bool {
+        guard let state = stripState, state.expanded, let height = Self.primaryHeight,
+              let screen = session?.screens.first(where: { $0.index == state.screenIndex }) else { return false }
+        return stripSuspends(ZoneGeometry.appKitPoint(fromCG: cgPoint, primaryHeight: height), state: state, usable: screen.usable)
+    }
+
+    /// Dwell progress for the item under the (possibly resting) pointer; switches the layout when it completes.
+    private func stripTick() {
+        guard isRunning, var state = stripState, state.expanded,
+              let screen = session?.screens.first(where: { $0.index == state.screenIndex }) else { return }
+        let geometry = ZoneStripGeometry.expanded(usable: screen.usable, count: state.layouts.count, current: state.current)
+        let item = ZoneStripGeometry.item(at: state.point, in: geometry)
+        let output = state.dwell.update(item: item, now: CACurrentMediaTime(), current: state.current)
+        stripState = state
+        switch output {
+        case .idle:
+            strip.setHover(state.dwell.hovered, progress: 0)
+        case let .progress(item, fraction):
+            strip.setHover(item, progress: fraction)
+        case let .switchTo(index):
+            switchStripLayout(to: index)
+        }
+    }
+
+    /// Persists the display's new layout (like a Settings change), crossfades the overlay to its zones, shows its
+    /// name and keeps zones mode on, so the window can be dropped into a zone of the new layout.
+    private func switchStripLayout(to index: Int) {
+        guard var state = stripState, state.layouts.indices.contains(index), var session, let store,
+              let screenPosition = session.screens.firstIndex(where: { $0.index == state.screenIndex }) else { return }
+        let id = state.layouts[index]
+        setLayout(id, forDisplay: state.key)
+        guard activeLayout(forDisplay: state.key) == id, let layout = store.state.layouts.first(where: { $0.id == id })
+        else { return }
+        state.current = index
+        stripState = state
+        strip.setCurrent(index)
+        var screen = session.screens[screenPosition]
+        screen.zones = layout.zones
+        session.screens[screenPosition] = screen
+        session.anchor.reset()
+        self.session = session
+        let gap = CGFloat(config.config.zonesGap)
+        overlay.replace(ZoneOverlay.Screen(index: screen.index, usable: screen.usable, zones: layout.zones.map { zone in
+            (zone.id, ZoneGeometry.applyGap(ZoneGeometry.frame(for: zone.rect, in: screen.usable), gap: gap, usable: screen.usable))
+        }), palette: .make(theme: config.config.theme))
+        let body = strip.expandedBody ?? ZoneStripGeometry.collapsed(usable: screen.usable).body
+        toast.show(ZoneEditorSession.displayName(layout), below: body.minY, centerX: screen.usable.midX)
+        log("zones: layout strip switched a display to \(layout.name)")
+    }
+
+    private func closeStrip() {
+        stripTimer?.invalidate()
+        stripTimer = nil
+        stripState = nil
+        strip.close()
     }
 
     /// A Space change never cancels zones mode. With "Displays have separate Spaces" (the macOS default) it fires
