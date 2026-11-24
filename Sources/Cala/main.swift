@@ -68,7 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         source.resume()
         LoginItem.migrateLegacy()
         Watchdog.start(store: store)
-        registry.launch(onboardingCompleted: OnboardingWindowController.completed, axTrusted: AXIsProcessTrusted())
+        let modules = registry.launch(onboardingCompleted: OnboardingWindowController.completed,
+                                      onboardingPending: OnboardingWindowController.pending, axTrusted: AXIsProcessTrusted())
         MenuBarDiagnostics.install()
         // `notifyutil -p local.cala.openSystemPanel` opens the CPU panel while the tray is running.
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), Unmanaged.passUnretained(self).toOpaque(), { _, observer, _, _, _ in
@@ -82,10 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let onboarding = OnboardingWindowController.shared
         onboarding.onFinish = { [weak self] in
             guard let self, !self.registry.isShuttingDown else { return }
-            self.registry.finishChoosingModulesIfNeeded()
             self.tray.finishOnboarding()
         }
-        if !onboarding.showIfNeeded(existingInstall: store.existedAtLaunch) {
+        if !onboarding.showIfNeeded(modules.needsOnboarding) {
             onboarding.onFinish = nil
             tray.finishOnboarding()
         }
@@ -94,8 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 }
 
-/// `Cala --snapshot <dir>`: every Settings pane in the current language (with the Zones module running when it is
-/// enabled, for its per-monitor layout menus), the General and Zones panes and the welcome's module question and zones-only permission page in English
+/// `Cala --snapshot <dir>`: every Settings pane in the current language (the Zones pane reads zones.json directly for
+/// its per-monitor layout menus; no module starts), the General and Zones panes and the welcome's module question and zones-only permission page in English
 /// and Spanish, as 2x PNGs. Views are drawn through an offscreen NSHostingView so AppKit controls (switches, menus,
 /// sliders) render as they do on screen.
 @MainActor
@@ -129,10 +129,9 @@ enum Snapshots {
             VStack(alignment: .leading, spacing: 26) { Text(p.title).font(.system(size: 28, weight: .bold)); PaneBody(pane: p, store: ConfigStore.shared) }
                 .padding(34)
         }
-        // Only Zones is started (when enabled), so its pane shows the per-monitor layout menus it has while running.
-        let zones = ModuleRegistry.shared.zones
-        if ConfigStore.shared.config.zonesEnabled { zones.start() }
-        defer { zones.stop() }
+        // No module is started (no bar, no event tap): the Zones pane reads zones.json directly for its layout menus.
+        ZonesSettingsPane.snapshotStore = try? ZonesStore(templateName: ZonesModule.templateName)
+        defer { ZonesSettingsPane.snapshotStore = nil }
         for p in SettingsPane.allCases { write(pane(p), p.rawValue, width: 640) }
         let language = appLanguageOverride
         for code in ["en", "es"] {

@@ -17,6 +17,8 @@ final class ModuleRegistry {
     private var pending: (ModuleSet, String, ModulePlan.Source?)?
     private var isApplying = false
     private(set) var isShuttingDown = false
+    /// A first-run welcome has not been answered yet: nothing runs until "What do you want to use?" is saved.
+    private(set) var waitingForOnboarding = false
 
     private init() {
         let bar = BarModule(store: store)
@@ -29,12 +31,14 @@ final class ModuleRegistry {
         modules = [.bar: bar, .tray: tray, .switcher: WindowSwitcher.shared, .zones: zones]
     }
 
-    func launch(onboardingCompleted: Bool, axTrusted: Bool) {
+    @discardableResult
+    func launch(onboardingCompleted: Bool, onboardingPending: Bool, axTrusted: Bool) -> ModulePlan.Resolution {
         precondition(Thread.isMainThread)
         let config = store.config
         let resolved = ModulePlan.resolve(config.modules, chosen: config.modulesChosen,
-                                          onboardingCompleted: onboardingCompleted, configExisted: store.existedAtLaunch,
-                                          axTrusted: axTrusted)
+                                          onboardingCompleted: onboardingCompleted, onboardingPending: onboardingPending,
+                                          configExisted: store.existedAtLaunch, axTrusted: axTrusted)
+        waitingForOnboarding = resolved.source == .provisional
         if resolved.persist {
             var migrated = config
             migrated.barEnabled = resolved.set.bar
@@ -55,22 +59,26 @@ final class ModuleRegistry {
         apply(resolved.set, reason: "launch", startupSource: resolved.source)
 
         // @Published emits before writing the value. Apply after the write, and use the latest value if changes coalesce.
-        configObserver = store.$config.map(\.modules).removeDuplicates().dropFirst()
+        // While waiting for the welcome, module keys may still hold their defaults: only the saved choice
+        // (modulesChosen turning true) starts anything, even when it equals those defaults.
+        configObserver = store.$config.map { ModuleKeys(modules: $0.modules, chosen: $0.modulesChosen) }.removeDuplicates().dropFirst()
             .receive(on: DispatchQueue.main).sink { [weak self] _ in
                 guard let self else { return }
-                self.apply(self.store.config.modules, reason: "config")
+                let config = self.store.config
+                if self.waitingForOnboarding {
+                    guard config.modulesChosen else { return }
+                    self.waitingForOnboarding = false
+                    self.apply(config.modules, reason: "onboarding")
+                } else {
+                    self.apply(config.modules, reason: "config")
+                }
             }
+        return resolved
     }
 
-    func finishChoosingModulesIfNeeded() {
-        guard !store.config.modulesChosen else { return }
-        var config = store.config
-        config.modulesChosen = true
-        config.barEnabled = desired.bar
-        config.switcherEnabled = desired.switcher
-        config.trayEnabled = desired.tray
-        config.zonesEnabled = desired.zones
-        store.config = config
+    private struct ModuleKeys: Equatable {
+        var modules: ModuleSet
+        var chosen: Bool
     }
 
     /// Register a module before launch, or start it immediately if its preference is already enabled.

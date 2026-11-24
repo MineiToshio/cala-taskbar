@@ -9,16 +9,29 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     static let shared = OnboardingWindowController()
     private var window: NSWindow?
     private static let doneKey = "onboardingCompleted"
+    private static let pendingKey = "onboardingPending"
     /// Called once when the user finishes or closes the welcome (the app then starts what waited for it).
     var onFinish: (() -> Void)?
 
+    /// Written only when the module choice is saved, so quitting before answering shows the welcome again.
     static var completed: Bool { UserDefaults.standard.bool(forKey: doneKey) }
+    /// A first-run welcome was shown and not answered yet (see `ModulePlan.resolve`).
+    static var pending: Bool { UserDefaults.standard.bool(forKey: pendingKey) }
 
-    /// Shows the welcome on a first run. People upgrading from a version without it, who already granted
-    /// Accessibility, are not asked again.
-    func showIfNeeded(existingInstall: Bool) -> Bool {
-        if Self.completed { return false }
-        if existingInstall && AXIsProcessTrusted() { UserDefaults.standard.set(true, forKey: Self.doneKey); return false }
+    /// The "What do you want to use?" answer was saved: the welcome is done.
+    static func markChosen() {
+        UserDefaults.standard.set(true, forKey: doneKey)
+        UserDefaults.standard.removeObject(forKey: pendingKey)
+    }
+
+    /// Shows the welcome when the module resolution needs it. People upgrading from a version without it (migrated)
+    /// are marked done and not asked.
+    func showIfNeeded(_ needed: Bool) -> Bool {
+        guard needed else {
+            if !Self.completed { Self.markChosen() }
+            return false
+        }
+        UserDefaults.standard.set(true, forKey: Self.pendingKey)
         show()
         return true
     }
@@ -50,8 +63,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         PermissionCenter.shared.endWatching()
-        if !Self.completed { log("onboarding: closed") }
-        UserDefaults.standard.set(true, forKey: Self.doneKey)
+        if !Self.completed { log("onboarding: closed before choosing; nothing runs and it shows again next launch") }
         let done = onFinish
         onFinish = nil
         done?()
@@ -77,9 +89,10 @@ struct OnboardingView: View {
     init(finish: @escaping () -> Void, step: ModulePlan.OnboardingPage = .welcome, bar: Bool? = nil, zones: Bool? = nil) {
         self.finish = finish
         _step = State(initialValue: step)
-        let modules = ConfigStore.shared.config.modules
-        _useBar = State(initialValue: bar ?? modules.bar)
-        _useZones = State(initialValue: zones ?? modules.zones)
+        // A first-time user starts with nothing checked: the choice is theirs, not today's defaults.
+        let config = ConfigStore.shared.config
+        _useBar = State(initialValue: bar ?? (config.modulesChosen && config.modules.bar))
+        _useZones = State(initialValue: zones ?? (config.modulesChosen && config.modules.zones))
     }
 
     /// The choice as it would be saved; nil while nothing is checked.
@@ -213,6 +226,7 @@ struct OnboardingView: View {
         config.trayEnabled = set.tray
         config.zonesEnabled = set.zones
         config.modulesChosen = true
+        OnboardingWindowController.markChosen()
         store.config = config
         if changed { log("onboarding: chose \(ModulePlan.summary(set))") }
     }

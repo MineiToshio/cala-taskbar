@@ -15,26 +15,45 @@ let barOnly = ModuleSet(bar: true, switcher: false, tray: false, zones: false)
 let orphanTray = ModuleSet(bar: false, switcher: false, tray: true, zones: false)
 
 let fresh = ModulePlan.resolve(defaults, chosen: false, onboardingCompleted: false, configExisted: false, axTrusted: false)
-check(fresh.set == defaults && fresh.source == .provisional && !fresh.persist && fresh.needsOnboarding, "fresh install needs onboarding")
+check(fresh.set == .none && fresh.source == .provisional && !fresh.persist && fresh.needsOnboarding,
+      "fresh install starts no module until onboarding is answered")
+check(ModulePlan.startupLine(running: .none, source: .provisional) ==
+      "modules: active=none off=bar,switcher,tray,zones source=provisional (waiting for onboarding)", "provisional startup log format")
+// A fresh user who quit before choosing: config.json now exists and Accessibility may be on, but the welcome is pending.
+let quitBeforeChoosing = ModulePlan.resolve(defaults, chosen: false, onboardingCompleted: false, onboardingPending: true,
+                                            configExisted: true, axTrusted: true)
+check(quitBeforeChoosing.set == .none && quitBeforeChoosing.source == .provisional && !quitBeforeChoosing.persist &&
+      quitBeforeChoosing.needsOnboarding, "quitting before choosing shows the welcome again and starts nothing")
+let pendingThenChosen = ModulePlan.resolve(zonesOnly, chosen: true, onboardingCompleted: true, onboardingPending: false,
+                                           configExisted: true, axTrusted: false)
+check(pendingThenChosen.set == zonesOnly && pendingThenChosen.source == .stored && !pendingThenChosen.needsOnboarding,
+      "a saved choice is used as stored on the next launch")
+let legacy = ModulePlan.resolve(defaults, chosen: false, onboardingCompleted: true, configExisted: true, axTrusted: false)
+check(legacy.set == defaults && legacy.source == .migrated && legacy.persist && !legacy.needsOnboarding,
+      "user from before the feature (onboardingCompleted, no modulesChosen) is migrated with bar, switcher and tray on")
 let migrated = ModulePlan.resolve(zonesOnly, chosen: false, onboardingCompleted: true, configExisted: false, axTrusted: false)
 check(migrated.set == ModuleSet(bar: true, switcher: false, tray: true, zones: false) &&
       migrated.source == .migrated && migrated.persist && !migrated.needsOnboarding, "migration preserves disabled switcher and enables bar and tray")
 let provisional = ModulePlan.resolve(zonesOnly, chosen: false, onboardingCompleted: false, configExisted: true, axTrusted: false)
-check(provisional.set == defaults && provisional.source == .provisional && !provisional.persist && provisional.needsOnboarding,
-      "prior config without Accessibility or completed onboarding gets provisional switcher on")
+check(provisional.set == .none && provisional.source == .provisional && !provisional.persist && provisional.needsOnboarding,
+      "prior config without Accessibility or completed onboarding waits for onboarding")
 let completed = ModulePlan.resolve(all, chosen: false, onboardingCompleted: true, configExisted: false, axTrusted: false)
 check(completed.set == defaults && completed.source == .migrated && completed.persist && !completed.needsOnboarding,
       "completed onboarding migrates bar, switcher and tray on and zones off")
 
 for chosen in [false, true] {
     for done in [false, true] {
-        for existed in [false, true] {
-            for trusted in [false, true] {
-                let result = ModulePlan.resolve(all, chosen: chosen, onboardingCompleted: done, configExisted: existed, axTrusted: trusted)
-                let existing = done || (existed && trusted)
-                check(result.set == (chosen ? all : defaults) && result.needsOnboarding == !existing &&
-                      result.persist == (!chosen && existing) && result.source == (chosen ? .stored : existing ? .migrated : .provisional),
-                      "resolution chosen=\(chosen) completed=\(done) configExisted=\(existed) axTrusted=\(trusted)")
+        for pending in [false, true] {
+            for existed in [false, true] {
+                for trusted in [false, true] {
+                    let result = ModulePlan.resolve(all, chosen: chosen, onboardingCompleted: done, onboardingPending: pending,
+                                                    configExisted: existed, axTrusted: trusted)
+                    let existing = done || (!pending && existed && trusted)
+                    let set = chosen ? all : existing ? defaults : ModuleSet.none
+                    check(result.set == set && result.needsOnboarding == !existing &&
+                          result.persist == (!chosen && existing) && result.source == (chosen ? .stored : existing ? .migrated : .provisional),
+                          "resolution chosen=\(chosen) completed=\(done) pending=\(pending) configExisted=\(existed) axTrusted=\(trusted)")
+                }
             }
         }
     }

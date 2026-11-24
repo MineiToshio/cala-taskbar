@@ -40,9 +40,13 @@ enum ModulePlan {
         let needsOnboarding: Bool
     }
 
-    static func resolve(_ stored: ModuleSet, chosen: Bool, onboardingCompleted: Bool, configExisted: Bool,
-                        axTrusted: Bool) -> Resolution {
-        let existing = onboardingCompleted || (configExisted && axTrusted)
+    /// `onboardingCompleted` is written only when the welcome's module choice is saved (or for an install from before
+    /// the welcome existed). `onboardingPending` marks a first-run welcome that was shown and not answered yet: such a
+    /// user is never mistaken for an existing one, even though config.json now exists and Accessibility may be on.
+    /// While the welcome is pending nothing runs: someone who only wants Zones never gets a bar, not even briefly.
+    static func resolve(_ stored: ModuleSet, chosen: Bool, onboardingCompleted: Bool, onboardingPending: Bool = false,
+                        configExisted: Bool, axTrusted: Bool) -> Resolution {
+        let existing = onboardingCompleted || (!onboardingPending && configExisted && axTrusted)
         if chosen {
             return Resolution(set: stored, source: .stored, persist: false, needsOnboarding: !existing)
         }
@@ -50,8 +54,7 @@ enum ModulePlan {
             let migrated = ModuleSet(bar: true, switcher: stored.switcher, tray: true, zones: false)
             return Resolution(set: migrated, source: .migrated, persist: true, needsOnboarding: false)
         }
-        let provisional = ModuleSet(bar: true, switcher: true, tray: true, zones: false)
-        return Resolution(set: provisional, source: .provisional, persist: false, needsOnboarding: true)
+        return Resolution(set: .none, source: .provisional, persist: false, needsOnboarding: true)
     }
 
     static func effective(_ desired: ModuleSet) -> ModuleSet {
@@ -118,7 +121,7 @@ enum ModulePlan {
     }
 
     static func startupLine(running: ModuleSet, source: Source) -> String {
-        "modules: \(summary(running)) source=\(source.rawValue)"
+        "modules: \(summary(running)) source=\(source.rawValue)" + (source == .provisional ? " (waiting for onboarding)" : "")
     }
 
     static func summary(_ set: ModuleSet) -> String {

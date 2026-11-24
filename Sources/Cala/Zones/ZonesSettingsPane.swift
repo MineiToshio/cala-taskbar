@@ -13,6 +13,11 @@ struct ZonesSettingsPane: View {
     @State private var tilingOn = ZonesModule.nativeTilingOn
 
     private var module: ZonesModule { ModuleRegistry.shared.zones }
+    /// Set only by `--snapshot`: a store loaded straight from zones.json so the layout menus can be pictured without
+    /// starting the module (no event tap). Nothing is written through it.
+    static var snapshotStore: ZonesStore?
+    /// The store the layout menus read: the running module's, else the snapshot one.
+    private var layoutStore: ZonesStore? { module.isRunning ? module.store : Self.snapshotStore }
 
     private struct Monitor {
         var screen: NSScreen
@@ -34,7 +39,8 @@ struct ZonesSettingsPane: View {
     var body: some View {
         let _ = tick
         let enabled = store.config.zonesEnabled
-        let running = module.isRunning
+        let layoutStore = layoutStore
+        let running = layoutStore != nil
         let monitors = monitors
         VStack(alignment: .leading, spacing: 26) {
             Card {
@@ -78,7 +84,7 @@ struct ZonesSettingsPane: View {
                     if index > 0 { RowDivider() }
                     SettingRow(title: monitor.name,
                                caption: "\(Int(monitor.screen.frame.width)) × \(Int(monitor.screen.frame.height))") {
-                        if running, let layouts = module.store?.state.layouts {
+                        if let layouts = layoutStore?.state.layouts {
                             Picker("", selection: layoutBinding(monitor.key)) {
                                 ForEach(layouts) { Text($0.name).tag($0.id.uuidString) }
                                 Divider()
@@ -155,7 +161,10 @@ struct ZonesSettingsPane: View {
     }
 
     private func layoutBinding(_ key: String) -> Binding<String> {
-        Binding(get: { module.activeLayout(forDisplay: key)?.uuidString ?? ZonesState.off },
+        Binding(get: {
+                    guard let store = layoutStore, store.state.activeByDisplay[key] != ZonesState.off else { return ZonesState.off }
+                    return store.layout(forDisplay: key)?.id.uuidString ?? ZonesState.off
+                },
                 set: { module.setLayout(UUID(uuidString: $0), forDisplay: key) })
     }
 }
