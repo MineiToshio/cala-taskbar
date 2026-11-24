@@ -452,6 +452,57 @@ do {
     expect("Editor opening mid-press cancels and blocks confirmation", !m.confirmDrag(generation: g) && m.phase == .idle)
     m.ignoring = false
 
+    // Review fixes: right-button pairing, reject, release after cancel.
+    m = ZoneDragMachine()
+    _ = m.leftDown(at: p, shift: false, command: false)
+    _ = m.confirmDrag(generation: m.generation)
+    expect("Pairing: swallowed right down", m.rightDown())
+    _ = m.leftUp(at: p, shift: false, command: false)
+    expect("Pairing: a stale pending up is cleared by the next unswallowed right down (its up was lost upstream)",
+           !m.rightDown() && !m.rightUp())
+
+    _ = m.leftDown(at: p, shift: false, command: false)
+    expect("Pairing: right down before confirmation passes", !m.rightDown())
+    _ = m.confirmDrag(generation: m.generation)
+    expect("Pairing: its up after confirmation passes too", !m.rightUp())
+
+    _ = m.rightDown()
+    m.activation = .shift
+    expect("Pairing: activation changed between a swallowed down and its up still swallows the up", m.rightUp())
+    m.activation = .both
+    m.cancel(resetButtons: true)
+
+    _ = m.leftDown(at: p, shift: false, command: false)
+    _ = m.confirmDrag(generation: m.generation)
+    _ = m.rightDown()
+    m.ignoring = true
+    expect("Pairing: the editor opening mid-drag keeps the pending up swallowed", m.phase == .idle && m.rightUp())
+    m.ignoring = false
+
+    let gr = m.leftDown(at: p, shift: false, command: false)!
+    _ = m.confirmDrag(generation: gr)
+    _ = m.rightDown()
+    expect("Reject: a stale generation is ignored", !m.reject(generation: gr &+ 1) && m.phase == .dragging)
+    expect("Reject: drops the drag without a snap", m.reject(generation: gr) && m.phase == .idle && !m.zonesMode)
+    expect("Reject: the swallowed right down still gets its up swallowed", m.rightUp())
+    expect("Reject: no release is reported afterwards", m.leftUp(at: p, shift: false, command: false) == nil)
+
+    _ = m.leftDown(at: p, shift: false, command: false)
+    _ = m.confirmDrag(generation: m.generation)
+    _ = m.rightDown(); _ = m.rightUp()
+    m.cancel(resetButtons: false)
+    let rc = m.leftUp(at: p, shift: false, command: false)
+    expect("Cancel mid-drag still reports the release, without zones mode (drag-out restore can finish)",
+           rc != nil && rc?.zonesMode == false)
+
+    let usableAK = CGRect(x: 0, y: 70, width: 1440, height: 805)
+    expect("Clamp: a drop in the menu bar picks the top edge of the usable area",
+           ZoneWindowFit.clampPoint(CGPoint(x: 300, y: 890), into: usableAK) == CGPoint(x: 300, y: 874.5))
+    expect("Clamp: a drop on the bar strip or Dock picks the bottom edge",
+           ZoneWindowFit.clampPoint(CGPoint(x: 1500, y: 10), into: usableAK) == CGPoint(x: 1439.5, y: 70))
+    expect("Clamp: a point inside is unchanged",
+           ZoneWindowFit.clampPoint(CGPoint(x: 10, y: 100), into: usableAK) == CGPoint(x: 10, y: 100))
+
     var a = ZoneSpanAnchor()
     let z1 = UUID(), z2 = UUID()
     expect("Span: no anchor without ⌘", a.update(command: false, screen: 0, single: z1) == nil)

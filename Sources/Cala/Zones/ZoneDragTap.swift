@@ -126,15 +126,16 @@ final class ZoneDragTap: @unchecked Sendable {
         state.withLockUnchecked { $0 = State(machine: Self.fresh(from: $0.machine), port: nil) }
     }
 
-    /// Re-enables a tap the system disabled; false when it is gone for good (invalid port, permission revoked).
-    func ensureEnabled() -> Bool {
-        guard let port else { return false }
-        guard CFMachPortIsValid(port) else { return false }
-        if !CGEvent.tapIsEnabled(tap: port) {
-            cancel(resetButtons: true)
-            CGEvent.tapEnable(tap: port, enable: true)
-        }
-        return CGEvent.tapIsEnabled(tap: port)
+    enum Health { case ok, reenabled, broken }
+
+    /// Re-enables a tap the system disabled (cancelling the gesture: the caller must hide the overlay);
+    /// `broken` when it is gone for good (invalid port, permission revoked).
+    func ensureEnabled() -> Health {
+        guard let port, CFMachPortIsValid(port) else { return .broken }
+        guard !CGEvent.tapIsEnabled(tap: port) else { return .ok }
+        cancel(resetButtons: true)
+        CGEvent.tapEnable(tap: port, enable: true)
+        return CGEvent.tapIsEnabled(tap: port) ? .reenabled : .broken
     }
 
     // MARK: Any thread
@@ -162,6 +163,16 @@ final class ZoneDragTap: @unchecked Sendable {
         }
         if sync { onSync() }
         return confirmed
+    }
+
+    /// The worker could not resolve the confirmed window: drop the drag and let main hide any overlay.
+    func rejectDrag(generation: UInt64) {
+        let sync = state.withLockUnchecked { s -> Bool in
+            guard s.machine.reject(generation: generation), !s.syncPending else { return false }
+            s.syncPending = true
+            return true
+        }
+        if sync { onSync() }
     }
 
     /// Worker side of the coalesced move check: clears the pending flag and says whether the press is still current.

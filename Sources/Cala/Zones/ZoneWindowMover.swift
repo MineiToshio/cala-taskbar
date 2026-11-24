@@ -10,7 +10,7 @@ final class ZoneWindowMover: @unchecked Sendable {
         var windowID: CGWindowID
         var pid: pid_t
         var start: CGRect
-        var rejected = false
+        var decided = false   // confirmed or rejected: checked once per press
     }
 
     private struct Drag {
@@ -65,14 +65,19 @@ final class ZoneWindowMover: @unchecked Sendable {
         queue.async { [self] in
             guard !cancellation.isCancelled, let tap else { return }
             let (current, point) = tap.beginMoveCheck(generation: generation)
-            guard current, var c = candidate, c.generation == generation, !c.rejected,
+            guard current, var c = candidate, c.generation == generation, !c.decided,
                   let now = Self.bounds(of: c.windowID), ZoneWindowFit.isMove(from: c.start, to: now) else { return }
+            // Confirm on the CG move alone, before any AX call: until the tap knows about the drag, a
+            // right-click would reach the app (a context menu mid-drag). AX resolution follows right away.
+            c.decided = true
+            candidate = c
+            guard tap.confirmDrag(generation: generation) else { return }
             guard let drag = resolve(c, frame: now) else {
-                c.rejected = true
-                candidate = c
+                // Not a window zones may place: end the gesture without a snap. A swallowed right down
+                // keeps its pending up swallowed (the machine only drops the drag).
+                tap.rejectDrag(generation: generation)
                 return
             }
-            guard tap.confirmDrag(generation: generation) else { return }
             drags = drags.filter { $0.key + 8 > generation }
             drags[generation] = restoreIfSnapped(drag, start: c.start, now: now, cursorX: point.x)
         }
@@ -104,6 +109,8 @@ final class ZoneWindowMover: @unchecked Sendable {
         for info in list {
             guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds), frame.contains(p) else { continue }
+            // Fully transparent windows (invisible overlays some apps keep on screen) never receive the click.
+            if let alpha = info[kCGWindowAlpha as String] as? Double, alpha == 0 { continue }
             guard (info[kCGWindowLayer as String] as? Int) == 0,
                   let id = info[kCGWindowNumber as String] as? CGWindowID,
                   let pid = info[kCGWindowOwnerPID as String] as? pid_t else { return nil }

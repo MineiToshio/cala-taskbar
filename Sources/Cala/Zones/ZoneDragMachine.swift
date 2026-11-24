@@ -15,7 +15,9 @@ extension ZoneActivation {
 ///     pressed --confirmDrag(gen)--> dragging              [worker saw another app's window move]
 ///     dragging --rightDown--> SWALLOW, toggle right-click mode (its rightUp is swallowed too)
 ///     dragging --Shift in the event flags--> Shift mode while held
-///     any --leftUp--> idle (the leftUp always passes; a release while dragging is reported)
+///     dragging --reject(gen)--> idle                     [worker: the moving window cannot be placed]
+///     any --leftUp--> idle (the leftUp always passes; the release of a confirmed drag is reported,
+///                           even after a cancel, so a drag-out restore can still finish on mouse-up)
 ///     any --cancel--> idle
 struct ZoneDragMachine {
     enum Phase: Equatable { case idle, pressed, dragging }
@@ -35,6 +37,8 @@ struct ZoneDragMachine {
     private(set) var point: CGPoint = .zero
     /// The right button's down was swallowed, so its up must be swallowed too (no orphan up for the app).
     private(set) var swallowRightUp = false
+    /// The current press was confirmed as a window drag (survives cancel, cleared by reject and the next press).
+    private(set) var confirmed = false
     var activation: ZoneActivation = .both
     /// True while drags must be ignored (the zones editor is open).
     var ignoring = false {
@@ -49,6 +53,7 @@ struct ZoneDragMachine {
     mutating func leftDown(at p: CGPoint, shift: Bool, command: Bool) -> UInt64? {
         generation &+= 1
         rightToggle = false
+        confirmed = false
         self.shift = shift
         self.command = command
         point = p
@@ -70,14 +75,19 @@ struct ZoneDragMachine {
         point = p
         self.shift = shift
         self.command = command
-        defer { phase = .idle; rightToggle = false }
-        guard phase == .dragging else { return nil }
+        defer { phase = .idle; rightToggle = false; confirmed = false }
+        guard confirmed else { return nil }
         return Release(generation: generation, point: p, zonesMode: zonesMode, command: command)
     }
 
     /// Returns true when the event must be swallowed. Only during a confirmed drag of another app's window.
     mutating func rightDown() -> Bool {
-        guard phase == .dragging, activation.allowsRightClick else { return false }
+        guard phase == .dragging, activation.allowsRightClick else {
+            // This down reaches the app, so its up must too. A pending flag here is stale: its up was lost
+            // upstream (remappers, a Bluetooth drop, two mice) and would otherwise eat this click's up.
+            swallowRightUp = false
+            return false
+        }
         rightToggle.toggle()
         swallowRightUp = true
         return true
@@ -92,6 +102,17 @@ struct ZoneDragMachine {
     mutating func confirmDrag(generation gen: UInt64) -> Bool {
         guard phase == .pressed, generation == gen, !ignoring else { return false }
         phase = .dragging
+        confirmed = true
+        return true
+    }
+
+    /// The worker could not resolve or place the confirmed window: back to idle without a snap. A swallowed
+    /// right down keeps its pending up, so the app still never sees an orphan up.
+    mutating func reject(generation gen: UInt64) -> Bool {
+        guard generation == gen, confirmed else { return false }
+        phase = .idle
+        rightToggle = false
+        confirmed = false
         return true
     }
 
@@ -146,5 +167,15 @@ enum ZoneWindowFit {
     static func matches(_ actual: CGRect, _ wanted: CGRect, tolerance: CGFloat = 2) -> Bool {
         abs(actual.minX - wanted.minX) <= tolerance && abs(actual.minY - wanted.minY) <= tolerance
             && abs(actual.width - wanted.width) <= tolerance && abs(actual.height - wanted.height) <= tolerance
+    }
+}
+
+extension ZoneWindowFit {
+    /// Drops in the menu bar, Cala's bar strip or the Dock land on the nearest zone: the picking point is clamped
+    /// into the usable area (half-open on the far edges, like zone hit-testing).
+    static func clampPoint(_ p: CGPoint, into usable: CGRect) -> CGPoint {
+        guard usable.width > 0, usable.height > 0 else { return p }
+        return CGPoint(x: min(max(p.x, usable.minX), usable.maxX - 0.5),
+                       y: min(max(p.y, usable.minY), usable.maxY - 0.5))
     }
 }

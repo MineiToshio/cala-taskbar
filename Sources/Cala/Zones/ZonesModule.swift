@@ -50,6 +50,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
     private var retryTimer: Timer?
     private var screenObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
+    private var accessibilityObserver: NSObjectProtocol?
     private var configObserver: AnyCancellable?
     private var tapProblemLogged = false
     private static var tilingChecked = false
@@ -100,7 +101,17 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         ) { [weak self] _ in self?.screensChanged(run) }
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.cancelMode(run, reason: "space changed") }
+        ) { [weak self] _ in self?.spaceChanged(run) }
+        // Posted when any app's Accessibility permission changes: react sooner than the 3 s poll (the trust
+        // state settles a moment after the notification).
+        accessibilityObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.accessibility.api"), object: nil, queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.runID == run else { return }
+                self.ensureTap()
+            }
+        }
 
         tapProblemLogged = false
         ensureTap()
@@ -124,8 +135,10 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         session = nil
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
+        if let accessibilityObserver { DistributedNotificationCenter.default().removeObserver(accessibilityObserver) }
         screenObserver = nil
         spaceObserver = nil
+        accessibilityObserver = nil
         configObserver?.cancel()
         configObserver = nil
         store = nil
@@ -142,10 +155,19 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
             endSession()
         }
         if tap.isInstalled {
-            if tap.ensureEnabled() { return }
-            tap.uninstall()
-            endSession()
-            log("zones: event tap stopped working, reinstalling")
+            switch tap.ensureEnabled() {
+            case .ok:
+                return
+            case .reenabled:
+                // The gesture was cancelled with it: never leave a click-through overlay on screen.
+                endSession()
+                log("zones: tap found disabled, re-enabled")
+                return
+            case .broken:
+                tap.uninstall()
+                endSession()
+                log("zones: event tap stopped working, reinstalling")
+            }
         }
         guard trusted else {
             if !tapProblemLogged { log("zones: no Accessibility, tap not installed") }
@@ -257,9 +279,11 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         session.screenKey = screen?.key
         var result: (ZonePicking.Target, CGRect)?
         if let screen, !screen.zones.isEmpty {
-            let single = ZonePicking.chosen(point, zones: screen.zones, usable: screen.usable)?.id
+            // A pointer over the menu bar, Cala's bar strip or the Dock picks the nearest zone edge.
+            let pick = ZoneWindowFit.clampPoint(point, into: screen.usable)
+            let single = ZonePicking.chosen(pick, zones: screen.zones, usable: screen.usable)?.id
             let anchor = session.anchor.update(command: command, screen: screen.index, single: single)
-            if let target = ZonePicking.target(point: point, zones: screen.zones, usable: screen.usable,
+            if let target = ZonePicking.target(point: pick, zones: screen.zones, usable: screen.usable,
                                                gap: CGFloat(config.config.zonesGap), spanAnchor: anchor) {
                 result = (target, screen.usable)
             }
@@ -269,6 +293,20 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         self.session = session
         if show { overlay.update(screen: screen?.index, target: result?.0) }
         return result
+    }
+
+    /// A Space change never cancels zones mode. With "Displays have separate Spaces" (the macOS default) it fires
+    /// whenever the pointer carries a window onto another display, and an edge push to an adjacent Space carries
+    /// the window along too. In both cases the drag goes on, the panels join every Space and the target is
+    /// recomputed from the pointer, so the gesture stays valid. Only bring the panels back to the front.
+    private func spaceChanged(_ run: UUID) {
+        guard isRunning, runID == run, let current = session else { return }
+        showOverlay(current)
+        if let snapshot = tap?.takeSnapshot(), snapshot.zonesMode {
+            updateTarget(point: snapshot.point, command: snapshot.command)
+        } else {
+            endSession()
+        }
     }
 
     private func screensChanged(_ run: UUID) {
