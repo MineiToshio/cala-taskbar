@@ -17,12 +17,18 @@ final class ZoneLayoutStrip {
 
     var isVisible: Bool { panel != nil }
 
+    /// The collapsed pill's size for the current layout (its width follows the name); the module hit-tests it.
+    var pillSize: CGSize {
+        guard let view else { return ZoneStripGeometry.grip }
+        return ZoneStripView.pillSize(name: view.currentName, usableWidth: usable.width)
+    }
+
     func show(usable: CGRect, entries: [Entry], current: Int?, accent: NSColor) {
         precondition(Thread.isMainThread)
         close()
         self.usable = usable
         isExpanded = false
-        let panel = NSPanel(contentRect: ZoneStripGeometry.collapsed(usable: usable).panel,
+        let panel = NSPanel(contentRect: ZoneStripGeometry.collapsed(usable: usable, pill: ZoneStripGeometry.grip).panel,
                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
@@ -75,6 +81,40 @@ final class ZoneLayoutStrip {
         return ZoneStripGeometry.expanded(usable: usable, count: view.entries.count, current: view.current).body
     }
 
+    /// Offscreen render for `--snapshot`: the pill or the expanded strip over a neutral backdrop, at 2x.
+    @MainActor
+    static func renderSnapshot(entries: [Entry], current: Int?, expanded: Bool, accent: NSColor, dark: Bool, to url: URL) {
+        let usable = CGRect(x: 0, y: 0, width: 1512, height: 400)
+        let frame: CGRect
+        if expanded {
+            frame = ZoneStripGeometry.expanded(usable: usable, count: entries.count, current: current).panel
+        } else {
+            let name = current.map { entries[$0].name } ?? tx("Off", "Desactivadas")
+            frame = ZoneStripGeometry.collapsed(usable: usable,
+                                                pill: ZoneStripView.pillSize(name: name, usableWidth: usable.width)).panel
+        }
+        final class Window: NSWindow { override var backingScaleFactor: CGFloat { 2 } }
+        let window = Window(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        let container = NSView(frame: CGRect(origin: .zero, size: frame.size))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = (dark ? NSColor(white: 0.18, alpha: 1) : NSColor(white: 0.78, alpha: 1)).cgColor
+        let view = ZoneStripView(entries: entries, current: current, accent: accent)
+        view.frame = container.bounds
+        if expanded { view.expanded = ZoneStripGeometry.expanded(usable: usable, count: entries.count, current: current) }
+        if expanded, let first = view.expanded?.items.first(where: { $0.index != current }) { view.hover = (first.index, 0.6) }
+        container.addSubview(view)
+        window.contentView = container
+        window.setFrame(frame, display: false)
+        defer { window.close() }
+        NSAppearance(named: dark ? .darkAqua : .aqua)?.performAsCurrentDrawingAppearance {
+            guard let bitmap = container.bitmapImageRepForCachingDisplay(in: container.bounds) else { return }
+            container.cacheDisplay(in: container.bounds, to: bitmap)
+            try? bitmap.representation(using: .png, properties: [:])?.write(to: url)
+        }
+    }
+
     func close() {
         guard let panel else { return }
         panel.orderOut(nil)
@@ -92,13 +132,13 @@ final class ZoneLayoutStrip {
             panel.setFrame(geometry.panel, display: false)
         } else {
             view.expanded = nil
-            panel.setFrame(ZoneStripGeometry.collapsed(usable: usable).panel, display: false)
+            panel.setFrame(ZoneStripGeometry.collapsed(usable: usable, pill: pillSize).panel, display: false)
         }
         view.needsDisplay = true
     }
 }
 
-private final class ZoneStripView: NSView {
+final class ZoneStripView: NSView {
     let entries: [ZoneLayoutStrip.Entry]
     var current: Int?
     var expanded: ZoneStripGeometry.Expanded?
@@ -136,16 +176,64 @@ private final class ZoneStripView: NSView {
         shape.stroke()
 
         guard let expanded, let window else {
-            // Collapsed: a calm grip.
-            let grip = NSRect(x: body.midX - 18, y: body.midY - 2, width: 36, height: 4)
-            NSColor.secondaryLabelColor.withAlphaComponent(0.7).setFill()
-            NSBezierPath(roundedRect: grip, xRadius: 2, yRadius: 2).fill()
+            drawPill(in: body)
             return
         }
         let origin = window.frame.origin
         for item in expanded.items where entries.indices.contains(item.index) {
             drawItem(item.index, frame: item.frame.offsetBy(dx: -origin.x, dy: -origin.y), scale: expanded.scale)
         }
+    }
+
+    /// The collapsed pill, always the same: the current layout's mini picture, its name, "Change layout" and a
+    /// down chevron, so it says what it is and that it opens.
+    private func drawPill(in body: CGRect) {
+        let g = ZoneStripGeometry.self
+        var x = body.minX + g.pillPadding
+        let pictureBox = CGRect(x: x, y: body.midY - g.pillPicture.height / 2, width: g.pillPicture.width, height: g.pillPicture.height)
+        if let current, entries.indices.contains(current) {
+            let size = entries[current].picture.size
+            let fit = min(pictureBox.width / max(size.width, 1), pictureBox.height / max(size.height, 1))
+            entries[current].picture.draw(in: CGRect(x: pictureBox.midX - size.width * fit / 2, y: pictureBox.midY - size.height * fit / 2,
+                                                     width: size.width * fit, height: size.height * fit))
+        } else if let off = NSImage(systemSymbolName: "nosign", accessibilityDescription: nil)?
+                    .withSymbolConfiguration(.init(pointSize: 12, weight: .medium)) {
+            NSColor.secondaryLabelColor.set()
+            off.draw(in: CGRect(x: pictureBox.midX - 7, y: pictureBox.midY - 7, width: 14, height: 14))
+        }
+        x = pictureBox.maxX + g.pillGap
+        let text = Self.pillText(name: currentName)
+        let chevronX = body.maxX - g.pillPadding - g.pillChevron
+        let textRect = CGRect(x: x, y: body.midY - ceil(text.size().height) / 2, width: max(0, chevronX - g.pillGap - x),
+                              height: ceil(text.size().height))
+        text.draw(with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+        let chevron = NSBezierPath()
+        chevron.move(to: CGPoint(x: chevronX, y: body.midY + 2))
+        chevron.line(to: CGPoint(x: chevronX + g.pillChevron / 2, y: body.midY - 2.5))
+        chevron.line(to: CGPoint(x: chevronX + g.pillChevron, y: body.midY + 2))
+        chevron.lineWidth = 1.8
+        chevron.lineCapStyle = .round
+        chevron.lineJoinStyle = .round
+        accent.setStroke()
+        chevron.stroke()
+    }
+
+    var currentName: String {
+        current.flatMap { entries.indices.contains($0) ? entries[$0].name : nil } ?? tx("Off", "Desactivadas")
+    }
+
+    static func pillText(name: String) -> NSAttributedString {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        let text = NSMutableAttributedString(string: name, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor, .paragraphStyle: style])
+        text.append(NSAttributedString(string: "  ·  " + tx("Change layout", "Cambiar layout"), attributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: style]))
+        return text
+    }
+
+    static func pillSize(name: String, usableWidth: CGFloat) -> CGSize {
+        ZoneStripGeometry.pillSize(textWidth: ceil(pillText(name: name).size().width), usableWidth: usableWidth)
     }
 
     private func drawItem(_ index: Int, frame: CGRect, scale: CGFloat) {

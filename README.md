@@ -109,7 +109,7 @@ Zones lets you place windows without resizing them by hand. Turn it on in the we
 2. **While you hold the button, right-click** (or **hold Shift**). Your zones appear on that monitor.
 3. **Move over a zone and release.** The window takes its position and size.
 
-Hold **⌘** to cover several neighbouring zones at once. Right-click again, release Shift, or release outside every zone to cancel: the window stays where you dropped it. Drag a snapped window out and it gets its old size back.
+To use another layout, move over the **Change layout** pill at the top of the screen while the zones show and rest on the one you want. Hold **⌘** to cover several neighbouring zones at once. Right-click again, release Shift, or release outside every zone to cancel: the window stays where you dropped it. Drag a snapped window out and it gets its old size back.
 
 - **Layouts:** eight ready-made ones (two and three columns, a 2 × 2 grid, main + side, two rows...) and as many of your own as you like. Draw them in the editor (*Settings → Zones → Edit zones…*, or the Cala icon in the menu bar): drag to draw, move and resize with guides that snap to the other zones, an optional 12-division grid and one layout per monitor (or none).
 - **Without the bar:** turn the bar off in *Settings → General* and Cala lives in the menu bar, with no taskbar and no reserved space. The Dock and menu bar stay as macOS has them.

@@ -15,7 +15,6 @@ Ideas that were deliberately left out of the first version of [Zones](zones.md):
 Natural follow-ups:
 - **Keyboard and VoiceOver navigation in the editor** (today the canvas is one accessibility element; zones can only be moved and resized with the mouse).
 - **Esc to cancel zones mode** while dragging (needs a keyboard mask on the tap, which would change the permission analysis, see [zones.md](zones.md#permissions)).
-- If the owner's manual test shows the right-click gesture does not work, make **Shift the only gesture** and drop the swallowing.
 - Compensate for the few points macOS can inset an auto-hidden Dock; stable ids for identical monitors; import and export of layouts.
 
 ## Pending ideas

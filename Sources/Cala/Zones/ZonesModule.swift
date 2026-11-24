@@ -336,7 +336,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         state.point = point
         let count = state.layouts.count
         let inside = ZoneStripGeometry.inside(point, expanded: state.expanded, usable: screen.usable,
-                                              count: count, current: state.current)
+                                              count: count, current: state.current, pill: strip.pillSize)
         if inside != state.expanded {
             state.expanded = inside
             state.dwell.reset()
@@ -422,7 +422,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         overlay.replace(ZoneOverlay.Screen(index: screen.index, usable: screen.usable, zones: layout.zones.map { zone in
             (zone.id, ZoneGeometry.applyGap(ZoneGeometry.frame(for: zone.rect, in: screen.usable), gap: gap, usable: screen.usable))
         }), palette: .make(theme: config.config.theme))
-        let body = strip.expandedBody ?? ZoneStripGeometry.collapsed(usable: screen.usable).body
+        let body = strip.expandedBody ?? ZoneStripGeometry.collapsed(usable: screen.usable, pill: strip.pillSize).body
         toast.show(ZoneEditorSession.displayName(layout), below: body.minY, centerX: screen.usable.midX)
         log("zones: layout strip switched a display to \(layout.name)")
     }

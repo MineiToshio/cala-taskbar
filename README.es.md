@@ -109,14 +109,13 @@ Zonas te deja acomodar ventanas sin cambiarles el tamaño a mano. Actívalo en l
 2. **Sin soltar el botón, haz clic derecho** (o **mantén Mayús**). Aparecen tus zonas en esa pantalla.
 3. **Ponte sobre una zona y suelta.** La ventana toma su posición y su tamaño.
 
-Mantén **⌘** para cubrir varias zonas vecinas a la vez. Vuelve a hacer clic derecho, suelta Mayús o suelta fuera de todas las zonas para cancelar: la ventana se queda donde la soltaste. Si arrastras una ventana encajada para sacarla, recupera su tamaño anterior.
+Para usar otra distribución, pasa sobre la píldora **Cambiar layout** arriba de la pantalla mientras se ven las zonas y detente en la que quieras. Mantén **⌘** para cubrir varias zonas vecinas a la vez. Vuelve a hacer clic derecho, suelta Mayús o suelta fuera de todas las zonas para cancelar: la ventana se queda donde la soltaste. Si arrastras una ventana encajada para sacarla, recupera su tamaño anterior.
 
 - **Distribuciones:** ocho ya hechas (dos y tres columnas, cuadrícula 2 × 2, principal + lateral, dos filas...) y todas las tuyas que quieras. Se dibujan en el editor (*Configuración → Zonas → Editar zonas…*, o el icono de Cala en la barra de menús): arrastra para dibujar, mueve y cambia el tamaño con guías que se pegan a las otras zonas, una cuadrícula opcional de 12 divisiones y una distribución por pantalla (o ninguna).
 - **Sin la barra:** apaga la barra en *Configuración → General* y Cala vive en la barra de menús, sin barra de tareas y sin reservar espacio. El Dock y la barra de menús quedan como macOS los tiene.
 - **Con la barra:** las zonas nunca quedan debajo de la barra cuando está siempre visible.
 - **Permiso:** solo **Accesibilidad**. Zonas nunca graba la pantalla ni lee el teclado.
 - **macOS 15 o más nuevo** también puede acomodar una ventana que sueltas junto a un borde de la pantalla. Si estorba, desactiva *Arrastrar ventanas a los bordes de la pantalla para acomodarlas* en *Ajustes del Sistema → Escritorio y Dock → Ventanas* (*Configuración → Zonas* tiene un botón).
-- Si el clic derecho falla al arrastrar, elige **Mantener Mayús** en *Configuración → Zonas → Activar zonas con*.
 
 Más en [docs/zones.md](docs/zones.md) (en inglés).
 

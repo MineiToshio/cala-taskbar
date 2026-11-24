@@ -96,7 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// `Cala --snapshot <dir>`: every Settings pane in the current language (the Zones pane reads zones.json directly for
 /// its per-monitor layout menus; no module starts), the General and Zones panes and the welcome's module question and zones-only permission page in English
-/// and Spanish, plus the zones editor (`zones-editor-en/es`, and `zones-editor-light-en/es` in the Snow theme) at 1512 × 982, as 2x PNGs. Views are drawn through an offscreen NSHostingView so AppKit controls (switches, menus,
+/// and Spanish, the welcome's last page with "How to use Zones" (`onboarding-ready-zones*`), the drag-time layout strip
+/// (`zones-strip-pill|expanded-light|dark-<lang>`), plus the zones editor (`zones-editor-en/es`, and `zones-editor-light-en/es` in the Snow theme) at 1512 × 982, as 2x PNGs. Views are drawn through an offscreen NSHostingView so AppKit controls (switches, menus,
 /// sliders) render as they do on screen.
 @MainActor
 enum Snapshots {
@@ -138,8 +139,28 @@ enum Snapshots {
             appLanguageOverride = code
             write(OnboardingView(finish: {}, step: .modules), "onboarding-modules-\(code)", width: 600)
             write(OnboardingView(finish: {}, step: .essentials, bar: false, zones: true), "onboarding-essentials-zones-\(code)", width: 600)
+            write(OnboardingView(finish: {}, step: .ready, bar: false, zones: true), "onboarding-ready-zones-\(code)", width: 600)
+            write(OnboardingView(finish: {}, step: .ready, bar: true, zones: true), "onboarding-ready-bar-zones-\(code)", width: 600)
             write(pane(.general), "general-\(code)", width: 640)
             write(pane(.zones), "zones-\(code)", width: 640)
+            if let store = ZonesSettingsPane.snapshotStore {
+                // The drag-time layout strip as it draws on screen: the collapsed pill and the open strip.
+                let layouts = store.state.layouts
+                let screen = NSScreen.screens.first?.frame ?? CGRect(x: 0, y: 0, width: 1512, height: 982)
+                let key = NSScreen.screens.first.map { ZonesModule.displayKey($0, keys: ZoneDisplays.keys(for: NSScreen.screens)) } ?? ""
+                let active = store.layout(forDisplay: key)?.id ?? layouts.first?.id
+                let accent = ZoneOverlay.accent(theme: ConfigStore.shared.config.theme)
+                let entries = layouts.map { layout in
+                    ZoneLayoutStrip.Entry(id: layout.id, name: ZoneEditorSession.displayName(layout),
+                                          picture: ZoneThumbnailRenderer.image(layout.zones, aspect: ZoneThumbnailRenderer.aspect(of: screen),
+                                                                               fitting: ZoneStripGeometry.picture, accent: accent))
+                }
+                let current = layouts.firstIndex { $0.id == active }
+                for (expanded, dark) in [(false, false), (false, true), (true, false), (true, true)] {
+                    ZoneLayoutStrip.renderSnapshot(entries: entries, current: current, expanded: expanded, accent: accent, dark: dark,
+                                                   to: URL(fileURLWithPath: "\(dir)/zones-strip-\(expanded ? "expanded" : "pill")-\(dark ? "dark" : "light")-\(code).png"))
+                }
+            }
             try? ZoneEditor.renderSnapshot(to: URL(fileURLWithPath: "\(dir)/zones-editor-\(code).png"),
                                            size: CGSize(width: 1512, height: 982), scale: 2)
             try? ZoneEditor.renderSnapshot(to: URL(fileURLWithPath: "\(dir)/zones-editor-light-\(code).png"),

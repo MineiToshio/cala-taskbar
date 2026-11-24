@@ -301,28 +301,29 @@ struct OnboardingView: View {
                     }
                 }
             }
+            if useZones {
+                // How to use Zones, taught here once and the same in Settings → Zones (never during the drag).
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(tx("How to use Zones", "Cómo usar las zonas")).font(.system(size: 13, weight: .semibold))
+                    Card {
+                        ZonesHowTo(activation: ZoneActivation(config: store.config.zonesActivation),
+                                   strip: store.config.zonesLayoutStrip, compact: useBar)
+                            .padding(.horizontal, 16).padding(.vertical, useBar ? 10 : 14)
+                    }
+                }
+                .padding(.top, 16)
+            }
             VStack(alignment: .leading, spacing: 8) {
                 if useBar {
                     tip("cursorarrow.click.2", tx("Right-click an empty part of the bar for themes and Settings.", "Clic derecho en una zona vacía de la barra para temas y Configuración."))
                 } else {
                     tip("menubar.rectangle", tx("Cala lives in the menu bar: click its icon for Settings, the zones editor and your layouts.", "Cala vive en la barra de menús: haz clic en su icono para Configuración, el editor de zonas y tus distribuciones."))
                 }
-                if useZones {
-                    tip("rectangle.split.2x2", zonesTip)
-                }
                 tip("questionmark.circle", tx("Missing permissions can be turned on any time in Settings → Permissions.", "Los permisos que falten se activan cuando quieras en Configuración → Permisos."))
             }
             .padding(.top, 16).padding(.leading, 4)
         }
         .onAppear { login = LoginItem.enabled || !UserDefaults.standard.bool(forKey: "loginItemChosen") }
-    }
-
-    private var zonesTip: String {
-        switch ZoneActivation(config: store.config.zonesActivation) {
-        case .shift: tx("Drag a window and hold Shift to show your zones; release over one to snap it.", "Arrastra una ventana y mantén Mayús para ver tus zonas; suéltala sobre una para encajarla.")
-        case .rightClick: tx("Drag a window and right-click to show your zones; release over one to snap it.", "Arrastra una ventana y haz clic derecho para ver tus zonas; suéltala sobre una para encajarla.")
-        case .both: tx("Drag a window and right-click or hold Shift to show your zones; release over one to snap it.", "Arrastra una ventana y haz clic derecho o mantén Mayús para ver tus zonas; suéltala sobre una para encajarla.")
-        }
     }
 
     private func feature(_ symbol: String, _ title: String, _ detail: String) -> some View {

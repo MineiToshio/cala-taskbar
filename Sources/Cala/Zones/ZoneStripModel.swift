@@ -1,8 +1,9 @@
 import Foundation
 import CoreGraphics
 
-/// Geometry of the drag-time layout strip: a collapsed grip at the top centre of a display's usable area that
-/// expands into a row of layout pictures. AppKit coordinates (y grows up). Every panel has a transparent
+/// Geometry of the drag-time layout strip: a collapsed pill at the top centre of a display's usable area (the
+/// current layout's picture, its name, "Change layout" and a chevron; always the same) that expands into a row of
+/// layout pictures. AppKit coordinates (y grows up). Every panel has a transparent
 /// `margin` around its visible body (room for the shadow); only the body is the hit area.
 enum ZoneStripGeometry {
     struct Expanded: Equatable {
@@ -26,13 +27,26 @@ enum ZoneStripGeometry {
     /// One item: a picture box of 80 × 50 and a name line under it.
     static let item = CGSize(width: 88, height: 74)
     static let picture = CGSize(width: 80, height: 50)
-    static let grip = CGSize(width: 112, height: 22)
+    /// The pill's fallback size; the real width follows its text (`pillSize`).
+    static let grip = CGSize(width: 200, height: 28)
+    /// Pill content: padding, mini picture, gaps and chevron around the measured text.
+    static let pillPadding: CGFloat = 12
+    static let pillPicture = CGSize(width: 26, height: 16)
+    static let pillGap: CGFloat = 8
+    static let pillChevron: CGFloat = 10
     static let minScale: CGFloat = 0.6
     static let maxVisible = 9
 
-    static func collapsed(usable: CGRect) -> (panel: CGRect, body: CGRect) {
-        let body = CGRect(x: (usable.midX - grip.width / 2).rounded(), y: usable.maxY - topGap - grip.height,
-                          width: grip.width, height: grip.height)
+    /// The pill fitted around text of `textWidth`, never wider than the usable area allows.
+    static func pillSize(textWidth: CGFloat, usableWidth: CGFloat) -> CGSize {
+        let wanted = 2 * pillPadding + pillPicture.width + 2 * pillGap + max(0, textWidth) + pillChevron
+        let limit = max(grip.height * 2, usableWidth - 2 * (margin + 8))
+        return CGSize(width: min(wanted, limit).rounded(.up), height: grip.height)
+    }
+
+    static func collapsed(usable: CGRect, pill: CGSize = grip) -> (panel: CGRect, body: CGRect) {
+        let body = CGRect(x: (usable.midX - pill.width / 2).rounded(), y: usable.maxY - topGap - pill.height,
+                          width: pill.width, height: pill.height)
         return (body.insetBy(dx: -margin, dy: -margin), body)
     }
 
@@ -75,15 +89,15 @@ enum ZoneStripGeometry {
         expanded.items.first { $0.frame.contains(p) }?.index
     }
 
-    /// Whether the cursor is in the strip: the expanded body, or the collapsed grip's body. Entering the grip
-    /// expands the strip; leaving the expanded body collapses it.
-    static func inside(_ p: CGPoint, expanded: Bool, usable: CGRect, count: Int, current: Int?) -> Bool {
+    /// Whether the cursor is in the strip: the expanded body, or the collapsed pill. Entering the pill expands the
+    /// strip; leaving the expanded body collapses it.
+    static func inside(_ p: CGPoint, expanded: Bool, usable: CGRect, count: Int, current: Int?, pill: CGSize = grip) -> Bool {
         expanded ? self.expanded(usable: usable, count: count, current: current).body.contains(p)
-                 : collapsed(usable: usable).body.contains(p)
+                 : collapsed(usable: usable, pill: pill).body.contains(p)
     }
 
-    /// Zone picking is suspended only inside the expanded strip. The collapsed grip never blocks zones that
-    /// touch the top edge: picking there goes on as if the grip were not drawn.
+    /// Zone picking is suspended only inside the expanded strip. The collapsed pill never blocks zones that
+    /// touch the top edge: picking there goes on as if the pill were not drawn.
     static func suspendsPicking(_ p: CGPoint, expanded: Bool, usable: CGRect, count: Int, current: Int?) -> Bool {
         expanded && inside(p, expanded: true, usable: usable, count: count, current: current)
     }

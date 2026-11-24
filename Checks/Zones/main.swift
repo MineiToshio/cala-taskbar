@@ -799,6 +799,17 @@ do {
     expect("Strip: the transparent 16 pt margin is not part of the hit area",
            eight.panel.contains(inMargin)
                && !ZoneStripGeometry.inside(inMargin, expanded: true, usable: usable, count: 8, current: 2))
+    let pill = ZoneStripGeometry.pillSize(textWidth: 150, usableWidth: usable.width)
+    let pillRect = ZoneStripGeometry.collapsed(usable: usable, pill: pill).body
+    expect("Strip: the pill fits its picture, text and chevron, legibly tall",
+           pill.width == 12 + 26 + 8 + 150 + 8 + 10 + 12 && pill.height >= 24 && abs(pillRect.midX - usable.midX) <= 0.5)
+    expect("Strip: a long name never makes the pill wider than the display",
+           ZoneStripGeometry.pillSize(textWidth: 5000, usableWidth: 800).width <= 800 - 2 * 16)
+    expect("Strip: the collapsed hit area is the pill itself",
+           ZoneStripGeometry.inside(CGPoint(x: pillRect.minX + 2, y: pillRect.midY), expanded: false, usable: usable,
+                                    count: 8, current: 2, pill: pill)
+               && !ZoneStripGeometry.inside(CGPoint(x: pillRect.minX - 2, y: pillRect.midY), expanded: false, usable: usable,
+                                            count: 8, current: 2, pill: pill))
     let onGrip = CGPoint(x: grip.body.midX, y: grip.body.midY)
     expect("Strip: the collapsed grip never suspends zone picking (top-edge zones stay reachable)",
            ZoneStripGeometry.inside(onGrip, expanded: false, usable: usable, count: 8, current: 2)

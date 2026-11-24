@@ -86,6 +86,12 @@ struct ZonesSettingsPane: View {
                         .accessibilityLabel(tx("Show layouts while dragging", "Mostrar layouts al arrastrar"))
                 }
             }
+            SectionTitle(text: tx("How to use Zones", "Cómo usar las zonas"))
+            Card {
+                ZonesHowTo(activation: ZoneActivation(config: store.config.zonesActivation),
+                           strip: store.config.zonesLayoutStrip, compact: true)
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+            }
             SectionTitle(text: tx("Layout per monitor", "Distribución por pantalla"))
             Card {
                 ForEach(Array(monitors.enumerated()), id: \.offset) { index, monitor in
