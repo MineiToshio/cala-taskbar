@@ -32,6 +32,7 @@ struct AppLoad: Equatable, Identifiable {
     var memory: UInt64   // Physical footprint in bytes.
     var count: Int
     var closable: Bool
+    var energy = 0.0     // Energy impact, unitless: see `SystemRules.energyScore`.
 
     var quitPID: Int32? {
         guard closable, case .app(let pid) = kind else { return nil }
@@ -67,19 +68,22 @@ struct CriticalDuration {
 }
 
 enum LoadMetric {
-    case cpu, memory
+    case cpu, memory, energy
 
     func weight(_ load: AppLoad) -> Double {
         switch self {
         case .cpu: return load.cpu
         case .memory: return Double(load.memory)
+        case .energy: return load.energy
         }
     }
 
+    /// Energy amounts are tenths of a score point, so rows and subrows add up at one decimal.
     func value(_ amount: Int, locale: Locale) -> String {
         switch self {
         case .cpu: return "\(amount)%"
         case .memory: return memoryText(UInt64(amount), locale: locale)
+        case .energy: return SystemRules.energyText(tenths: amount, locale: locale)
         }
     }
 
@@ -99,6 +103,14 @@ struct ProcessUsage: Equatable {
     let executable: String
     let cpu: Double?
     let memory: UInt64?
+    var energy: Double? = nil
+}
+
+/// Cumulative counters from `proc_pid_rusage` that feed the energy impact score.
+struct EnergyCounters: Equatable {
+    let start: UInt64            // Process start time, to detect a reused PID.
+    let cpuNanoseconds: UInt64   // User plus system time.
+    let wakeups: UInt64          // Package idle wakeups plus interrupt wakeups.
 }
 
 struct MeasuredProcess {
@@ -114,31 +126,82 @@ struct LoadDetail: Equatable, Identifiable {
     let action: SystemAction?
 }
 
+/// Vertical budget of the system panel. The cap comes from the screen (see `SystemPane`), so the rules take it as input.
 struct SystemPanelLayout: Equatable {
-    static let maxHeight = 520
-    static let maxRows = 7
-    static let rowHeight = 26
-    static let rowSpacing = 4
-    static let cardHeight = 91
+    static let width = 420           // Panel width; the content is 384 pt inside the flyout padding.
+    static let contentWidth = width - 36
+    static let maxHeight = 640       // Cap on large screens; smaller screens pass less.
+    static let meterRowHeight = 42
+    static let minMeterRowHeight = 34
+    static let maxRows = 6           // Five app rows plus “System and others”.
+    static let minRows = 4           // Rows kept before the meters start to shrink.
+    static let rowHeight = 30
+    static let rowSpacing = 6
+    static let cardHeight = 91       // A card with a two-line detail and buttons; shorter cards leave the rest below the list.
     static let noteHeight = 30
+    static let maintenanceHeight = 24  // One discreet line above the footer, with its spacing.
+    static let listHeaderHeight = 30   // Title and tabs, plus the gap to the first row.
+    /// Flyout padding, “More” row, header, list header, footer and the gaps between them.
+    static let fixedChrome = 165
 
+    let maxHeight: Int
+    let meterRowHeight: Int
     let rowLimit: Int
     let listHeight: Int
     let expandedListHeight: Int
 
-    init(messageHeight: Int, hasMaintenance: Bool) {
-        // Fixed chrome includes the flyout padding and the “More” navigation row.
-        let chrome = 231 + (messageHeight > 0 ? messageHeight + 10 : 0) + (hasMaintenance ? 34 : 0)
-        let available = Self.maxHeight - chrome
-        let preferred = Self.maxRows - (messageHeight > Self.noteHeight ? 1 : 0) - (hasMaintenance ? 1 : 0)
-        rowLimit = min(preferred, (available + Self.rowSpacing) / (Self.rowHeight + Self.rowSpacing))
-        listHeight = Self.height(forRows: rowLimit)
-        expandedListHeight = min(available, listHeight + 34)
+    var meterHeight: Int { 3 * meterRowHeight }
+
+    /// Picks the most list rows (up to `maxRows`) whose expanded state still fits two detail lines. On short screens
+    /// rows drop to `minRows` first, then the meter rows shrink to `minMeterRowHeight`, then rows drop further.
+    init(messageHeight: Int, hasMaintenance: Bool, maxHeight: Int = Self.maxHeight) {
+        let extra = (messageHeight > 0 ? messageHeight + 10 : 0) + (hasMaintenance ? Self.maintenanceHeight : 0)
+        func fit(meterRow: Int, rows range: ClosedRange<Int>) -> (rows: Int, available: Int)? {
+            let available = maxHeight - Self.fixedChrome - 3 * meterRow - extra
+            return range.reversed().first { Self.fits(rows: $0, available: available) }.map { ($0, available) }
+        }
+        var choice: (meter: Int, rows: Int, available: Int)?
+        if let fitted = fit(meterRow: Self.meterRowHeight, rows: Self.minRows...Self.maxRows) {
+            choice = (Self.meterRowHeight, fitted.rows, fitted.available)
+        } else {
+            for meter in stride(from: Self.meterRowHeight - 1, through: Self.minMeterRowHeight, by: -1) {
+                if let fitted = fit(meterRow: meter, rows: Self.minRows...Self.minRows) {
+                    choice = (meter, fitted.rows, fitted.available)
+                    break
+                }
+            }
+        }
+        if choice == nil {
+            let fitted = fit(meterRow: Self.minMeterRowHeight, rows: 1...Self.minRows)
+            choice = (Self.minMeterRowHeight, fitted?.rows ?? 1,
+                      fitted?.available ?? maxHeight - Self.fixedChrome - 3 * Self.minMeterRowHeight - extra)
+        }
+        let chosen = choice!
+        self.maxHeight = maxHeight
+        meterRowHeight = chosen.meter
+        rowLimit = chosen.rows
+        listHeight = Self.height(forRows: chosen.rows)
+        expandedListHeight = Self.expandedHeight(rows: chosen.rows, available: chosen.available)
     }
 
     static func height(forRows count: Int) -> Int {
         count * rowHeight + max(0, count - 1) * rowSpacing
     }
+
+    private static func expandedHeight(rows: Int, available: Int) -> Int {
+        min(available, height(forRows: rows) + 34)
+    }
+
+    /// The folded list fits and, expanded, every parent count still leaves room for two detail lines.
+    static func fits(rows: Int, available: Int) -> Bool {
+        guard rows > 0, height(forRows: rows) <= available else { return false }
+        let expanded = expandedHeight(rows: rows, available: available)
+        return (1...rows).allSatisfy { count in
+            [true, false].allSatisfy { LoadDetailLayout(parentCount: count, showsEstimate: $0, listHeight: expanded).capacity >= 2 }
+        }
+    }
+
+    var chrome: Int { Self.fixedChrome + meterHeight }
 }
 
 struct LoadDetailLayout {
@@ -156,7 +219,7 @@ struct LoadDetailLayout {
         let normalBudget = listHeight - parentCount * (Self.expandedRowHeight + 4) - header
         let useCompactSiblings = normalBudget < 2 * Self.detailRowHeight
         let siblingHeight = useCompactSiblings ? 16 : Self.expandedRowHeight
-        let spacing = useCompactSiblings ? 3 : 4
+        let spacing = useCompactSiblings ? 2 : 4
         let budget = listHeight - Self.expandedRowHeight - max(0, parentCount - 1) * siblingHeight
             - parentCount * spacing - header
         self.siblingHeight = siblingHeight
@@ -277,6 +340,56 @@ struct LoadSnapshot {
     var loads: [AppLoad] { reading?.loads ?? [] }
 }
 
+enum SystemMetric: String, CaseIterable {
+    case cpu, memory, heat
+}
+
+struct MetricLevels: Equatable {
+    var cpu: SystemLevel
+    var memory: SystemLevel
+    var heat: SystemLevel
+
+    subscript(metric: SystemMetric) -> SystemLevel {
+        switch metric {
+        case .cpu: return cpu
+        case .memory: return memory
+        case .heat: return heat
+        }
+    }
+}
+
+/// Keeps the tray from flickering between metrics: a metric stays on screen at least `hold` seconds, unless another one
+/// gets strictly worse. A new preference can switch between normal metrics immediately when no alert is held.
+struct MetricHold {
+    static let hold: TimeInterval = 30
+
+    private(set) var shown: SystemMetric?
+    private(set) var since: TimeInterval = -.infinity
+    private var preferred: SystemMetric?
+    private var selectedForAlert = false
+
+    mutating func update(_ levels: MetricLevels, preferred: SystemMetric, at now: TimeInterval) -> SystemMetric {
+        let target = SystemRules.dominant(levels, preferred: preferred)
+        defer { self.preferred = preferred }
+        guard let current = shown, current != target else {
+            if shown == nil { show(target, level: levels[target], at: now) }
+            return target
+        }
+        let canApplyPreference = self.preferred != preferred && !selectedForAlert
+            && levels[current] == .normal && levels[target] == .normal
+        if levels[target] > levels[current] || now - since >= Self.hold || canApplyPreference {
+            show(target, level: levels[target], at: now)
+        }
+        return shown ?? target
+    }
+
+    private mutating func show(_ metric: SystemMetric, level: SystemLevel, at now: TimeInterval) {
+        shown = metric
+        since = now
+        selectedForAlert = level > .normal
+    }
+}
+
 enum MeterState: Equatable {
     case normal, busy, veryBusy, tight, veryTight
 
@@ -298,7 +411,7 @@ enum SystemAction: Equatable {
 struct SystemMessage: Equatable {
     enum Style: Equatable { case note, card }
     enum Kind: Equatable {
-        case spike, lowPower
+        case spike, busyAWhile, lowPower
         case measuring(minutes: Int)
         case appBusy(name: String, minutes: Int, closable: Bool)
         case toolBusy(tool: String, launcher: String?, minutes: Int)
@@ -307,7 +420,7 @@ struct SystemMessage: Equatable {
         case spread(minutes: Int)
         case memoryLow(top: String?, bytes: UInt64?)
         case memoryCritical(top: String?, bytes: UInt64?)
-        case hot(critical: Bool)
+        case hot(critical: Bool, top: String?)
     }
     let kind: Kind
     let level: SystemLevel
@@ -343,16 +456,24 @@ struct Breakdown: Equatable {
 }
 
 enum SystemRules {
-    static let busyAt = 75.0, hotAt = 90.0, sustainedMin = 2.0
+    static let busyAt = 75.0, hotAt = 90.0
+    /// Busy this long (45 s) and the processor turns amber; before that it only shows a neutral note.
+    static let sustainedMin = 0.75
+    /// Under this long (15 s) a busy processor reads as a short spike. Later it is busy for a while.
+    static let spikeMin = 0.25
     static let memWarnMin = 2.0, memCriticalMin = 1.0, heatCriticalMin = 2.0
     static let rowMin = 1.0, mismatch = 5.0
     static let culpritShare = 0.25, culpritMin = 10.0, systemShare = 0.5
+    static let energyCulpritMin = 1.0  // Below one point the leader is idle noise, not a cause of heat.
     static let nameMax = 18
 
     static func cpuState(smoothed: Double, busyMinutes: Double) -> MeterState {
         guard smoothed >= busyAt else { return .normal }
         return busyMinutes >= sustainedMin ? .veryBusy : .busy
     }
+
+    /// Whole minutes the cards quote. A card appears from `sustainedMin` on, so it never says “0 min”.
+    static func busyMinutesLabel(_ busyMinutes: Double) -> Int { max(1, Int(busyMinutes)) }
 
     static func memoryState(pressure: MemoryPressure, minutes: Double, criticalMinutes: Double) -> MeterState {
         switch pressure {
@@ -379,7 +500,7 @@ enum SystemRules {
             heatLevel(s))
     }
 
-    private static func heatLevel(_ s: LoadSnapshot) -> SystemLevel {
+    static func heatLevel(_ s: LoadSnapshot) -> SystemLevel {
         switch s.thermal {
         case .critical: return s.criticalThermalMinutes >= heatCriticalMin ? .critical : .attention
         case .serious: return .attention
@@ -387,14 +508,108 @@ enum SystemRules {
         }
     }
 
+    static func cpuStatus(_ state: MeterState, lang: String? = appLanguage) -> String {
+        switch state {
+        case .busy: return calendarText("Busy", "Ocupado", preferredLanguage: lang)
+        case .veryBusy: return calendarText("Very busy", "Muy ocupado", preferredLanguage: lang)
+        default: return calendarText("Normal", "Normal", preferredLanguage: lang)
+        }
+    }
+
+    static func heatStatus(_ level: SystemLevel, lang: String? = appLanguage) -> String {
+        switch level {
+        case .attention: return calendarText("Hot", "Alta", preferredLanguage: lang)
+        case .critical: return calendarText("Critical", "Crítica", preferredLanguage: lang)
+        case .normal: return calendarText("Normal", "Normal", preferredLanguage: lang)
+        }
+    }
+
+    /// A fair thermal state stays at the normal level but reads “Warm”, like a busy processor.
+    static func heatWarm(_ s: LoadSnapshot) -> Bool { s.thermal == .fair && heatLevel(s) == .normal }
+
+    static func heatStatus(_ s: LoadSnapshot, lang: String? = appLanguage) -> String {
+        heatWarm(s) ? calendarText("Warm", "Elevada", preferredLanguage: lang) : heatStatus(heatLevel(s), lang: lang)
+    }
+
+    // MARK: Tray metric
+
+    static func levels(_ s: LoadSnapshot) -> MetricLevels {
+        MetricLevels(cpu: cpuState(smoothed: s.cpuSmoothed, busyMinutes: s.busyMinutes).level,
+                     memory: memoryState(s).level, heat: heatLevel(s))
+    }
+
+    /// The metric the tray shows: the worst one; on a tie heat, then memory, then CPU; when all are fine, the user's choice.
+    static func dominant(_ levels: MetricLevels, preferred: SystemMetric) -> SystemMetric {
+        let worst = max(levels.cpu, levels.memory, levels.heat)
+        guard worst > .normal else { return preferred }
+        return [SystemMetric.heat, .memory, .cpu].first { levels[$0] == worst } ?? preferred
+    }
+
+    /// The panel list opens on the tab of the metric the tray shows; heat opens Energy.
+    /// The tab the panel opens on: from the current levels, so a tray metric still on hold does not decide it.
+    static func openingMetric(_ levels: MetricLevels, preferred: SystemMetric) -> LoadMetric {
+        panelMetric(for: dominant(levels, preferred: preferred), levels)
+    }
+
+    static func panelMetric(for shown: SystemMetric, _ levels: MetricLevels) -> LoadMetric {
+        switch shown {
+        case .cpu: return .cpu
+        case .memory: return .memory
+        case .heat: return .energy
+        }
+    }
+
+    static func memoryPercent(_ s: LoadSnapshot) -> Int {
+        guard s.memoryTotal > 0 else { return 0 }
+        return min(100, Int((Double(s.memoryUsed) / Double(s.memoryTotal) * 100).rounded()))
+    }
+
+    static func trayValue(_ metric: SystemMetric, _ s: LoadSnapshot, lang: String? = appLanguage) -> String {
+        switch metric {
+        case .cpu: return "\(Int(s.cpuNow.rounded()))%"
+        case .memory: return "\(memoryPercent(s))%"
+        case .heat: return heatStatus(s, lang: lang)
+        }
+    }
+
+    /// Problems first, then the CPU reading, then a pending maintenance step.
+    static func trayTooltip(_ s: LoadSnapshot, pending: String?, lang: String? = appLanguage) -> String {
+        func tr(_ en: String, _ es: String) -> String { calendarText(en, es, preferredLanguage: lang) }
+        let levels = levels(s)
+        var parts: [(level: SystemLevel, text: String)] = []
+        if levels.heat > .normal {
+            let status = heatStatus(levels.heat, lang: lang).lowercased()
+            parts.append((levels.heat, tr("Energy: \(status)", "Energía \(status)")))
+        }
+        let memory = memoryState(s)
+        if memory.level > .normal {
+            let status = memoryStatus(s.pressure, state: memory, lang: lang).lowercased()
+            parts.append((memory.level, tr("Memory: \(status)", "Memoria \(status)")))
+        }
+        let cpu = cpuState(smoothed: s.cpuSmoothed, busyMinutes: s.busyMinutes)
+        if cpu.level > .normal {
+            let status = cpuStatus(cpu, lang: lang).lowercased()
+            parts.append((cpu.level, tr("Processor: \(status)", "Procesador \(status)")))
+        }
+        // Stable sort: worse first, ties keep heat, memory, CPU.
+        var texts = parts.enumerated().sorted { ($0.element.level, -$0.offset) > ($1.element.level, -$1.offset) }
+            .map(\.element.text)
+        texts.append("CPU \(Int(s.cpuNow.rounded()))%")
+        if let pending, !pending.isEmpty { texts.append(pending) }
+        return texts.joined(separator: " · ")
+    }
+
     static func message(_ s: LoadSnapshot) -> SystemMessage? {
         let memory = memoryState(s).level
         let heat = heatLevel(s)
         if memory != .normal && memory >= heat { return memoryMessage(s.loads, level: memory) }
-        if heat != .normal { return card(.hot(critical: heat == .critical), level: heat, secondary: .openActivityMonitor) }
+        if heat != .normal { return hotMessage(s.loads, level: heat) }
         switch cpuState(smoothed: s.cpuSmoothed, busyMinutes: s.busyMinutes) {
         case .veryBusy: return cpuMessage(s)
-        case .busy: return SystemMessage(kind: .spike, level: .normal, style: .note, primary: nil, secondary: nil)
+        case .busy:
+            // Under 15 s it is a spike; from then until it turns amber it is busy for a while.
+            let kind: SystemMessage.Kind = s.busyMinutes < spikeMin ? .spike : .busyAWhile
+            return SystemMessage(kind: kind, level: .normal, style: .note, primary: nil, secondary: nil)
         default:
             return s.lowPower ? SystemMessage(kind: .lowPower, level: .normal, style: .note, primary: nil, secondary: nil) : nil
         }
@@ -406,7 +621,7 @@ enum SystemRules {
     }
 
     private static func cpuMessage(_ s: LoadSnapshot) -> SystemMessage {
-        let minutes = Int(s.busyMinutes)
+        let minutes = busyMinutesLabel(s.busyMinutes)
         guard let reading = s.reading else { return card(.measuring(minutes: minutes)) }
 
         let total = reading.cpuWindow
@@ -438,6 +653,17 @@ enum SystemRules {
         }
     }
 
+    /// Names the group that leads the Energía list and offers to quit it only when that group is one closable app.
+    private static func hotMessage(_ loads: [AppLoad], level: SystemLevel) -> SystemMessage {
+        let leader = energyRanked(loads).first.flatMap { $0.load.energy >= energyCulpritMin ? $0 : nil }
+        let top = leader?.load
+        let kind = SystemMessage.Kind.hot(critical: level == .critical, top: top?.name)
+        if let top, let pid = top.quitPID, leader?.isTool == false {
+            return card(kind, level: level, primary: .quit(name: top.name, pid: pid, frees: nil), secondary: .openActivityMonitor)
+        }
+        return card(kind, level: level, secondary: .openActivityMonitor)
+    }
+
     private static func memoryMessage(_ loads: [AppLoad], level: SystemLevel) -> SystemMessage {
         let closable = loads.filter { $0.quitPID != nil }.max { $0.memory < $1.memory }
         let top = closable ?? loads.max { $0.memory < $1.memory }
@@ -461,6 +687,9 @@ enum SystemRules {
         switch m.kind {
         case .spike:
             title = tr("Short spike: normal and settles on its own.", "Pico momentáneo: es normal y baja solo.")
+            detail = nil
+        case .busyAWhile:
+            title = tr("Busy for a while; I'll tell you if it lasts.", "Lleva un rato ocupado; si sigue así te aviso.")
             detail = nil
         case .lowPower:
             title = tr("Low Power Mode: a bit slower on purpose.", "Modo de bajo consumo: va más lento adrede.")
@@ -519,7 +748,13 @@ enum SystemRules {
             }
             detail = prefix + (culprit.map { tr("Quit what you do not use; \($0)", "Cierra lo que no uses; \($0)") }
                                ?? tr("Quit the apps you are not using.", "Cierra las apps que no uses."))
-        case .hot(let critical):
+        case .hot(let critical, let top?):
+            let top = short(displayName(top, lang: lang))
+            title = critical ? tr("The Mac is very hot", "El Mac está muy caliente")
+                             : tr("The Mac is hot", "El Mac está caliente")
+            let culprit = tr("\(top) uses the most energy.", "Lo que más energía usa es \(top).")
+            detail = critical ? tr("Save your work. ", "Guarda tu trabajo. ") + culprit : culprit
+        case .hot(let critical, nil):
             title = critical ? tr("The Mac is very hot", "El Mac está muy caliente")
                              : tr("The Mac is hot and slowing down", "El Mac está caliente y va más lento")
             detail = critical
@@ -547,14 +782,6 @@ enum SystemRules {
         text.count <= limit ? text : String(text.prefix(limit - 1)) + "…"
     }
 
-    static func chip(_ level: SystemLevel, lang: String?) -> String {
-        switch level {
-        case .normal: return calendarText("All good", "Todo bien", preferredLanguage: lang)
-        case .attention: return calendarText("Check this", "Revisa esto", preferredLanguage: lang)
-        case .critical: return calendarText("Act now", "Actúa ahora", preferredLanguage: lang)
-        }
-    }
-
     private struct DisplayLoad {
         let key: String
         var load: AppLoad
@@ -572,6 +799,7 @@ enum SystemRules {
             if var group = groups[key] {
                 group.load.cpu += load.cpu
                 group.load.memory += load.memory
+                group.load.energy += load.energy
                 group.load.count += load.count
                 group.loadKeys.append(load.key)
                 groups[key] = group
@@ -601,6 +829,130 @@ enum SystemRules {
         }
         if let remainder = integers.last, remainder >= 1 {
             rows.append(restRow(value: "\(remainder)%", amount: remainder, fraction: max(0, rest) / denominator, lang: lang))
+        }
+        return Breakdown(rows: rows, consistent: true)
+    }
+
+    // MARK: Energy impact
+
+    /// Seconds of processor time one wakeup costs: `kcpu_wakeups` in macOS's energy model (/usr/share/pmenergy).
+    static let wakeupCost = 0.0002
+
+    /// Energy impact over a sampling window, an approximation of Activity Monitor's Energy column:
+    ///
+    ///     impact = 100 × (Δcpu_seconds + wakeupCost × Δwakeups) / Δt
+    ///
+    /// with Δcpu the user plus system time and Δwakeups the package idle plus interrupt wakeups from
+    /// `proc_pid_rusage`. It is unitless and comparable across processes: one busy core with no wakeups scores 100.
+    /// `ri_billed_energy` is left out because macOS reports it as zero for most processes.
+    /// Returns nil for a new or reused PID, a counter that went backwards or an empty window.
+    static func energyScore(from before: EnergyCounters?, to after: EnergyCounters, elapsed: TimeInterval) -> Double? {
+        guard let before, before.start == after.start, elapsed > 0,
+              after.cpuNanoseconds >= before.cpuNanoseconds, after.wakeups >= before.wakeups else { return nil }
+        let cpu = Double(after.cpuNanoseconds - before.cpuNanoseconds) / 1_000_000_000
+        let wakeups = Double(after.wakeups - before.wakeups)
+        return 100 * (cpu + wakeupCost * wakeups) / elapsed
+    }
+
+    /// Ranks processes by energy impact between two scans, highest first; ties keep the lower PID first.
+    static func energyRanking(before: [Int32: EnergyCounters], after: [Int32: EnergyCounters],
+                              elapsed: TimeInterval) -> [(pid: Int32, score: Double)] {
+        after.compactMap { pid, counters in
+            energyScore(from: before[pid], to: counters, elapsed: elapsed).map { (pid, $0) }
+        }.sorted { $0.score == $1.score ? $0.pid < $1.pid : $0.score > $1.score }
+    }
+
+    /// Energy outside the app groups: the measured score of ungrouped processes (other accounts), plus the processor
+    /// time nobody explains (processes Cala cannot read), scaled to the per-core score.
+    static func unattributedEnergy(_ reading: ProcessReading, cores: Int) -> Double {
+        let ungrouped = reading.processes.filter { $0.loadKey == nil }.map(\.usage)
+        let measuredCPU = reading.loads.reduce(0) { $0 + $1.cpu } + ungrouped.reduce(0) { $0 + ($1.cpu ?? 0) }
+        let unexplained = max(0, reading.cpuWindow - measuredCPU) * Double(max(1, cores))
+        return ungrouped.reduce(0) { $0 + max(0, $1.energy ?? 0) } + unexplained
+    }
+
+    /// Total energy impact of the machine, the number the Energía tab's rows add up to: every measured process's score
+    /// plus the processor time nobody explains (processes Cala cannot read), scaled to the per-core score.
+    static func energyTotal(measuredEnergy: Double, measuredCPU: Double, cpuWindow: Double, cores: Int) -> Double {
+        max(0, measuredEnergy) + max(0, cpuWindow - measuredCPU) * Double(max(1, cores))
+    }
+
+    /// The same total for a full reading, as the Energía tab and its “Sistema y otros” row use it.
+    static func energyTotal(_ reading: ProcessReading, cores: Int) -> Double {
+        reading.loads.reduce(0) { $0 + max(0, $1.energy) } + max(0, unattributedEnergy(reading, cores: cores))
+    }
+
+    /// The Energía meter's number: the displayed reading's total when there is one, otherwise the last background sample.
+    static func energyValue(reading: ProcessReading?, history: [Double], cores: Int) -> Int? {
+        if let reading { return Int(energyTotal(reading, cores: cores).rounded()) }
+        return history.last.map { Int($0.rounded()) }
+    }
+
+    /// The background energy sampler runs about every `energyInterval` seconds. A gap much longer than that (sleep, a
+    /// hidden tray item) makes the window too long to describe the current load, so no point is recorded for it.
+    static let energyInterval: TimeInterval = 5
+    static func energyWindowUsable(gap: TimeInterval) -> Bool {
+        (energyInterval * 0.5...energyInterval * 3).contains(gap)
+    }
+
+    // MARK: First sample
+
+    /// Per-process deltas need two scans. A window shorter than this is too coarse (the processor tick counter moves in
+    /// 10 ms steps), so it neither makes a reading nor replaces the previous scan as the baseline.
+    static let minDeltaWindow: TimeInterval = 0.5
+
+    static func deltaWindowUsable(elapsed: TimeInterval) -> Bool { elapsed >= minDeltaWindow }
+
+    /// A scan becomes a reading only when it has a total processor window and at least one process with a delta.
+    /// Otherwise every process would read zero and the whole load would fall into “Sistema y otros”.
+    static func canPublishReading(cpuWindow: Double?, processesWithDeltas: Int) -> Bool {
+        cpuWindow != nil && processesWithDeltas > 0
+    }
+
+    /// The Procesador and Energía lists need those deltas, so until a reading exists they show the loading skeleton.
+    /// Memory comes from a single scan and never waits.
+    static func listIsLoading(metric: LoadMetric, availability: ProcessReadingAvailability) -> Bool {
+        metric != .memory && availability == .missing
+    }
+
+    /// The Energía list order: display groups by energy impact, highest first, ties by key.
+    private static func energyRanked(_ loads: [AppLoad]) -> [DisplayLoad] {
+        displayLoads(loads).filter { $0.load.energy >= 0.05 }.sorted {
+            $0.load.energy == $1.load.energy ? $0.key < $1.key : $0.load.energy > $1.load.energy
+        }
+    }
+
+    static func energyText(tenths: Int, locale: Locale) -> String {
+        let format = NumberFormatter()
+        format.locale = locale
+        format.numberStyle = .decimal
+        format.usesGroupingSeparator = false
+        format.minimumFractionDigits = 1
+        format.maximumFractionDigits = 1
+        let value = Double(tenths) / 10
+        return format.string(from: NSNumber(value: value)) ?? String(value)
+    }
+
+    /// Rows by energy impact, amounts in tenths. The last row gathers the smaller loads and the processes Cala cannot read.
+    static func energyBreakdown(_ loads: [AppLoad], unattributed: Double, lang: String?, locale: Locale,
+                                rowLimit: Int = SystemPanelLayout.maxRows) -> Breakdown {
+        let all = displayLoads(loads)
+        let groups = energyRanked(loads)
+        let total = all.reduce(0) { $0 + max(0, $1.load.energy) } + max(0, unattributed)
+        guard total > 0 else { return Breakdown(rows: [], consistent: true) }
+        let top = groups.prefix(max(0, rowLimit - 1))
+        let rest = total - top.reduce(0) { $0 + $1.load.energy }
+        // No meter shows a total energy, so each row rounds on its own rather than being apportioned.
+        let tenths = (top.map(\.load.energy) + [rest]).map { Int(($0 * 10).rounded()) }
+        let denominator = max(total, 10)
+        var rows = zip(top, tenths).compactMap { group, amount -> Breakdown.Row? in
+            guard amount > 0 else { return nil }
+            return row(group, value: energyText(tenths: amount, locale: locale), amount: amount,
+                       fraction: group.load.energy / denominator, lang: lang)
+        }
+        if let remainder = tenths.last, remainder > 0 {
+            rows.append(restRow(value: energyText(tenths: remainder, locale: locale), amount: remainder,
+                                fraction: rest / denominator, lang: lang))
         }
         return Breakdown(rows: rows, consistent: true)
     }
@@ -769,6 +1121,7 @@ enum SystemRules {
             switch metric {
             case .cpu: weight = (process.cpu ?? 0) / Double(ps == nil ? 1 : max(1, cores))
             case .memory: weight = Double(process.memory ?? 0)
+            case .energy: weight = (process.energy ?? 0) * 10  // Rows count tenths of a point.
             }
             guard weight > 0 else { continue }
             let id: String

@@ -135,7 +135,7 @@ struct OnboardingView: View {
                             Text(tx("Move Cala to Applications", "Mueve Cala a Aplicaciones")).font(.system(size: 13, weight: .medium))
                             Text(moveError ?? tx("So it keeps working after you close the download and can open at login.",
                                                  "Así sigue funcionando al cerrar la descarga y puede abrirse al iniciar sesión."))
-                                .font(.system(size: 11.5)).foregroundStyle(moveError == nil ? Color.secondary : Color.orange)
+                                .font(.system(size: 11.5)).foregroundStyle(moveError == nil ? Color.secondary : StatusColor.color(.attention))
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer(minLength: 12)

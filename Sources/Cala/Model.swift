@@ -39,7 +39,8 @@ final class TaskbarModel: ObservableObject {
     @Published var btOn = false
     @Published var wifiSignal: Double = 1
     @Published var userPhoto: NSImage?
-    private var photoLoaded = false
+    private var photoLoading = false
+    private var photoTried = Date.distantPast
     @Published var hasBright = false
     @Published var kbCode = ""
     var frames: [String: CGRect] = [:]
@@ -155,7 +156,15 @@ final class TaskbarModel: ObservableObject {
         if btOn != bluetooth { btOn = bluetooth }
         let signal = SystemTray.signal(SystemTray.rssi())
         if wifiSignal != signal { wifiSignal = signal }
-        if !photoLoaded { photoLoaded = true; DispatchQueue.global().async { let i = Users.photo(NSUserName()); DispatchQueue.main.async { if self.userPhoto != i { self.userPhoto = i } } } }
+        // Retried every 30 s until it loads; a transient lookup failure no longer leaves the bar without a photo.
+        if userPhoto == nil, !photoLoading, Date().timeIntervalSince(photoTried) > 30 {
+            photoLoading = true; photoTried = Date()
+            DispatchQueue.global(qos: .utility).async {
+                let i = Users.cachedPhoto(NSUserName())
+                _ = Users.list() // Warm the profile list so the panel opens at its final size.
+                DispatchQueue.main.async { self.photoLoading = false; if let i, self.userPhoto !== i { self.userPhoto = i } }
+            }
+        }
         let bright = Brightness.get() != nil
         if hasBright != bright { hasBright = bright }
         let code = Keyboard.current()?.code ?? ""

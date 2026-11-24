@@ -10,6 +10,8 @@ final class FlyoutModel: ObservableObject {
     @Published var kind = ""
     @Published var token = 0
     @Published var availableHeight: CGFloat = 700
+    @Published var mailReaderSize = CGSize(width: 672, height: 620)
+    @Published var mailMessage: MailMessage?
     /// The pane was opened from the "^" overflow panel, so it shows a back button.
     @Published var fromMore = false
     /// Tallest height this pane has had since it was opened. The panel keeps it, so switching to a shorter page does
@@ -91,8 +93,9 @@ struct FlyoutView: View {
     @ObservedObject var model: TaskbarModel
 
     var body: some View {
+        let readingMail = fm.kind == trayMail && fm.mailMessage != nil
         VStack(alignment: .leading, spacing: 8) {
-            if fm.fromMore && fm.kind != trayMore {
+            if fm.fromMore && fm.kind != trayMore && !readingMail {
                 Button { fm.fromMore = false; fm.kind = trayMore; fm.token += 1 } label: {
                     Label(tx("More", "Más"), systemImage: "chevron.left").font(.system(size: 11.5, weight: .medium))
                 }.buttonStyle(.plain).flyoutSecondary()
@@ -105,8 +108,11 @@ struct FlyoutView: View {
             case trayBatt: BatteryPane(model: model)
             case trayBright: BrightPane()
             case trayDisk: DiskPane(model: model)
-            case traySystem: SystemPane()
-            case trayMore: MorePane(fm: fm, model: model)
+            case trayMail:
+                MailPane(availableHeight: fm.availableHeight - (fm.fromMore ? 22 : 0),
+                         readerHeight: fm.mailReaderSize.height - 36, reading: $fm.mailMessage)
+            case traySystem: SystemPane(maxHeight: Int(min(CGFloat(SystemPanelLayout.maxHeight), fm.availableHeight)))
+            case trayMore: MailOverflowPane(fm: fm, model: model)
             case trayDownloads: DownloadsPane()
             case trayTrash: TrashPane()
             case trayUser: UserPane()
@@ -119,11 +125,21 @@ struct FlyoutView: View {
         }
         .id(fm.token)
         .padding(18)
-        .frame(width: fm.kind.hasPrefix("__t_usage_") || fm.kind == trayClock || fm.kind == trayDisk || fm.kind == traySystem ? 380 : 316)
-        .frame(minHeight: fm.minHeight, alignment: .top)
+        .frame(width: readingMail ? fm.mailReaderSize.width : paneWidth)
+        .frame(minHeight: fm.kind == trayMail ? 0 : fm.minHeight, alignment: .top)
         .flyoutControls()
         .themedPanel()
         .fixedSize()
+        .onGeometryChange(for: CGSize.self, of: { $0.size }) { _ in
+            if fm.kind == trayMail {
+                NotificationCenter.default.post(name: .flyoutRefit, object: nil)
+            }
+        }
+    }
+
+    private var paneWidth: CGFloat {
+        if fm.kind == traySystem { return CGFloat(SystemPanelLayout.width) }
+        return fm.kind.hasPrefix("__t_usage_") || [trayClock, trayDisk, trayMail].contains(fm.kind) ? 380 : 316
     }
 }
 
@@ -223,7 +239,7 @@ struct BrightPane: View {
 }
 
 struct UserPane: View {
-    @State private var users: [Users.U] = []
+    @State private var users: [Users.U] = Users.cached ?? []
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Header(title: tx("Profiles", "Perfiles"))
@@ -239,7 +255,12 @@ struct UserPane: View {
         .onAppear {
             DispatchQueue.global(qos: .utility).async {
                 let loaded = Users.list()
-                DispatchQueue.main.async { users = loaded }
+                DispatchQueue.main.async {
+                    let changed = loaded.map { "\($0.name)|\($0.full)|\($0.photo != nil)" } != users.map { "\($0.name)|\($0.full)|\($0.photo != nil)" }
+                    guard !loaded.isEmpty, changed else { return }
+                    users = loaded
+                    NotificationCenter.default.post(name: .flyoutRefit, object: nil)
+                }
             }
         }
     }
@@ -281,8 +302,20 @@ enum CWWiFiClientShim {
 
 /// Nonactivating panels can accept key focus without activating the app.
 final class FlyoutPanel: NSPanel {
+    var goBack: (() -> Bool)?
+    var dismiss: (() -> Void)?
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, event.keyCode == 53 {
+            if goBack?() == true { return }
+            // Esc closes the panel, unless a text field is being edited (there it only cancels the edit).
+            if !(firstResponder is NSText) { dismiss?(); return }
+        }
+        super.sendEvent(event)
+    }
 }
 
 final class FlyoutController {
@@ -292,12 +325,22 @@ final class FlyoutController {
     private var barTop: CGFloat = 0
     private var centerX: CGFloat = 0
     private var screenFrame = NSRect.zero
-    private var monitor: Any?
+    private var fittedMailReader = false
+    private var pointerAfterMailReader: NSPoint?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
     private var observers: [NSObjectProtocol] = []
     private var kindObserver: AnyCancellable?
 
     init(model: TaskbarModel) {
-        panel = FlyoutPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let flyoutPanel = FlyoutPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel = flyoutPanel
+        flyoutPanel.goBack = { [weak fm] in
+            guard let fm, fm.kind == trayMail, fm.mailMessage != nil else { return false }
+            fm.mailMessage = nil
+            return true
+        }
+        flyoutPanel.dismiss = { [weak self] in self?.hide() }
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
         panel.level = .statusBar; panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = false
@@ -314,38 +357,91 @@ final class FlyoutController {
             self?.fm.minHeight = 0
             DispatchQueue.main.async { if self?.panel.isVisible == true { self?.refit() } }
         }
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+    }
+
+    // MARK: Click outside
+
+    /// The panel closes on a press outside it: another app (global monitor) or another window of Cala (local one).
+    /// The pointer leaving never closes it. The monitors live only while the panel is open, so they cannot leak.
+    private func installMonitors() {
+        guard globalMonitor == nil, localMonitor == nil else { return }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self, self.panel.isVisible, !self.panel.frame.contains(NSEvent.mouseLocation) else { return }
             self.hide()
         }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] e in
+            guard let self, self.panel.isVisible else { return e }
+            let kind: PanelPolicy.Press
+            if e.window === self.panel { kind = .inPanel }
+            // The bars and the hover thumbnails (status-bar level panels): the bar's own handler toggles or switches panels.
+            else if let w = e.window as? NSPanel, w.level == .statusBar { kind = .onBar }
+            else if let w = e.window, w.level.rawValue >= NSWindow.Level.popUpMenu.rawValue { kind = .onMenu }
+            else { kind = .elsewhere }
+            if PanelPolicy.pressClosesPanel(panelOpen: true, kind) { self.hide() }
+            return e
+        }
+    }
+
+    private func removeMonitors() {
+        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        if let m = localMonitor { NSEvent.removeMonitor(m) }
+        globalMonitor = nil; localMonitor = nil
     }
 
     var isVisible: Bool { panel.isVisible }
     var kind: String { fm.kind }
-    func contains(_ p: NSPoint) -> Bool { panel.isVisible && panel.frame.insetBy(dx: -4, dy: -4).contains(p) }
+    func contains(_ p: NSPoint) -> Bool {
+        guard panel.isVisible else { return false }
+        if p == pointerAfterMailReader { return true }
+        pointerAfterMailReader = nil
+        return panel.frame.insetBy(dx: -4, dy: -4).contains(p)
+    }
 
     func show(kind: String, barTop: CGFloat, centerX: CGFloat, screen: NSScreen) {
         self.barTop = barTop; self.centerX = centerX; self.screenFrame = screen.frame
         fm.availableHeight = max(300, screen.visibleFrame.height - 90)
+        let roomAboveBar = screen.visibleFrame.maxY - barTop - 14
+        fm.mailReaderSize = CGSize(width: min(672, screen.visibleFrame.width - 16),
+                                   height: floor(min(screen.visibleFrame.height * 0.8, roomAboveBar)))
+        fittedMailReader = false
+        pointerAfterMailReader = nil
+        fm.mailMessage = nil
         if kind == trayDisk { DiskService.shared.refresh(extra: ConfigStore.shared.config.diskFolders) }
         fm.fromMore = false
         fm.minHeight = 0
         fm.kind = kind; fm.token += 1
         refit()
         panel.makeKeyAndOrderFront(nil)
+        installMonitors()
     }
 
     func refit() {
         host.layoutSubtreeIfNeeded()
         let s = host.fittingSize
-        if s.height > fm.minHeight { fm.minHeight = s.height }
+        if fm.kind != trayMail && s.height > fm.minHeight { fm.minHeight = s.height }
         var x = centerX - s.width / 2
         x = max(screenFrame.minX + 8, min(x, screenFrame.maxX - s.width - 8))
         let r = NSRect(x: x, y: barTop + 6, width: s.width, height: s.height)
-        if r != panel.frame { panel.setFrame(r, display: true) }
+        if r != panel.frame {
+            let readingMail = fm.kind == trayMail && fm.mailMessage != nil
+            if fittedMailReader && fm.kind == trayMail && !readingMail {
+                // Back can leave the pointer beside the narrower inbox. Keep it open until the pointer moves.
+                let pointer = NSEvent.mouseLocation
+                if panel.frame.contains(pointer) && !r.contains(pointer) { pointerAfterMailReader = pointer }
+            }
+            fittedMailReader = readingMail
+            panel.setFrame(r, display: true)
+        }
     }
 
-    func hide() { fm.kind = ""; panel.orderOut(nil) }
+    func hide() {
+        fittedMailReader = false
+        pointerAfterMailReader = nil
+        fm.kind = ""
+        fm.mailMessage = nil
+        removeMonitors()
+        panel.orderOut(nil)
+    }
 }
 
 struct BatteryPane: View {
@@ -559,7 +655,7 @@ struct UsagePane: View {
                         .fixedSize(horizontal: false, vertical: true)
                     if let pace = UsagePace.shared.pace(state.provider, window, now: now) {
                         Text(pace.text).font(.system(size: 10.5, weight: pace.warn ? .semibold : .regular))
-                            .foregroundStyle(pace.warn ? Color.orange : Color.secondary)
+                            .foregroundStyle(pace.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }

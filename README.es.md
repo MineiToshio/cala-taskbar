@@ -30,6 +30,8 @@ Gratis · Código visible · Sin cuentas · Nada sale de tu Mac · macOS 14 o m�
 
 **La bandeja de la derecha** tiene Wi‑Fi, Bluetooth, sonido, brillo, batería, disco, teclado, descargas, papelera y un reloj con tus próximos eventos y un botón para unirte a la videollamada.
 
+**Tu correo, en la bandeja.** Un sobre con el conteo de no leídos de tus cuentas de Gmail, iCloud o Yahoo; lee, archiva o elimina sin abrir el navegador. Mira [Correo](#correo).
+
 **¿Por qué mi Mac va lento?** El panel de CPU y memoria te dice qué app pesa más y te recomienda reiniciar cuando hace falta.
 
 </td>
@@ -83,6 +85,18 @@ xattr -dr com.apple.quarantine /Applications/Cala.app
 
 ---
 
+## Correo
+
+Haz clic en el sobre de la bandeja para ver los últimos correos de tu bandeja de entrada, con filtros por cuenta si tienes dos o más. Abre uno para leerlo dentro de Cala con su formato real, y luego **Archivar**, **Eliminar** o **Abrir en Gmail / Mail de iCloud / Yahoo Mail**. Al abrir un correo en Cala se marca como leído en el servidor, y el correo nuevo llega en tiempo real.
+
+**Proveedores:** Gmail (también Google Workspace, si el administrador de tu empresa permite IMAP y contraseñas de aplicación), iCloud y Yahoo. Outlook y Hotmail no se admiten: Microsoft exige iniciar sesión con OAuth.
+
+**Conectar una cuenta:** *Configuración → Correo* te guía paso a paso, con botones a las páginas correctas de tu proveedor. Cala inicia sesión con una **contraseña de aplicación**: un código que tu proveedor genera solo para Cala. **No** es tu contraseña normal del correo. En Gmail necesitas tener activada la verificación en dos pasos para crearla.
+
+**Imágenes:** las imágenes remotas de los correos se cargan por defecto. Desactívalo en *Configuración → Correo* si prefieres bloquearlas: cuando se cargan, el remitente puede saber que abriste el correo. En los correos no se ejecuta JavaScript y los enlaces se abren en tu navegador.
+
+---
+
 ## Permisos
 
 <img src="docs/images/permissions.jpg" alt="Permisos en la bienvenida" width="380" align="right">
@@ -105,6 +119,10 @@ Para **Accesibilidad** y **Grabación de pantalla**, macOS abre una lista: activ
 
 <br clear="right">
 
+### El aviso del Llavero (Correo)
+
+Después de cada actualización de Cala, macOS muestra *«Cala quiere acceder a la llave "Cala Mail" de tu llavero.»*, una vez por cuenta de correo, y pide *«Para permitir esto, introduce la contraseña del llavero Inicio de sesión»*, que es la **contraseña de tu Mac**. Escríbela y pulsa **Permitir siempre** (los otros botones son *Denegar* y *Permitir*). Esa contraseña va solo a macOS: Cala nunca la ve. Pasa porque Cala es gratis y no está firmada con un Apple Developer ID de pago, así que macOS revisa cada versión nueva antes de entregarle la contraseña de aplicación guardada.
+
 ---
 
 ## Uso diario
@@ -125,11 +143,14 @@ Los permisos quedan listados en *Ajustes del Sistema → Privacidad y seguridad*
 
 Nada sale de tu Mac salvo que tú lo envíes. *Reportar un problema* te muestra exactamente qué se incluye antes de enviarlo, y quita tu carpeta personal, tu nombre de usuario, el nombre del Mac y tus correos. Si la versión que descargaste no tiene envío configurado, puedes **copiar el informe** y pegarlo en un [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
+**Correo:** las contraseñas de aplicación se guardan en el Llavero de macOS (servicio "Cala Mail") y el contenido de tus correos se queda en tu Mac. Cala solo habla con el servidor IMAP de tu proveedor. Puedes revocar el acceso cuando quieras borrando la contraseña de aplicación en tu cuenta de Google, Apple o Yahoo.
+
 ## Problemas frecuentes
 
 - **"Cala no se puede abrir" / "Apple no pudo verificar…"**: es el bloqueo de una sola vez; mira el paso 3 de [Instalar](#instalar), o instala con el comando de Terminal, que no lo muestra.
 - **No veo miniaturas**: activa Grabación de pantalla en *Configuración → Permisos*.
 - **El Dock desapareció**: Cala lo oculta solo si lo pediste. Apágalo en *Configuración → General*, o sal de Cala.
+- **macOS dice «Cala quiere acceder a la llave "Cala Mail" de tu llavero.»**: es lo esperado tras cada actualización; mira [El aviso del Llavero](#el-aviso-del-llavero-correo). Escribe la contraseña de tu Mac (la del llavero Inicio de sesión) y pulsa **Permitir siempre**; va a macOS, no a Cala.
 - **Algo falla**: clic derecho en la barra → *Reportar un problema…*, o abre un [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
 ## Compilar desde el código

@@ -20,6 +20,12 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `SystemFixtures.swift` | Debug-only sample panel models and PNG rendering |
 | `TrayLayout.swift` | Tray item catalog, defaults, and the bar / ^ / hidden placement and ordering stored in `Config` |
 | `Overflow.swift` | "^" panel, Downloads panel, Trash (through Finder AppleScript) and the `flyoutRefit` notification |
+| `MailMIME.swift` | Pure Foundation mail parsing: providers, accounts, MIME decoding, IMAP response framing, avatars |
+| `MailIMAP.swift` | IMAP client per account: login, inbox snapshot, IDLE, mark read, archive, delete |
+| `MailService.swift` | Account store (`mail-accounts.json`), Keychain passwords (service "Cala Mail"), sync state and inbox phases |
+| `MailViews.swift` | Tray envelope, inbox panel, Settings → Mail pane and the Keychain notice window |
+| `MailWebBody.swift` | Message body web view (no JavaScript, links to the browser, optional remote images) |
+| `PanelPolicy.swift` | Pure rules for open tray panels vs. the auto-hiding bar (click outside / Esc closes; the owning bar stays visible) |
 | `Telemetry.swift` | Sentry envelope transport (no SDK): DSN from Info.plist, feedback and crash events with attachments |
 | `CrashSummary.swift` | Parses a macOS `.ips` crash report into a Sentry exception, stack frames and a grouping fingerprint |
 | `Watchdog.swift` | Detached watcher script that reopens Cala after a crash; clean-exit marker, loop guard, `running.lock` |
@@ -37,7 +43,7 @@ Swift 6.3 toolchain, Swift 5 language mode (`swift-tools-version: 5.9`), macOS 1
 | `Badges.swift` | Reads notification badges from the Dock's accessibility tree |
 | `Config.swift` | `Config` (JSON) and `ConfigStore`; `NSScreen.key` (display UUID) |
 | `Theme.swift` | `BarTheme` (nine themes), `themeAccent`, shared `FlyoutStyle`, `flyoutSection()` and `themedPanel()` modifiers |
-| `SettingsWindow.swift` | Settings window (SwiftUI in an `NSWindow`), its seven panes, `LoginItem` |
+| `SettingsWindow.swift` | Settings window (SwiftUI in an `NSWindow`), its nine panes, `LoginItem` |
 | `Switcher.swift` | Window switcher: `CGEventTap`, window ordering, panel and cards |
 | `MenuBarControl.swift` | Hide / restore the macOS menu bar (auto-hide preferences + live-apply notifications) |
 | `DockControl.swift` | Hide / restore / adopt the native Dock through `CFPreferences` |
@@ -120,7 +126,7 @@ The monitor tracks continuous critical memory pressure and thermal state separat
 
 `RestartAdvisor.swift` bounds the reasons viewport and shows a scroll hint when reasons extend below it. The permission message and action buttons sit outside the scroll area.
 
-`scripts/check-rules.sh` compiles the pure sources with `CalendarText.swift` and `Checks/SystemRules/main.swift` using `swiftc`. The checks live outside the SwiftPM executable target. The debug `--render-system <dir>` entry point runs before `AppDelegate` and uses `NSHostingView` to capture the fixtures as PNGs.
+`scripts/check-rules.sh` compiles the pure sources with `CalendarText.swift` and `Checks/SystemRules/main.swift` using `swiftc`, and `PanelPolicy.swift` with `Checks/PanelDismiss/main.swift`. `scripts/check-mail.sh` compiles `MailMIME`, `MailIMAP`, `MailService`, `AppPaths` and `CalendarText` with `Checks/MailParsing/main.swift`; `MailMIME.swift` must only import Foundation. The checks live outside the SwiftPM executable target. The debug `--render-system <dir>` entry point runs before `AppDelegate` and uses `NSHostingView` to capture the fixtures as PNGs.
 
 ## Code signing and permissions
 Ad-hoc signed with a fixed designated requirement (`designated => identifier "local.cala"`) so macOS keeps Accessibility / Screen Recording grants across rebuilds. Without it, every rebuild invalidates the grants. Private CoreGraphics cursor symbols are resolved with checked `dlopen` / `dlsym`, rather than mandatory link-time symbols.

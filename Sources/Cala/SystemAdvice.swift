@@ -59,7 +59,7 @@ struct StatusCard: View {
     let text: MessageText
     let onAction: (SystemAction) -> Void
 
-    private var color: Color { message.level == .critical ? .red : .orange }
+    private var color: Color { StatusColor.color(message.level == .critical ? .critical : .attention) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -72,7 +72,6 @@ struct StatusCard: View {
                 if let detail = text.detail {
                     Text(detail).font(.system(size: 11.5)).lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxHeight: 28, alignment: .top)
                 }
                 if message.primary != nil || message.secondary != nil {
                     HStack(spacing: 8) {

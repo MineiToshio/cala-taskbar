@@ -7,7 +7,7 @@ import CoreBluetooth
 
 final class SettingsWindowController {
     static let shared = SettingsWindowController()
-    private var window: NSWindow?
+    private(set) var window: NSWindow?
 
     func show(pane: SettingsPane? = nil) {
         UsageService.shared.settingsOpened()
@@ -34,12 +34,13 @@ final class SettingsWindowController {
 // MARK: - Structure
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, appearance, screens, tray, usage, calendar, permissions, about
+    case general, appearance, screens, tray, usage, calendar, mail, permissions, about
     var id: String { rawValue }
     var title: String {
         switch self {
         case .general: tx("General", "General"); case .appearance: tx("Appearance", "Apariencia"); case .screens: tx("Screens", "Pantallas"); case .tray: tx("Tray", "Bandeja")
         case .calendar: tx("Calendar", "Calendario")
+        case .mail: tx("Mail", "Correo")
         case .usage: tx("Usage", "Uso")
         case .permissions: tx("Permissions", "Permisos"); case .about: tx("Advanced", "Avanzado")
         }
@@ -51,6 +52,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .screens: tx("How the bar is laid out on each screen.", "Cómo se acomoda la barra en cada pantalla.")
         case .tray: tx("What shows on the right of the bar, what sits behind the ^ arrow and what is hidden.", "Qué se ve a la derecha de la barra, qué queda detrás de la flecha ^ y qué se oculta.")
         case .calendar: tx("Upcoming events from your macOS calendar accounts.", "Próximos eventos de las cuentas de calendario de tu macOS.")
+        case .mail: tx("Connect Gmail, iCloud Mail, or Yahoo Mail with an app password stored in the Keychain. Google Workspace works if your administrator allows IMAP and app passwords. Cala doesn’t support Outlook or Hotmail.", "Conecta Gmail, Mail de iCloud o Yahoo Mail con una contraseña de aplicación guardada en el Llavero. Google Workspace funciona si tu administrador permite IMAP y las contraseñas de aplicación. Cala no admite Outlook ni Hotmail.")
         case .usage: tx("Claude and Codex plan usage in one tray control.", "El uso de tus planes de Claude y Codex en un solo control de la bandeja.")
         case .permissions: tx("What macOS needs to allow so everything works.", "Lo que macOS debe permitir para que todo funcione.")
         case .about: tx("Files, log and factory defaults.", "Archivos, registro y valores de fábrica.")
@@ -60,6 +62,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .general: "gearshape.fill"; case .appearance: "paintpalette.fill"; case .screens: "display"; case .tray: "square.grid.2x2"
         case .calendar: "calendar"
+        case .mail: "envelope.fill"
         case .usage: "chart.bar.fill"
         case .permissions: "lock.shield.fill"; case .about: "wrench.and.screwdriver.fill"
         }
@@ -69,6 +72,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: Color(red: 0.55, green: 0.57, blue: 0.62); case .appearance: Color(red: 0.95, green: 0.35, blue: 0.55)
         case .screens: Color(red: 0.25, green: 0.52, blue: 0.98); case .tray: Color(red: 0.2, green: 0.65, blue: 0.7); case .permissions: Color(red: 0.2, green: 0.72, blue: 0.4)
         case .calendar: .red
+        case .mail: .blue
         case .usage: .purple
         case .about: Color(red: 0.98, green: 0.6, blue: 0.2)
         }
@@ -146,6 +150,7 @@ struct PaneBody: View {
         case .screens: ScreensPane(store: store)
         case .tray: TrayPane(store: store)
         case .calendar: CalendarSettingsPane(store: store)
+        case .mail: MailSettingsPane()
         case .usage: UsageSettingsPane(store: store)
         case .permissions: PermissionsPane()
         case .about: AdvancedPane(store: store)
@@ -305,6 +310,17 @@ struct GeneralPane: View {
                         .onAppear { diskFolders = store.config.diskFolders.joined(separator: ", ") }
                 }
                 .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            SectionTitle(text: tx("CPU and memory", "CPU y memoria"))
+            Card {
+                SettingRow(title: tx("Show in bar", "Mostrar en la barra"), caption: tx("What the tray item shows while everything is fine. If something needs attention (memory, energy or processor), it always shows that first.", "Lo que muestra el ícono de la bandeja mientras todo va bien. Si algo necesita atención (memoria, energía o procesador), siempre muestra eso primero.")) {
+                    Picker("", selection: Binding(get: { store.config.monitorBarMetric }, set: { store.config.monitorBarMetric = $0; SystemMonitor.shared.tick() })) {
+                        Text("CPU").tag("cpu")
+                        Text(tx("Memory", "Memoria")).tag("memory")
+                    }
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 180)
+                    .accessibilityLabel(tx("Show in bar", "Mostrar en la barra"))
+                }
             }
             SectionTitle(text: tx("macOS Dock", "Dock de macOS"))
             Card {
@@ -805,7 +821,10 @@ struct TrayPane: View {
                         if let info = TrayItems.info(id) {
                             HStack(spacing: 12) {
                                 Image(systemName: "line.3.horizontal").font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary).frame(width: 14)
-                                TrayGlyph(id: id, model: (NSApp.delegate as? AppDelegate)?.model).frame(width: 26, height: 22).foregroundStyle(.secondary)
+                                Group {
+                                    if id == trayMail { MailTrayGlyph(unread: 0) }
+                                    else { TrayGlyph(id: id, model: (NSApp.delegate as? AppDelegate)?.model) }
+                                }.frame(width: 26, height: 22).foregroundStyle(.secondary)
                                 Text(info.title).font(.system(size: 13, weight: .medium))
                                 Spacer()
                                 Picker("", selection: place(id)) {

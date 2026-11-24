@@ -22,8 +22,9 @@ struct SystemFooterYKey: PreferenceKey {
 enum SystemFixtures {
     private static func gib(_ amount: Double) -> UInt64 { UInt64((amount * 1_073_741_824).rounded()) }
 
-    private static func app(_ name: String, _ cpu: Double, pid: Int32, memory: Double) -> AppLoad {
-        AppLoad(key: name, name: name, kind: .app(pid: pid), cpu: cpu, memory: gib(memory), count: 1, closable: true)
+    private static func app(_ name: String, _ cpu: Double, pid: Int32, memory: Double, energy: Double? = nil) -> AppLoad {
+        AppLoad(key: name, name: name, kind: .app(pid: pid), cpu: cpu, memory: gib(memory), count: 1, closable: true,
+                energy: energy ?? cpu * 1.2)
     }
 
     private static func node(_ cpu: Double, launcher: String, pid: Int32, count: Int = 16) -> AppLoad {
@@ -71,13 +72,22 @@ enum SystemFixtures {
                 icons[load.key] = NSImage(contentsOfFile: path)
             }
         }
+        // A background history that ends on the total the Energía tab shows.
+        let total = snapshot.reading.map { SystemRules.energyTotal($0, cores: 1) } ?? 10
+        var energyHistory: [Double] = []
+        for i in 0..<59 {
+            let wobble = Double((i * 7) % 5) * 0.07
+            energyHistory.append(total * (0.7 + wobble))
+        }
+        energyHistory.append(total)
         return SystemPanelModel(snapshot: snapshot, cpuHistory: history, memoryHistory: memoryHistory,
-                                maintenance: maintenance, tab: tab ?? SystemPanelModel.initialTab(snapshot), icons: icons)
+                                energyHistory: energyHistory, maintenance: maintenance, tab: tab ?? SystemPanelModel.initialTab(snapshot), icons: icons)
     }
 
     static let all: [(name: String, model: SystemPanelModel)] = {
         let fine = snapshot(cpu: 21, smoothed: 22, loads: [safari, mail, chrome, preview, terminalApp, calendar, notes])
-        let spike = snapshot(cpu: 90, smoothed: 88, busy: 0.5, loads: [])
+        let spike = snapshot(cpu: 90, smoothed: 88, busy: 0.1, loads: [])
+        let busyAWhile = snapshot(cpu: 90, smoothed: 88, busy: 0.5, loads: [])
         var lightSafari = safari
         lightSafari.cpu = 5
         let sustained = snapshot(cpu: 80, smoothed: 85, busy: 3.2,
@@ -152,6 +162,7 @@ enum SystemFixtures {
         var startup = model(measuring)
         startup.cpuHistory = []
         startup.memoryHistory = []
+        startup.energyHistory = []
         var recent = terminal
         recent.cpuNow = 97
         recent.observedAt = 105
@@ -162,12 +173,38 @@ enum SystemFixtures {
         var recentExpanded = model(recent)
         recentExpanded.expandedKey = expandedNode.expandedKey
         recentExpanded.reservesExpandedHeight = true
+        var hot = fine
+        hot.thermal = .serious
+        hot.lastReading = ProcessReading(capturedAt: 100, cpuWindow: 21, loads: [
+            app("Google Chrome", 9, pid: 900, memory: 3.2, energy: 24.6), safari, mail, preview, terminalApp, calendar, notes
+        ])
+        var hotWorst = hot
+        hotWorst.thermal = .critical
+        hotWorst.criticalThermalMinutes = 3
+        var expandedHot = model(hotWorst, maintenance: maintenance)
+        expandedHot.expandedKey = "rest"
+        expandedHot.reservesExpandedHeight = true
+        // The memory card cleared while the panel stayed open.
+        // A 520 pt screen allowance: rows drop first, then the meter rows shrink.
+        func small(_ model: SystemPanelModel) -> SystemPanelModel {
+            var model = model
+            model.maxHeight = 520
+            return model
+        }
+        var bigMemory = critical
+        bigMemory.memoryTotal = gib(128)
+        bigMemory.memoryUsed = gib(99.6)
+        var recovered = model(fine, tab: 1)
+        recovered.reservation = PanelReservation(messageHeight: SystemPanelLayout.cardHeight, hasMaintenance: false)
+        var warm = fine
+        warm.thermal = .fair
         var firstMemory = memory
         firstMemory.lastInventory = memory.reading?.inventory
         firstMemory.lastReading = nil
         return [
             ("todo-bien", model(fine)),
             ("pico-corto", model(spike)),
+            ("ocupado-un-rato", model(busyAWhile)),
             ("sostenida-node", model(terminal)),
             ("sostenida-app", model(sustained)),
             ("memoria-alta", model(critical)),
@@ -187,7 +224,15 @@ enum SystemFixtures {
             ("reapertura-reciente-desplegada", recentExpanded),
             ("reapertura-tardia", model(late)),
             ("memoria-primera-pasada", model(firstMemory, tab: 1)),
-            ("lista-memoria", model(memory, tab: 1))
+            ("lista-memoria", model(memory, tab: 1)),
+            ("calor-energia", model(hot)),
+            ("calor-critico-expandido", expandedHot),
+            ("energia-elevada", model(warm)),
+            ("recuperado", recovered),
+            ("pantalla-pequena-normal", small(model(fine))),
+            ("pantalla-pequena-peor", small(expandedWorst)),
+            ("memoria-128-gb", model(bigMemory)),
+            ("memoria-128-gb-pequena", small(model(bigMemory)))
         ]
     }()
     static let detail = SystemDetailsModel(cpuUser: 16, cpuSystem: 5, cores: 10, memoryUsed: gib(9),
@@ -241,7 +286,7 @@ enum SystemRender {
                     guard numbers.count == cpu.count, numbers.reduce(0, +) == model.cpuValue else {
                         throw RenderError.invalidBreakdown(name: fixture.name, total: model.cpuValue, values: cpu)
                     }
-                    let label = model.tab == 0 ? "CPU" : "CPU (muestra de la pestaña Memoria)"
+                    let label = model.tab == 0 ? "CPU" : "CPU (muestra de la pestaña \(model.tab == 1 ? "Memoria" : "Energía"))"
                     print("\(label) \(fixture.name) → \(cpu.joined(separator: " + ")) = \(model.cpuValue)%")
                 }
                 if model.tab == 1, let breakdown = model.breakdown {
@@ -268,19 +313,19 @@ enum SystemRender {
                     print("Desglose \(fixture.name) → \(children.map { String($0.amount) }.joined(separator: " + ")) = \(parent.amount)")
                 }
                 if fixture.name == "expandido-sistema-desde-mas" {
-                    let light = try png(withMore(view), name: fixture.name, dark: false, in: output)
+                    let light = try png(withMore(view), name: fixture.name, dark: false, in: output, layout: model.layout)
                     try light.write(to: output.appendingPathComponent("\(fixture.name).png"), options: .atomic)
-                    try png(withMore(view), name: fixture.name, dark: true, in: output)
+                    try png(withMore(view), name: fixture.name, dark: true, in: output, layout: model.layout)
                 } else {
-                    let light = try png(view, name: fixture.name, dark: false, in: output)
+                    let light = try png(view, name: fixture.name, dark: false, in: output, layout: model.layout)
                     if fixture.name != "lista-memoria" {
                         try light.write(to: output.appendingPathComponent("\(fixture.name).png"), options: .atomic)
                     }
-                    try png(view, name: fixture.name, dark: true, in: output)
+                    try png(view, name: fixture.name, dark: true, in: output, layout: model.layout)
                 }
                 if fixture.name == "con-mantenimiento" {
-                    try png(withMore(view), name: "con-mantenimiento-desde-mas", dark: false, in: output)
-                    try png(withMore(view), name: "con-mantenimiento-desde-mas", dark: true, in: output)
+                    try png(withMore(view), name: "con-mantenimiento-desde-mas", dark: false, in: output, layout: model.layout)
+                    try png(withMore(view), name: "con-mantenimiento-desde-mas", dark: true, in: output, layout: model.layout)
                 }
             }
             guard let expandedFooter = footerPositions["expandido-sin-avisos-light"],
@@ -289,6 +334,7 @@ enum SystemRender {
             print("Pie al desplegar y caducar → \(expandedFooter) pt en ambos")
             try checkStableFooter(["todo-bien", "midiendo", "midiendo-arranque", "memoria-primera-pasada"])
             try checkStableFooter(["sostenida-node", "midiendo-carga", "reapertura-reciente", "reapertura-tardia"])
+            try checkStableFooter(["memoria-alta", "recuperado"])
 
             let detail = SystemDetailsView(model: SystemFixtures.detail, back: {}, openActivityMonitor: {})
             let detailRowCount = SystemFixtures.detail.sections.reduce(0) { $0 + $1.rows.count }
@@ -334,17 +380,18 @@ enum SystemRender {
     }
 
     @discardableResult
-    private static func png<V: View>(_ view: V, name: String, dark: Bool, in directory: URL,
+    private static func png<V: View>(_ view: V, name: String, dark: Bool, in directory: URL, layout: SystemPanelLayout? = nil,
                                      hasMeters: Bool = true) throws -> Data {
         var meters: [String: CGRect] = [:]
         var footerY: CGFloat?
-        let root = view.padding(18).frame(width: 380).flyoutControls().themedPanel(theme: .named("system")).fixedSize()
+        let width = CGFloat(SystemPanelLayout.width)
+        let root = view.padding(18).frame(width: width).flyoutControls().themedPanel(theme: .named("system")).fixedSize()
             .environment(\.colorScheme, dark ? .dark : .light)
             .coordinateSpace(name: "system-render")
             .onPreferenceChange(MeterFrameKey.self) { meters = $0 }
             .onPreferenceChange(SystemFooterYKey.self) { footerY = $0 }
         let host = NSHostingView(rootView: root)
-        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 380, height: 600),
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: width, height: 700),
                               styleMask: .borderless, backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.contentView = host
@@ -355,11 +402,13 @@ enum SystemRender {
         defer { window.orderOut(nil) }
         host.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
-        let frames = meters.values.sorted { $0.minX < $1.minX }
-        let expected = CGSize(width: MeterTile.width, height: MeterTile.height)
-        let metersMatch = frames.count == 2 && frames[0].size == expected && frames[1].size == expected
-            && frames[0].minY == frames[1].minY && frames[1].minX - frames[0].maxX == 12
-        guard size.width == 380, size.height <= 520, !hasMeters || metersMatch else {
+        let frames = meters.values.sorted { $0.minY < $1.minY }
+        let rowHeight = CGFloat(layout?.meterRowHeight ?? SystemPanelLayout.meterRowHeight)
+        let expected = CGSize(width: MeterRow.width, height: rowHeight)
+        let metersMatch = frames.count == 3 && frames.allSatisfy { $0.size == expected && $0.minX == frames[0].minX }
+            && frames[1].minY == frames[0].maxY && frames[2].minY == frames[1].maxY
+        let limit = CGFloat(layout?.maxHeight ?? SystemPanelLayout.maxHeight)
+        guard size.width == width, size.height <= limit, !hasMeters || metersMatch else {
             throw RenderError.invalidLayout(name: name, size: size, meters: meters)
         }
         guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { throw RenderError.bitmapUnavailable }
@@ -368,7 +417,7 @@ enum SystemRender {
         let style = dark ? "dark" : "light"
         if let footerY { footerPositions["\(name)-\(style)"] = footerY }
         try data.write(to: directory.appendingPathComponent("\(name)-\(style).png"), options: .atomic)
-        let metersNote = hasMeters ? ", medidores 166×68 pt" : ""
+        let metersNote = hasMeters ? ", medidores 3 filas de \(Int(MeterRow.width))×\(Int(rowHeight)) pt, límite \(Int(limit)) pt" : ""
         print("\(name)-\(style) → \(Int(size.width))×\(Int(size.height.rounded(.up))) pt\(metersNote)")
         return data
     }

@@ -66,6 +66,8 @@ struct Config: Codable, Equatable {
     var diskEnabled = true
     /// CPU / memory monitor in the tray with a "why is my Mac slow" panel.
     var monitorEnabled = true
+    /// What the CPU and memory tray item shows while nothing is wrong: "cpu" or "memory". A problem always wins.
+    var monitorBarMetric = "cpu"
     /// Extra folders measured in the storage panel (e.g. where your projects or git worktrees live).
     var diskFolders: [String] = []
     var calendarEnabled = true
@@ -73,17 +75,19 @@ struct Config: Codable, Equatable {
     var calendarJoinEnabled = true
     var calendarDays = 7
     var calendarExcludedIDs: [String] = []
+    var mailLoadsRemoteImages = true
     var recoveredFromInvalidFields = false
 
     enum CodingKeys: String, CodingKey {
         case language
         case pinned, autoHide, iconSize, previewDelay, previewWidth, alignments, order, theme, barOpacity
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
-        case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, trayLayout, trayOrder
+        case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, monitorBarMetric, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
         case crashReports, relaunchOnCrash, restartAdvice, menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
+        case mailLoadsRemoteImages
     }
 }
 
@@ -102,6 +106,7 @@ extension Config {
         pinned = field([String].self, .pinned) ?? pinned
         autoHide = field(Bool.self, .autoHide) ?? autoHide
         language = field(String.self, .language) ?? language
+        mailLoadsRemoteImages = field(Bool.self, .mailLoadsRemoteImages) ?? mailLoadsRemoteImages
         if !["system", "en", "es"].contains(language) { language = "system"; invalid = true }
         iconSize = field(Double.self, .iconSize) ?? iconSize
         previewDelay = field(Double.self, .previewDelay) ?? previewDelay
@@ -140,6 +145,8 @@ extension Config {
         if ![10, 15, 20, 30].contains(usageAlertThreshold) { usageAlertThreshold = 20; invalid = true }
         diskEnabled = field(Bool.self, .diskEnabled) ?? diskEnabled
         monitorEnabled = field(Bool.self, .monitorEnabled) ?? monitorEnabled
+        monitorBarMetric = field(String.self, .monitorBarMetric) ?? monitorBarMetric
+        if !["cpu", "memory"].contains(monitorBarMetric) { monitorBarMetric = "cpu"; invalid = true }
         trayLayout = field([String: String].self, .trayLayout) ?? trayLayout
         trayOrder = field([String].self, .trayOrder) ?? trayOrder
         diskFolders = field([String].self, .diskFolders) ?? diskFolders

@@ -16,7 +16,12 @@ struct DiskInfo: Equatable {
     var usedBytes: Int64 { max(0, total - available) }
     /// Free space that is not purgeable.
     var freeBytes: Int64 { max(0, available - purgeable) }
-    var isLow: Bool { freeFraction < 0.15 }
+    var level: SystemLevel {
+        let fraction = freeFraction
+        if fraction < 0.10 { return .critical }
+        if fraction < 0.20 { return .attention }
+        return .normal
+    }
 
     static func read() -> DiskInfo? {
         let url = URL(fileURLWithPath: NSHomeDirectory())
@@ -30,7 +35,8 @@ struct DiskInfo: Equatable {
 
 /// Warning colors only when space is short; otherwise the tray stays monochrome.
 func diskTint(_ d: DiskInfo) -> Color {
-    d.freeFraction < 0.10 ? .red : (d.freeFraction < 0.20 ? .orange : Color.primary.opacity(0.85))
+    let level = d.level
+    return level == .normal ? StatusColor.color(.normal).opacity(0.85) : StatusColor.color(StatusTone(level))
 }
 
 struct DiskFolder: Identifiable, Equatable {
@@ -158,16 +164,19 @@ final class DiskService: ObservableObject {
 }
 
 struct DiskBar: View {
-    @Environment(\.themeAccent) private var accent
     let info: DiskInfo
+    let color: Color
+
     var body: some View {
         GeometryReader { geo in
             let t = max(1, Double(info.total))
             let used = geo.size.width * Double(info.usedBytes) / t
             let purge = geo.size.width * Double(info.purgeable) / t
             HStack(spacing: 1.5) {
-                RoundedRectangle(cornerRadius: 3).fill(info.isLow ? Color.orange : accent).frame(width: max(2, used))
-                if info.purgeable > 0 { RoundedRectangle(cornerRadius: 3).fill((info.isLow ? Color.orange : accent).opacity(0.38)).frame(width: max(2, purge)) }
+                RoundedRectangle(cornerRadius: 3).fill(color).frame(width: max(2, used))
+                if info.purgeable > 0 {
+                    RoundedRectangle(cornerRadius: 3).fill(color.opacity(0.38)).frame(width: max(2, purge))
+                }
                 RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.14))
             }
         }
@@ -200,19 +209,21 @@ struct DiskPane: View {
         VStack(alignment: .leading, spacing: 10) {
             Header(title: tx("Storage", "Almacenamiento"))
             if let d = model.disk {
+                let level = d.level
+                let color = level == .normal ? accent : StatusColor.color(StatusTone(level))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(tx("\(diskBytes(d.available)) available", "\(diskBytes(d.available)) disponibles")).font(.system(size: 20, weight: .semibold))
                     Text(tx("of \(diskBytes(d.total)) · \(d.freePercent)% free", "de \(diskBytes(d.total)) · \(d.freePercent)% libre")).font(.system(size: 12)).flyoutSecondary()
                 }
-                DiskBar(info: d)
+                DiskBar(info: d, color: color)
                 HStack(spacing: 14) {
-                    legend(accent, tx("Used", "Usado"), d.usedBytes)
-                    if d.purgeable > 0 { legend(accent.opacity(0.38), tx("Purgeable", "Liberable"), d.purgeable) }
+                    legend(color, tx("Used", "Usado"), d.usedBytes)
+                    if d.purgeable > 0 { legend(color.opacity(0.38), tx("Purgeable", "Liberable"), d.purgeable) }
                     legend(Color.primary.opacity(0.18), tx("Free", "Libre"), d.freeBytes)
                 }
-                if d.isLow {
+                if level != .normal {
                     Label(tx("Space is running low. Start with the biggest items in the list.", "Queda poco espacio. Empieza por lo más grande de la lista."), systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11)).foregroundStyle(Color.orange).fixedSize(horizontal: false, vertical: true)
+                        .font(.system(size: 11)).foregroundStyle(color).fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 SystemLoadingPulse {

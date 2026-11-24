@@ -240,10 +240,20 @@ struct TrayView: View {
     @ObservedObject private var store = ConfigStore.shared
     @ObservedObject private var monitor = SystemMonitor.shared
     @ObservedObject private var advisor = RestartAdvisor.shared
+    @ObservedObject private var mail = MailService.shared
+    @Environment(\.colorScheme) private var scheme
+
+    static func systemSymbol(_ metric: SystemMetric) -> String {
+        switch metric {
+        case .cpu: return "cpu"
+        case .memory: return "memorychip"
+        case .heat: return "thermometer.medium"
+        }
+    }
 
     var body: some View {
         HStack(spacing: 0) {
-            if store.config.moreTrayIDs.contains(where: { model.trayAvailable($0) }) { cell(nil, id: trayMore, text: nil, custom: AnyView(TrayGlyph(id: trayMore, model: model))) }
+            if store.config.moreTrayIDs.contains(where: { $0 == trayMail ? !mail.accounts.isEmpty : model.trayAvailable($0) }) { cell(nil, id: trayMore, text: nil, custom: AnyView(TrayGlyph(id: trayMore, model: model))) }
             ForEach(store.config.barTrayIDs, id: \.self) { id in item(id) }
         }
     }
@@ -257,18 +267,29 @@ struct TrayView: View {
         case trayUsage:
             UsageTrayView(model: model)
         case traySystem:
+            let snapshot = monitor.snapshot()
+            let metric = monitor.shownMetric
+            let pending = advisor.visible ? RestartRules.summary(advisor.advice, lang: appLanguage)?.text : nil
             cell(nil, id: traySystem, text: nil, custom: AnyView(VStack(spacing: 3) {
-                TrayGlyph(id: id, model: model)
-                Text("\(Int(monitor.cpu.rounded()))%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
+                Image(systemName: Self.systemSymbol(metric)).font(.system(size: 14))
+                Text(SystemRules.trayValue(metric, snapshot)).font(.system(size: 9.5, weight: .medium)).monospacedDigit()
+                    .lineLimit(1).fixedSize()
             }
-            .overlay(alignment: .topTrailing) { if advisor.strongVisible { Circle().fill(Color.orange).frame(width: 7, height: 7).offset(x: 5, y: -2) } }
-            .foregroundStyle(monitorTint(monitor))))
+            .overlay(alignment: .topTrailing) { if advisor.strongVisible { Circle().fill(StatusColor.color(.pending, dark: scheme == .dark)).frame(width: 7, height: 7).offset(x: 5, y: -2) } }
+            .foregroundStyle(monitorTint(monitor, dark: scheme == .dark))))
+                .help(SystemRules.trayTooltip(snapshot, pending: pending))
         case trayDisk:
             if let d = model.disk {
                 cell(nil, id: trayDisk, text: nil, custom: AnyView(VStack(spacing: 3) {
                     TrayGlyph(id: id, model: model)
                     Text("\(d.freePercent)%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
                 }.foregroundStyle(diskTint(d))))
+            }
+        case trayMail:
+            if !mail.accounts.isEmpty {
+                let title = mailTrayTitle(mail.unreadCount)
+                cell(nil, id: id, text: nil, custom: AnyView(MailTrayGlyph(unread: mail.unreadCount)), accessibilityTitle: title)
+                    .help(title)
             }
         case trayBatt:
             if let b = model.batt {
@@ -284,7 +305,7 @@ struct TrayView: View {
         }
     }
 
-    func cell(_ icon: String?, id: String, text: String?, custom: AnyView? = nil) -> some View {
+    func cell(_ icon: String?, id: String, text: String?, custom: AnyView? = nil, accessibilityTitle: String? = nil) -> some View {
         HStack(spacing: 3) {
             if let custom { custom }
             if custom == nil, let icon { Image(systemName: icon).font(.system(size: 14)) }
@@ -295,7 +316,7 @@ struct TrayView: View {
         .frame(maxHeight: .infinity)
         .background(TrayHighlight(hovering: model.trayHover == id))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(id == trayMore ? tx("More", "Más") : (TrayItems.info(id)?.title ?? ""))
+        .accessibilityLabel(accessibilityTitle ?? (id == trayMore ? tx("More", "Más") : (TrayItems.info(id)?.title ?? "")))
         .accessibilityAddTraits(.isButton)
         .accessibilityAction {
             if let app = NSApp.delegate as? AppDelegate, let bar = app.bars.first(where: { $0.screen.key == screenKey }) ?? app.bars.first {

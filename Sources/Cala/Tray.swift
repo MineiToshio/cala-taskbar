@@ -6,6 +6,7 @@ import CoreLocation
 import OpenDirectory
 
 let trayBatt = "__t_batt", trayWifi = "__t_wifi", trayVol = "__t_vol"
+let trayMail = "__t_mail"
 
 enum SystemTray {
     /// `charging` = on AC power; `isCharging` = actually taking charge (false when full on AC).
@@ -211,29 +212,48 @@ enum Users {
         return String(data: d, encoding: .utf8) ?? ""
     }
 
+    private static func record(_ name: String, _ attrs: [String]) -> ODRecord? {
+        guard let node = try? ODNode(session: ODSession.default(), type: ODNodeType(kODNodeTypeLocalNodes)) else { return nil }
+        return try? node.record(withRecordType: kODRecordTypeUsers, name: name, attributes: attrs)
+    }
+
+    /// Reads the account picture straight from OpenDirectory as bytes (JPEGPhoto), or the Picture file as a fallback.
     static func photo(_ name: String) -> NSImage? {
-        let out = run([".", "-read", "/Users/" + name, "JPEGPhoto"])
-        let hex = out.components(separatedBy: "\n").dropFirst().joined().filter { $0.isHexDigit }
-        if hex.count > 16 {
-            var data = Data(); var i = hex.startIndex
-            while i < hex.endIndex, let j = hex.index(i, offsetBy: 2, limitedBy: hex.endIndex), let b = UInt8(hex[i..<j], radix: 16) { data.append(b); i = j }
-            if let img = NSImage(data: data) { return img }
-        }
-        let pic = run([".", "-read", "/Users/" + name, "Picture"]).components(separatedBy: "\n").last { $0.hasPrefix(" /") || $0.hasPrefix("Picture: /") }?
-            .replacingOccurrences(of: "Picture:", with: "").trimmingCharacters(in: .whitespaces)
-        return pic.flatMap { NSImage(contentsOfFile: $0) }
+        guard let r = record(name, [kODAttributeTypeJPEGPhoto, kODAttributeTypePicture]) else { return nil }
+        if let data = (try? r.values(forAttribute: kODAttributeTypeJPEGPhoto))?.first as? Data,
+           let img = NSImage(data: data), img.isValid { return img }
+        if let path = (try? r.values(forAttribute: kODAttributeTypePicture))?.first as? String,
+           let img = NSImage(contentsOfFile: path), img.isValid { return img }
+        return nil
+    }
+
+    private static let cacheLock = NSLock()
+    private static var cachedList: [U]?
+    private static var photoCache: [String: NSImage] = [:]
+
+    /// Last loaded list, so the panel can draw at its final size the moment it opens.
+    static var cached: [U]? { cacheLock.lock(); defer { cacheLock.unlock() }; return cachedList }
+
+    /// Cached photo; on a miss it is read again, so a transient failure is retried next time.
+    static func cachedPhoto(_ name: String) -> NSImage? {
+        cacheLock.lock(); let hit = photoCache[name]; cacheLock.unlock()
+        if let hit { return hit }
+        guard let img = photo(name) else { return nil }
+        cacheLock.lock(); photoCache[name] = img; cacheLock.unlock()
+        return img
     }
 
     static func list() -> [U] {
-        run([".", "list", "/Users", "UniqueID"]).components(separatedBy: "\n").compactMap { line in
+        let loaded: [U] = run([".", "list", "/Users", "UniqueID"]).components(separatedBy: "\n").compactMap { line in
             let f = line.split(separator: " ", omittingEmptySubsequences: true)
             guard f.count == 2, let uid = Int(f[1]), uid >= 500 else { return nil }
             let name = String(f[0])
-            var full = run([".", "-read", "/Users/" + name, "RealName"]).replacingOccurrences(of: "RealName:", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if full.isEmpty { full = name }
-            return U(name: name, full: full, photo: photo(name))
+            let real = (try? record(name, [kODAttributeTypeFullName])?.values(forAttribute: kODAttributeTypeFullName))??.first as? String
+            let full = real?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return U(name: name, full: full.isEmpty ? name : full, photo: cachedPhoto(name))
         }
+        if !loaded.isEmpty { cacheLock.lock(); cachedList = loaded; cacheLock.unlock() }
+        return loaded
     }
     // Accessed only on the main queue; kept set through verification and any lock fallback.
     private static var switchAttempt: UUID?

@@ -39,7 +39,21 @@ struct TrayGlyph: View {
     let id: String
     var model: TaskbarModel?
 
+    // A plain model reference is not observed: SwiftUI would keep the first drawing (e.g. the generic user icon
+    // when the photo loads a moment later). With a model, an observing wrapper redraws on every change.
     var body: some View {
+        if let model { LiveTrayGlyph(id: id, model: model) } else { trayGlyphContent(id: id, model: nil) }
+    }
+}
+
+private struct LiveTrayGlyph: View {
+    let id: String
+    @ObservedObject var model: TaskbarModel
+    var body: some View { trayGlyphContent(id: id, model: model) }
+}
+
+@ViewBuilder
+private func trayGlyphContent(id: String, model: TaskbarModel?) -> some View {
         switch id {
         case trayKB:
             if let code = model?.kbCode, !code.isEmpty { Text(code).font(.system(size: 11)) }
@@ -78,7 +92,6 @@ struct TrayGlyph: View {
         default:
             EmptyView()
         }
-    }
 }
 
 // MARK: - "^" overflow panel
@@ -187,7 +200,7 @@ struct DownloadsPane: View {
             Divider().padding(.vertical, 2)
             if model.denied {
                 Label(tx("Cala doesn't have permission to read Downloads.", "Cala no tiene permiso para leer Descargas."), systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12)).foregroundStyle(Color.orange)
+                    .font(.system(size: 12)).foregroundStyle(StatusColor.color(.attention))
                 Row(icon: "gearshape", title: tx("Open Files & Folders…", "Abrir Archivos y carpetas…")) {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")!)
                 }
@@ -309,7 +322,7 @@ struct TrashPane: View {
             Divider().padding(.vertical, 2)
             Row(icon: model.count == 0 ? "trash" : "trash.fill", title: status, subtitle: model.message.isEmpty ? nil : model.message) {}
             if model.denied {
-                Text(tx("Cala needs permission to control Finder so it can count and empty the Trash.", "Cala necesita permiso para controlar Finder y poder contar y vaciar la Papelera.")).font(.system(size: 11)).foregroundStyle(Color.orange)
+                Text(tx("Cala needs permission to control Finder so it can count and empty the Trash.", "Cala necesita permiso para controlar Finder y poder contar y vaciar la Papelera.")).font(.system(size: 11)).foregroundStyle(StatusColor.color(.attention))
                     .fixedSize(horizontal: false, vertical: true)
                 Row(icon: "gearshape", title: tx("Open Automation…", "Abrir Automatización…")) {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)

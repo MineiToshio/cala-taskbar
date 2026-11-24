@@ -23,6 +23,8 @@ File: `~/Library/Application Support/Cala/config.json`. Created on first run and
 | `trayLayout` | object | `{}` | Tray item id → `"bar"`, `"more"` (behind ^) or `"hidden"`; missing ids use their default |
 | `trayOrder` | array of ids | `[]` | Left-to-right order of the tray items (ids not listed keep their default place) |
 | `monitorEnabled` | bool | `true` | Show the CPU gauge and system panel in the tray |
+| `monitorBarMetric` | string | `"cpu"` | What the CPU and memory tray item shows while all is well: `"cpu"` or `"memory"` (a problem always wins) |
+| `mailLoadsRemoteImages` | bool | `true` | Load remote images in emails (the sender can tell the message was opened) |
 | `diskEnabled` | bool | `true` | Show free disk space in the tray |
 | `diskFolders` | array of paths | `[]` | Extra folders measured in the storage panel (`~` allowed) |
 | `barOpacity` | number | `1` | Bar background opacity (1 = solid, 0.2 = very transparent) |

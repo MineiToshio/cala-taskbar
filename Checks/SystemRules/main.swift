@@ -54,12 +54,47 @@ func checkMessage(_ id: String, _ snapshot: LoadSnapshot, kind: SystemMessage.Ki
 }
 
 let fine = base(loads: [app("Safari", 6), app("Mail", 2)])
-checkMessage("M1 todo bien", fine, kind: nil, extra: SystemRules.chip(.normal, lang: lang) == "Todo bien")
+checkMessage("M1 todo bien", fine, kind: nil)
 
-let spike = base(window: 90, smoothed: 88, busy: 0.5)
-checkMessage("M2 pico corto", spike, kind: .spike, style: .note,
+let xcodeLoad = app("Xcode", 52, pid: 501)
+// The processor turns amber after 45 s busy. Before 15 s the note says short spike; from 15 s on it says busy for a while.
+let spike = base(window: 90, smoothed: 88, busy: 0.1)
+checkMessage("M2 pico corto (menos de 15 s)", spike, kind: .spike, style: .note,
              title: "Pico momentáneo: es normal y baja solo.",
+             extra: SystemRules.cpuState(smoothed: 88, busyMinutes: 0.1) == .busy)
+expect("M2a umbrales: ámbar a los 45 s y pico solo hasta los 15 s",
+       SystemRules.sustainedMin == 0.75 && SystemRules.sustainedMin * 60 == 45
+           && SystemRules.spikeMin == 0.25 && SystemRules.spikeMin * 60 == 15)
+let busyAWhile = base(window: 90, smoothed: 88, busy: 0.5)
+checkMessage("M2b ocupado un rato (30 s): ya no es un pico momentáneo", busyAWhile, kind: .busyAWhile, style: .note,
+             title: "Lleva un rato ocupado; si sigue así te aviso.",
              extra: SystemRules.cpuState(smoothed: 88, busyMinutes: 0.5) == .busy)
+let busyAWhileEN = SystemRules.message(busyAWhile).map { SystemRules.text($0, lang: "en", locale: Locale(identifier: "en_US")) }
+let spikeEN = SystemRules.message(spike).map { SystemRules.text($0, lang: "en", locale: Locale(identifier: "en_US")) }
+expect("M2c textos en inglés del pico y del ocupado un rato",
+       spikeEN?.title == "Short spike: normal and settles on its own."
+           && busyAWhileEN?.title == "Busy for a while; I'll tell you if it lasts.", "\(String(describing: busyAWhileEN))")
+func cpuNote(_ seconds: Double) -> (state: MeterState, kind: SystemMessage.Kind?, level: SystemLevel) {
+    let s = base(window: 90, smoothed: 88, busy: seconds / 60)
+    return (SystemRules.cpuState(smoothed: 88, busyMinutes: seconds / 60), SystemRules.message(s)?.kind, SystemRules.level(s))
+}
+let at14 = cpuNote(14.9), at15 = cpuNote(15), at44 = cpuNote(44.9), at45 = cpuNote(45)
+expect("M2d el pico momentáneo solo se muestra antes de 15 s",
+       at14.kind == .spike && at15.kind == .busyAWhile && at44.kind == .busyAWhile
+           && cpuNote(0).kind == .spike,
+       "\(at14) \(at15) \(at44)")
+expect("M2e el procesador pasa a ámbar justo a los 45 s, no antes",
+       at14.state == .busy && at44.state == .busy && at44.level == .normal
+           && at45.state == .veryBusy && at45.level == .attention
+           && SystemRules.cpuState(smoothed: 74.9, busyMinutes: 5) == .normal,
+       "\(at44) \(at45)")
+let atThreshold = base(window: 80, smoothed: 85, busy: 0.75, loads: [xcodeLoad, app("Safari", 5)])
+let atThresholdText = SystemRules.message(atThreshold).map { SystemRules.text($0, lang: lang, locale: locale) }
+expect("M2f a los 45 s la tarjeta ya no dice 0 min",
+       SystemRules.busyMinutesLabel(0.75) == 1 && SystemRules.busyMinutesLabel(1.99) == 1
+           && SystemRules.busyMinutesLabel(2.4) == 2
+           && SystemRules.message(atThreshold)?.kind == .appBusy(name: "Xcode", minutes: 1, closable: true)
+           && atThresholdText?.detail?.hasPrefix("El Mac lleva 1 min ocupado") == true, "\(String(describing: atThresholdText))")
 
 let xcode = app("Xcode", 52, pid: 501)
 let sustained = base(window: 80, smoothed: 85, busy: 3.2, loads: [xcode, app("Safari", 5)])
@@ -121,13 +156,13 @@ checkMessage("M7 carga repartida", spread, kind: .spread(minutes: 3), level: .at
 
 var hot = sustained
 hot.thermal = .serious
-checkMessage("M8 calor y CPU", hot, kind: .hot(critical: false), level: .attention, secondary: .openActivityMonitor)
+checkMessage("M8 calor y CPU", hot, kind: .hot(critical: false, top: nil), level: .attention, secondary: .openActivityMonitor)
 hot.thermal = .critical
 hot.criticalThermalMinutes = 2
-checkMessage("M9 calor crítico sostenido", hot, kind: .hot(critical: true), level: .critical, secondary: .openActivityMonitor)
+checkMessage("M9 calor crítico sostenido", hot, kind: .hot(critical: true, top: nil), level: .critical, secondary: .openActivityMonitor)
 var briefHeat = hot
 briefHeat.criticalThermalMinutes = 119.0 / 60
-checkMessage("M9b calor crítico breve", briefHeat, kind: .hot(critical: false), level: .attention, secondary: .openActivityMonitor)
+checkMessage("M9b calor crítico breve", briefHeat, kind: .hot(critical: false, top: nil), level: .attention, secondary: .openActivityMonitor)
 
 var both = sustained
 both.pressure = .critical
@@ -180,12 +215,173 @@ heatClock.observe(true, at: 61)
 for time in stride(from: 64, through: 181, by: 3) { heatClock.observe(true, at: Double(time)) }
 hot.criticalThermalMinutes = heatClock.minutes(at: 181)
 checkMessage("M9c dos minutos críticos continuos activan rojo", hot,
-             kind: .hot(critical: true), level: .critical, secondary: .openActivityMonitor)
+             kind: .hot(critical: true, top: nil), level: .critical, secondary: .openActivityMonitor)
 heatClock.observe(false, at: 182)
 heatClock.observe(true, at: 303)
 hot.criticalThermalMinutes = heatClock.minutes(at: 303)
 checkMessage("M9d el descenso térmico reinicia el contador crítico", hot,
-             kind: .hot(critical: false), level: .attention, secondary: .openActivityMonitor)
+             kind: .hot(critical: false, top: nil), level: .attention, secondary: .openActivityMonitor)
+
+// Heat names what uses the most energy and offers to quit it only when it is a closable app.
+func energetic(_ load: AppLoad, _ energy: Double) -> AppLoad {
+    var load = load
+    load.energy = energy
+    return load
+}
+var hotChrome = base(loads: [energetic(app("Google Chrome", 9, pid: 900), 24.6), energetic(app("Safari", 6, pid: 100), 7)])
+hotChrome.thermal = .serious
+let quitChrome = SystemAction.quit(name: "Google Chrome", pid: 900, frees: nil)
+checkMessage("M8b el calor nombra lo que más energía usa", hotChrome, kind: .hot(critical: false, top: "Google Chrome"),
+             level: .attention, primary: quitChrome, secondary: .openActivityMonitor,
+             title: "El Mac está caliente", detail: "Lo que más energía usa es Google Chrome.")
+let hotChromeText = SystemRules.message(hotChrome).map { SystemRules.text($0, lang: "en", locale: locale) }
+let hotChromeES = SystemRules.message(hotChrome).map { SystemRules.text($0, lang: lang, locale: locale) }
+expect("M8c textos del calor con app cerrable en es/en",
+       hotChromeES?.primary == "Cerrar Google Chrome…" && hotChromeES?.secondary == "Monitor de Actividad"
+           && hotChromeText?.title == "The Mac is hot" && hotChromeText?.detail == "Google Chrome uses the most energy."
+           && hotChromeText?.primary == "Quit Google Chrome…", "\(String(describing: hotChromeES)) | \(String(describing: hotChromeText))")
+var hotFinder = hotChrome
+setLoads(&hotFinder, [energetic(app("Finder", 9, pid: 300, closable: false), 30), energetic(app("Safari", 6, pid: 100), 7)])
+checkMessage("M8d sin app cerrable la tarjeta no ofrece cerrar", hotFinder, kind: .hot(critical: false, top: "Finder"),
+             level: .attention, secondary: .openActivityMonitor, detail: "Lo que más energía usa es Finder.")
+let hotFinderEN = SystemRules.message(hotFinder).map { SystemRules.text($0, lang: "en", locale: locale) }
+expect("M8e sin app cerrable en inglés solo queda el Monitor de Actividad",
+       hotFinderEN?.primary == nil && hotFinderEN?.secondary == "Activity Monitor"
+           && hotFinderEN?.detail == "Finder uses the most energy.", "\(String(describing: hotFinderEN))")
+var veryHotChrome = hotChrome
+veryHotChrome.thermal = .critical
+veryHotChrome.criticalThermalMinutes = 3
+checkMessage("M8f calor crítico con culpable", veryHotChrome, kind: .hot(critical: true, top: "Google Chrome"),
+             level: .critical, primary: quitChrome, secondary: .openActivityMonitor,
+             title: "El Mac está muy caliente", detail: "Guarda tu trabajo. Lo que más energía usa es Google Chrome.")
+var hotIdle = hotChrome
+setLoads(&hotIdle, [energetic(app("Safari", 6, pid: 100), 0.5)])
+checkMessage("M8g sin un consumo destacable se mantiene el consejo general", hotIdle, kind: .hot(critical: false, top: nil),
+             level: .attention, secondary: .openActivityMonitor, title: "El Mac está caliente y va más lento")
+var hotNode = hotChrome
+setLoads(&hotNode, [energetic(node(3), 6), energetic(node(3, launcher: "Claude", pid: 697), 6),
+                    energetic(app("Safari", 6, pid: 100), 10)])
+let hotNodeList = SystemRules.energyBreakdown(hotNode.loads, unattributed: 0, lang: lang, locale: locale)
+checkMessage("M8i el calor nombra al líder de la lista de Energía y no cierra un grupo de herramientas", hotNode,
+             kind: .hot(critical: false, top: "Node.js"), level: .attention, secondary: .openActivityMonitor,
+             detail: "Lo que más energía usa es Node.js.",
+             extra: hotNodeList.rows.first?.name == "Node.js" && hotNodeList.rows.first?.value == "12,0")
+var hotSole = hotChrome
+setLoads(&hotSole, [energetic(app("Google Chrome", 9, pid: 900), 4)])
+checkMessage("M8j un único consumo de 4 puntos también se nombra y se ofrece cerrar", hotSole,
+             kind: .hot(critical: false, top: "Google Chrome"), level: .attention, primary: quitChrome,
+             secondary: .openActivityMonitor,
+             extra: SystemRules.energyBreakdown(hotSole.loads, unattributed: 0, lang: lang, locale: locale).rows.first?.name
+                 == "Google Chrome")
+var hotStale = hotChrome
+hotStale.observedAt += ProcessReading.maxAge + 1
+checkMessage("M8h sin lectura fresca no se nombra ni se cierra nada", hotStale, kind: .hot(critical: false, top: nil),
+             level: .attention, secondary: .openActivityMonitor)
+
+// MARK: Energy impact
+
+func counters(_ cpuMs: UInt64, _ wakeups: UInt64, start: UInt64 = 1) -> EnergyCounters {
+    EnergyCounters(start: start, cpuNanoseconds: cpuMs * 1_000_000, wakeups: wakeups)
+}
+let energyBefore: [Int32: EnergyCounters] = [10: counters(1_000, 100), 20: counters(5_000, 0), 30: counters(0, 0),
+                                             40: counters(9_000, 50), 50: counters(100, 0, start: 7)]
+let energyAfter: [Int32: EnergyCounters] = [10: counters(1_500, 100), 20: counters(5_200, 2_000), 30: counters(250, 0),
+                                            40: counters(8_000, 60), 50: counters(400, 0, start: 8), 60: counters(900, 0)]
+let ranking = SystemRules.energyRanking(before: energyBefore, after: energyAfter, elapsed: 2)
+expect("N1 el impacto energético suma tiempo de CPU y despertares por segundo",
+       ranking.map(\.pid) == [20, 10, 30] && ranking.map { ($0.score * 10).rounded() / 10 } == [30, 25, 12.5],
+       "\(ranking)")
+expect("N2 se descartan PID nuevos, reutilizados o con contadores que retroceden",
+       SystemRules.energyScore(from: nil, to: counters(1, 1), elapsed: 2) == nil
+           && SystemRules.energyScore(from: counters(100, 0, start: 7), to: counters(400, 0, start: 8), elapsed: 2) == nil
+           && SystemRules.energyScore(from: counters(9_000, 50), to: counters(8_000, 60), elapsed: 2) == nil
+           && SystemRules.energyScore(from: counters(1, 1), to: counters(2, 2), elapsed: 0) == nil)
+expect("N3 un núcleo ocupado sin despertares puntúa 100",
+       SystemRules.energyScore(from: counters(0, 0), to: counters(2_000, 0), elapsed: 2) == 100)
+
+let energyLoads = [energetic(app("Google Chrome", 9, pid: 900), 24.64), energetic(app("Safari", 6, pid: 100), 7.33),
+                   energetic(node(5), 12.01), energetic(app("Mail", 1, pid: 101), 0.02)]
+let energyRows = SystemRules.energyBreakdown(energyLoads, unattributed: 6, lang: lang, locale: locale, rowLimit: 3)
+expect("N4 Energía ordena por impacto, muestra un decimal y agrupa el resto en Sistema y otros",
+       energyRows.rows.map(\.name) == ["Google Chrome", "Node.js", "Sistema y otros"]
+           && energyRows.rows.map(\.value) == ["24,6", "12,0", "13,4"]
+           && energyRows.rows.reduce(0) { $0 + $1.amount } == 500 && energyRows.rows.last?.isRest == true,
+       "\(energyRows.rows.map { ($0.name, $0.value, $0.amount) })")
+let energyEN = SystemRules.energyBreakdown(energyLoads, unattributed: 6, lang: "en", locale: Locale(identifier: "en_US"))
+expect("N5 en inglés usa punto decimal y el texto del resto",
+       energyEN.rows.first?.value == "24.6" && energyEN.rows.last?.name == "System and others"
+           && SystemRules.energyBreakdown([], unattributed: 0, lang: lang, locale: locale).rows.isEmpty,
+       "\(energyEN.rows.map { ($0.name, $0.value) })")
+let energyReading = ProcessReading(capturedAt: 100, cpuWindow: 30, loads: [app("A", 10), app("B", 5)])!
+expect("N6 la carga que Cala no lee cuenta como tiempo de procesador por núcleo",
+       SystemRules.unattributedEnergy(energyReading, cores: 8) == 120)
+let otherAccountProcess = MeasuredProcess(usage: ProcessUsage(pid: 90, uid: 502, executable: "", cpu: 2, memory: nil,
+                                                              energy: 30), loadKey: nil)
+let mixedReading = ProcessReading(capturedAt: 100, cpuWindow: 30, loads: [app("A", 10), app("B", 5)],
+                                  processes: [otherAccountProcess])!
+expect("N8 otra cuenta suma su energía medida y solo se estima la CPU que nadie explica",
+       SystemRules.unattributedEnergy(mixedReading, cores: 8) == 30 + (30 - 15 - 2) * 8,
+       "\(SystemRules.unattributedEnergy(mixedReading, cores: 8))")
+// The Energía meter shows the total its tab adds up to, and the background sampler computes the same total.
+let totalLoads = [energetic(app("A", 10), 12.4), energetic(app("B", 5), 6.1)]
+let totalReading = ProcessReading(capturedAt: 100, cpuWindow: 30, loads: totalLoads, processes: [otherAccountProcess])!
+let totalTab = SystemRules.energyBreakdown(totalReading.loads, unattributed: SystemRules.unattributedEnergy(totalReading, cores: 8),
+                                           lang: lang, locale: locale)
+let panelTotal = SystemRules.energyTotal(totalReading, cores: 8)
+let backgroundTotal = SystemRules.energyTotal(measuredEnergy: 12.4 + 6.1 + 30, measuredCPU: 10 + 5 + 2, cpuWindow: 30, cores: 8)
+expect("N9 el total de Energía coincide entre el panel, su lista y el muestreo de fondo",
+       abs(panelTotal - backgroundTotal) < 1e-9 && abs(panelTotal - (12.4 + 6.1 + 30 + 13 * 8)) < 1e-9
+           && abs(Double(totalTab.rows.reduce(0) { $0 + $1.amount }) / 10 - panelTotal) < 0.2,
+       "\(panelTotal) \(backgroundTotal) \(totalTab.rows.map(\.amount))")
+expect("N9b el procesador que nadie explica nunca resta energía",
+       SystemRules.energyTotal(measuredEnergy: 5, measuredCPU: 40, cpuWindow: 30, cores: 8) == 5
+           && SystemRules.energyTotal(measuredEnergy: 0, measuredCPU: 0, cpuWindow: 0, cores: 8) == 0)
+expect("N9c el número del medidor sale de la lectura mostrada y, sin ella, del último muestreo de fondo",
+       SystemRules.energyValue(reading: totalReading, history: [1, 2], cores: 8) == Int(panelTotal.rounded())
+           && SystemRules.energyValue(reading: nil, history: [10, 41.6], cores: 8) == 42
+           && SystemRules.energyValue(reading: nil, history: [], cores: 8) == nil)
+expect("N9d el muestreo de fondo descarta ventanas rotas por la suspensión o por un reloj parado",
+       SystemRules.energyInterval == 5
+           && SystemRules.energyWindowUsable(gap: 5) && SystemRules.energyWindowUsable(gap: 6.2)
+           && !SystemRules.energyWindowUsable(gap: 0.2) && !SystemRules.energyWindowUsable(gap: 45)
+           && !SystemRules.energyWindowUsable(gap: -1))
+
+// First sample: without per-process deltas the Procesador and Energía lists show the skeleton, not “Sistema y otros 100%”.
+expect("S1 una primera pasada sin deltas por proceso no se publica como lectura",
+       !SystemRules.canPublishReading(cpuWindow: nil, processesWithDeltas: 0)
+           && !SystemRules.canPublishReading(cpuWindow: nil, processesWithDeltas: 40)
+           && !SystemRules.canPublishReading(cpuWindow: 35, processesWithDeltas: 0)
+           && SystemRules.canPublishReading(cpuWindow: 35, processesWithDeltas: 1)
+           && SystemRules.canPublishReading(cpuWindow: 0, processesWithDeltas: 12))
+expect("S2 una ventana demasiado corta no sirve como medición ni como punto de partida",
+       !SystemRules.deltaWindowUsable(elapsed: 0) && !SystemRules.deltaWindowUsable(elapsed: 0.1)
+           && !SystemRules.deltaWindowUsable(elapsed: 0.49) && SystemRules.deltaWindowUsable(elapsed: 0.5)
+           && SystemRules.deltaWindowUsable(elapsed: 2))
+var firstScan = base()
+firstScan.lastReading = nil
+var oneReading = base()
+var reopenedOld = base()
+reopenedOld.processSessionStartedAt = 500
+expect("S3 sin lectura, Procesador y Energía muestran el esqueleto y Memoria no",
+       SystemRules.listIsLoading(metric: .cpu, availability: firstScan.cpuAvailability)
+           && SystemRules.listIsLoading(metric: .energy, availability: firstScan.cpuAvailability)
+           && !SystemRules.listIsLoading(metric: .memory, availability: firstScan.cpuAvailability)
+           && !SystemRules.listIsLoading(metric: .cpu, availability: oneReading.cpuAvailability)
+           && !SystemRules.listIsLoading(metric: .energy, availability: oneReading.cpuAvailability)
+           && !SystemRules.listIsLoading(metric: .energy, availability: reopenedOld.cpuAvailability),
+       "\(firstScan.cpuAvailability) \(oneReading.cpuAvailability) \(reopenedOld.cpuAvailability)")
+
+let nodeEnergy = SystemRules.energyBreakdown([energetic(node(4), 9), energetic(node(3, launcher: "Claude", pid: 697), 3)],
+                                             unattributed: 0, lang: lang, locale: locale)
+let nodeEnergyRow = nodeEnergy.rows.first { $0.isTool }
+let nodeEnergyChildren = nodeEnergyRow.map {
+    SystemRules.toolDetails($0, loads: [energetic(node(4), 9), energetic(node(3, launcher: "Claude", pid: 697), 3)],
+                            metric: .energy, lang: lang)
+} ?? []
+expect("N7 las subfilas de Energía suman su fila padre con un decimal",
+       nodeEnergyRow?.value == "12,0" && nodeEnergyRow.map {
+           LoadMetric.energy.values(for: nodeEnergyChildren, parent: $0, locale: locale) } == ["9,0", "3,0"],
+       "\(nodeEnergyChildren)")
 
 let rejected = ProcessReading(capturedAt: 100, cpuWindow: 20, loads: [app("Xcode", 30, pid: 501, memory: 5)])
 expect("B9 se rechaza una ventana incoherente completa", rejected == nil)
@@ -651,21 +847,27 @@ let largestOther = rankedDetails(3, ps: largestOtherPS)
 expect("E25 un Otros grande conserva su posición entre los primeros grupos",
        largestOther.map(\.id) == ["other", "windows", "more"] && largestOther.map(\.amount) == [60, 20, 20])
 
-let panelCases: [(message: Int, maintenance: Bool, rows: Int)] = [
-    (0, false, 7), (0, true, 6), (SystemPanelLayout.noteHeight, false, 7),
-    (SystemPanelLayout.noteHeight, true, 6), (SystemPanelLayout.cardHeight, false, 6),
-    (SystemPanelLayout.cardHeight, true, 5)
+// (screen allowance, message, maintenance) → (meter row height, list rows)
+let card = SystemPanelLayout.cardHeight, note = SystemPanelLayout.noteHeight
+let panelCases: [(max: Int, message: Int, maintenance: Bool, meter: Int, rows: Int)] = [
+    (640, 0, false, 42, 6), (640, 0, true, 42, 6), (640, note, false, 42, 6), (640, note, true, 42, 6),
+    (640, card, false, 42, 6), (640, card, true, 42, 6),
+    (520, 0, false, 42, 6), (520, 0, true, 42, 5), (520, note, false, 42, 5), (520, note, true, 42, 4),
+    (520, card, false, 38, 4), (520, card, true, 34, 3)
 ]
-expect("L1 el presupuesto reserva siete, seis o cinco filas según los avisos", panelCases.allSatisfy { sample in
-    let layout = SystemPanelLayout(messageHeight: sample.message, hasMaintenance: sample.maintenance)
-    let chrome = 231 + (sample.message == 0 ? 0 : sample.message + 10) + (sample.maintenance ? 34 : 0)
-    return layout.rowLimit == sample.rows
+func chrome(_ layout: SystemPanelLayout, message: Int, maintenance: Bool) -> Int {
+    // Padding, “More” row, header, list header, footer and gaps, plus the meters, message and maintenance line.
+    165 + 3 * layout.meterRowHeight + (message == 0 ? 0 : message + 10) + (maintenance ? 24 : 0)
+}
+expect("L1 con 640 pt caben seis filas y medidores de 42 pt; con 520 pt bajan las filas y luego los medidores", panelCases.allSatisfy { sample in
+    let layout = SystemPanelLayout(messageHeight: sample.message, hasMaintenance: sample.maintenance, maxHeight: sample.max)
+    return layout.meterRowHeight == sample.meter && layout.rowLimit == sample.rows
         && layout.listHeight == SystemPanelLayout.height(forRows: sample.rows)
         && layout.expandedListHeight >= layout.listHeight
-        && chrome + layout.expandedListHeight <= SystemPanelLayout.maxHeight
-})
+        && chrome(layout, message: sample.message, maintenance: sample.maintenance) + layout.expandedListHeight <= sample.max
+}, "\(panelCases.map { SystemPanelLayout(messageHeight: $0.message, hasMaintenance: $0.maintenance, maxHeight: $0.max) }.map { ($0.meterRowHeight, $0.rowLimit) })")
 expect("L2 cada estado expandido admite subfilas completas en Procesador y Memoria", panelCases.allSatisfy { sample in
-    let panel = SystemPanelLayout(messageHeight: sample.message, hasMaintenance: sample.maintenance)
+    let panel = SystemPanelLayout(messageHeight: sample.message, hasMaintenance: sample.maintenance, maxHeight: sample.max)
     return (1...panel.rowLimit).allSatisfy { count in
         [true, false].allSatisfy { showsEstimate in
             let detail = LoadDetailLayout(parentCount: count, showsEstimate: showsEstimate,
@@ -676,14 +878,17 @@ expect("L2 cada estado expandido admite subfilas completas en Procesador y Memor
         }
     }
 })
+let tinyPanel = SystemPanelLayout(messageHeight: card, hasMaintenance: true, maxHeight: 440)
+expect("L2b en pantallas muy bajas los medidores no bajan de 34 pt",
+       tinyPanel.meterRowHeight == SystemPanelLayout.minMeterRowHeight && tinyPanel.rowLimit >= 1)
 
 let enoughLoads = (1...8).map { app("App \($0)", Double(10 - $0), memory: Double(10 - $0) / 2) }
-expect("L3 las filas de Procesador suman el total y reservan el último hueco para Sistema y otros", (5...7).allSatisfy { limit in
+expect("L3 las filas de Procesador suman el total y reservan el último hueco para Sistema y otros", (4...7).allSatisfy { limit in
     let data = SystemRules.cpuBreakdown(enoughLoads, total: 70, lang: lang, rowLimit: limit)
     return data.rows.count == limit && data.rows.first?.name == "App 1" && data.rows.last?.isRest == true
         && data.rows.reduce(0) { $0 + $1.amount } == 70
 })
-expect("L4 Memoria aplica el mismo límite y sus bytes suman el total", (5...7).allSatisfy { limit in
+expect("L4 Memoria aplica el mismo límite y sus bytes suman el total", (4...7).allSatisfy { limit in
     let data = SystemRules.memoryBreakdown(enoughLoads, used: gib(30), lang: lang, locale: locale, rowLimit: limit)
     return data.rows.count == limit && data.rows.first?.name == "App 1" && data.rows.last?.isRest == true
         && data.rows.reduce(0) { $0 + $1.amount } == Int(gib(30))
@@ -726,6 +931,144 @@ let memoryChildren = SystemRules.toolDetails(nodeMemory, loads: launcherLoads, m
 expect("L10 las etiquetas de las subfilas de Memoria suman su fila padre",
        LoadMetric.memory.values(for: memoryChildren, parent: nodeMemory, locale: locale) == ["1,5 GB", "1,0 GB"]
            && nodeMemory.value == "2,5 GB")
+
+let worstPanel = SystemPanelLayout(messageHeight: card, hasMaintenance: true)
+let smallWorst = SystemPanelLayout(messageHeight: card, hasMaintenance: true, maxHeight: 520)
+expect("L11 el peor caso cabe en 640 pt con seis filas y en 520 pt con tres y medidores de 34 pt",
+       chrome(worstPanel, message: card, maintenance: true) + worstPanel.expandedListHeight <= 640 && worstPanel.rowLimit == 6
+           && chrome(smallWorst, message: card, maintenance: true) + smallWorst.expandedListHeight <= 520
+           && smallWorst.rowLimit == 3 && smallWorst.meterRowHeight == 34 && smallWorst.chrome == 165 + 3 * 34,
+       "\(worstPanel) | \(smallWorst)")
+
+// MARK: Tray metric
+
+func levels(_ cpu: SystemLevel = .normal, _ memory: SystemLevel = .normal, _ heat: SystemLevel = .normal) -> MetricLevels {
+    MetricLevels(cpu: cpu, memory: memory, heat: heat)
+}
+expect("T1 todo normal muestra la métrica elegida",
+       SystemRules.dominant(levels(), preferred: .cpu) == .cpu && SystemRules.dominant(levels(), preferred: .memory) == .memory)
+expect("T2 gana el nivel más alto",
+       SystemRules.dominant(levels(.attention, .critical, .normal), preferred: .cpu) == .memory
+           && SystemRules.dominant(levels(.critical, .attention, .attention), preferred: .memory) == .cpu
+           && SystemRules.dominant(levels(.attention), preferred: .memory) == .cpu)
+expect("T3 empates: calor, luego memoria, luego CPU",
+       SystemRules.dominant(levels(.attention, .attention, .attention), preferred: .cpu) == .heat
+           && SystemRules.dominant(levels(.critical, .critical, .normal), preferred: .cpu) == .memory
+           && SystemRules.dominant(levels(.attention, .normal, .attention), preferred: .memory) == .heat)
+
+var heatSnapshot = fine
+heatSnapshot.thermal = .serious
+var tightSnapshot = high
+tightSnapshot.cpuNow = 8
+expect("T4 los niveles salen de las reglas del panel",
+       SystemRules.levels(heatSnapshot) == levels(.normal, .normal, .attention)
+           && SystemRules.levels(tightSnapshot) == levels(.normal, .attention, .normal)
+           && SystemRules.levels(criticalMemory).memory == .critical && SystemRules.levels(sustained).cpu == .attention)
+expect("T5 el panel abre la pestaña de la métrica mostrada; calor abre Energía",
+       SystemRules.panelMetric(for: .memory, levels()) == .memory && SystemRules.panelMetric(for: .cpu, levels(.normal, .critical)) == .cpu
+           && SystemRules.panelMetric(for: .heat, levels(.normal, .attention, .attention)) == .energy
+           && SystemRules.panelMetric(for: .heat, levels(.attention, .attention, .critical)) == .energy
+           && SystemRules.panelMetric(for: .heat, levels(.normal, .normal, .attention)) == .energy
+           && SystemRules.panelMetric(for: SystemRules.dominant(SystemRules.levels(heatSnapshot), preferred: .cpu),
+                                      SystemRules.levels(heatSnapshot)) == .energy
+           && SystemRules.panelMetric(for: SystemRules.dominant(SystemRules.levels(tightSnapshot), preferred: .cpu),
+                                      SystemRules.levels(tightSnapshot)) == .memory)
+
+var heldCPU = MetricHold()
+_ = heldCPU.update(levels(.attention), preferred: .cpu, at: 0)
+let heldTie = heldCPU.update(levels(.attention, .normal, .attention), preferred: .cpu, at: 10)
+expect("T5b al abrir, el calor empatado abre Energía aunque la bandeja siga retenida en CPU",
+       heldTie == .cpu && SystemRules.openingMetric(levels(.attention, .normal, .attention), preferred: .cpu) == .energy
+           && SystemRules.openingMetric(levels(), preferred: .memory) == .memory
+           && SystemRules.openingMetric(levels(.critical, .attention, .attention), preferred: .memory) == .cpu)
+
+var heldMemory = MetricHold()
+let h0 = heldMemory.update(levels(), preferred: .cpu, at: 0)
+let h1 = heldMemory.update(levels(.normal, .attention), preferred: .cpu, at: 10)
+let h2 = heldMemory.update(levels(), preferred: .cpu, at: 20)
+let h3 = heldMemory.update(levels(), preferred: .cpu, at: 39.9)
+let h4 = heldMemory.update(levels(), preferred: .cpu, at: 40)
+expect("T6 la memoria se mantiene 30 s y luego vuelve a la elegida",
+       [h0, h1, h2, h3, h4] == [.cpu, .memory, .memory, .memory, .cpu], "\([h0, h1, h2, h3, h4])")
+
+var escalation = MetricHold()
+let e0 = escalation.update(levels(.normal, .attention), preferred: .cpu, at: 0)
+let e1 = escalation.update(levels(.normal, .attention, .critical), preferred: .cpu, at: 5)
+let e2 = escalation.update(levels(.critical, .attention, .critical), preferred: .cpu, at: 6)
+let e3 = escalation.update(levels(.normal, .critical, .attention), preferred: .cpu, at: 7)
+expect("T7 un nivel estrictamente mayor cambia al instante; un empate espera",
+       [e0, e1, e2, e3] == [.memory, .heat, .heat, .memory], "\([e0, e1, e2, e3])")
+
+var tie = MetricHold()
+let t0 = tie.update(levels(.normal, .attention), preferred: .cpu, at: 0)
+let t1 = tie.update(levels(.normal, .attention, .attention), preferred: .cpu, at: 29)
+let t2 = tie.update(levels(.normal, .attention, .attention), preferred: .cpu, at: 30)
+expect("T8 un empate con más prioridad cambia al vencer el plazo",
+       [t0, t1, t2] == [.memory, .memory, .heat], "\([t0, t1, t2])")
+
+var choice = MetricHold()
+let c0 = choice.update(levels(), preferred: .cpu, at: 0)
+let c1 = choice.update(levels(), preferred: .memory, at: 1)
+let c2 = choice.update(levels(.attention), preferred: .memory, at: 2)
+let c3 = choice.update(levels(.attention), preferred: .cpu, at: 3)
+let c4 = choice.update(levels(), preferred: .cpu, at: 4)
+expect("T9 cambiar la preferencia aplica al instante si todo va bien",
+       [c0, c1, c2, c3, c4] == [.cpu, .memory, .cpu, .cpu, .cpu], "\([c0, c1, c2, c3, c4])")
+
+var traySnapshot = tightSnapshot
+traySnapshot.memoryUsed = gib(12)
+expect("T10 valores de la bandeja",
+       SystemRules.trayValue(.cpu, traySnapshot, lang: lang) == "8%"
+           && SystemRules.trayValue(.memory, traySnapshot, lang: lang) == "75%"
+           && SystemRules.trayValue(.heat, heatSnapshot, lang: lang) == "Alta"
+           && SystemRules.trayValue(.heat, heatSnapshot, lang: "en") == "Hot"
+           && SystemRules.trayValue(.heat, fine, lang: lang) == "Normal")
+var warmSnapshot = fine
+warmSnapshot.thermal = .fair
+expect("T10b temperatura elevada sigue en nivel normal y usa la misma palabra en panel y bandeja",
+       SystemRules.levels(warmSnapshot).heat == .normal && SystemRules.heatWarm(warmSnapshot)
+           && SystemRules.heatStatus(warmSnapshot, lang: lang) == "Elevada"
+           && SystemRules.heatStatus(warmSnapshot, lang: "en") == "Warm"
+           && SystemRules.trayValue(.heat, warmSnapshot, lang: lang) == "Elevada"
+           && SystemRules.heatStatus(heatSnapshot, lang: lang) == "Alta" && SystemRules.heatStatus(fine, lang: "en") == "Normal"
+           && SystemRules.message(warmSnapshot) == nil)
+let tip = SystemRules.trayTooltip(tightSnapshot, pending: "macOS pendiente de actualizar", lang: lang)
+var hotAndTight = tightSnapshot
+hotAndTight.thermal = .critical
+hotAndTight.criticalThermalMinutes = 3
+let hotTip = SystemRules.trayTooltip(hotAndTight, pending: nil, lang: lang)
+let calmTip = SystemRules.trayTooltip(fine, pending: nil, lang: "en")
+expect("T11 el tooltip pone primero los problemas, luego la CPU y al final lo pendiente",
+       tip == "Memoria justa · CPU 8% · macOS pendiente de actualizar"
+           && hotTip == "Energía crítica · Memoria justa · CPU 8%" && calmTip == "CPU 21%",
+       "\(tip) | \(hotTip) | \(calmTip)")
+
+var criticalHeat = fine
+criticalHeat.thermal = .critical
+criticalHeat.criticalThermalMinutes = 119.0 / 60
+expect("T12 antes de 120 s el calor crítico conserva el nivel y los textos de atención",
+       SystemRules.levels(criticalHeat).heat == .attention
+           && SystemRules.heatStatus(SystemRules.heatLevel(criticalHeat), lang: lang) == "Alta"
+           && SystemRules.trayValue(.heat, criticalHeat, lang: lang) == "Alta"
+           && SystemRules.trayValue(.heat, criticalHeat, lang: "en") == "Hot"
+           && SystemRules.trayTooltip(criticalHeat, pending: nil, lang: lang) == "Energía alta · CPU 21%"
+           && SystemRules.trayTooltip(criticalHeat, pending: nil, lang: "en") == "Energy: hot · CPU 21%")
+criticalHeat.criticalThermalMinutes = 120.0 / 60
+expect("T13 a los 120 s el calor pasa al nivel y a los textos críticos",
+       SystemRules.levels(criticalHeat).heat == .critical
+           && SystemRules.heatStatus(SystemRules.heatLevel(criticalHeat), lang: lang) == "Crítica"
+           && SystemRules.trayValue(.heat, criticalHeat, lang: lang) == "Crítica"
+           && SystemRules.trayValue(.heat, criticalHeat, lang: "en") == "Critical"
+           && SystemRules.trayTooltip(criticalHeat, pending: nil, lang: lang) == "Energía crítica · CPU 21%"
+           && SystemRules.trayTooltip(criticalHeat, pending: nil, lang: "en") == "Energy: critical · CPU 21%")
+
+var heldHeat = MetricHold()
+let firstHeat = heldHeat.update(levels(.normal, .normal, .attention), preferred: .cpu, at: 0)
+let changedPreference = heldHeat.update(levels(), preferred: .memory, at: 1)
+let beforeHeatHoldExpiry = heldHeat.update(levels(), preferred: .memory, at: 29.9)
+let atHeatHoldExpiry = heldHeat.update(levels(), preferred: .memory, at: 30)
+expect("T14 la nueva preferencia espera a que venza la retención del calor",
+       [firstHeat, changedPreference, beforeHeatHoldExpiry, atHeatHoldExpiry] == [.heat, .heat, .heat, .memory])
 
 print("\(passes) PASS, \(failures) FAIL")
 exit(failures == 0 ? 0 : 1)

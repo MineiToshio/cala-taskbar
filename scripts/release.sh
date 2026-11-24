@@ -31,7 +31,7 @@ export CALA_SIGN_IDENTITY
 [[ -z "${CALA_QA_REGULAR:-}" ]] || { echo "CALA_QA_REGULAR is for testing builds only" >&2; exit 1; }
 [[ -n "${CALA_SENTRY_DSN:-}" ]] || echo "warning: CALA_SENTRY_DSN is not set; 'Report a problem' will be off in this build" >&2
 
-./scripts/check-rules.sh >/dev/null && echo "› checks passed"
+./scripts/check-rules.sh >/dev/null && ./scripts/check-mail.sh >/dev/null && echo "› checks passed"
 ./build.sh
 APP=build/Cala.app
 codesign --verify --strict --verbose=2 "$APP"

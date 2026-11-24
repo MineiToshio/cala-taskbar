@@ -33,12 +33,13 @@
 Hide automatically, Theme (submenu), Transparency (submenu), **Configuración…** (opens the Settings window). There is deliberately no Quit here, so nobody exits by accident.
 
 ## Settings window
-Sidebar with seven sections (General, Appearance, Screens, Usage, Calendar, Permissions, Advanced); every change applies instantly (no save button).
+Sidebar with nine sections (General, Appearance, Screens, Tray, Usage, Calendar, Mail, Permissions, About); every change applies instantly (no save button).
 - **General:** auto-hide; window switcher (Option+Tab, optional Cmd+Tab); open at login (System Settings → Login Items); hide the macOS Dock (with "return the Dock when the bar quits"); preview delay.
 - **Appearance:** live mock-up of the bar; nine theme swatches; transparency; icon size; preview size.
 - **Screens:** one card per connected screen with an icon-alignment picker (drawn as small diagrams).
 - **Usage:** AI usage indicator switches, custom Claude/Codex folders, optional Claude Code statusLine (see below).
 - **Calendar:** upcoming-events switch, range, calendar selection and **Add account…** (see below).
+- **Mail:** add Gmail, iCloud or Yahoo accounts with an app password, remove them, and choose whether remote images load (see Mail below).
 - **Permissions:** live status of Accessibility, Screen Recording, Location and Bluetooth, with a button that opens the right System Settings page.
 - **Advanced:** open `config.json`, reveal the debug log (rotates at 1 MB, no window titles), reset appearance, **Quit** (with confirmation; to start again, open the app from Spotlight/Launchpad).
 
@@ -65,7 +66,7 @@ A thin strip at the far right edge.
 Full-screen windows and windows on other Spaces may reject minimization. Clicks are ignored while a show-desktop action is in progress; failed restores remain pending.
 
 ## System tray (all screens)
-Order, left to right: keyboard, Wi-Fi, Bluetooth, brightness, sound, AI usage, battery, profiles, clock. All flyouts share one opaque, theme-tinted surface with an 18 pt content inset for readability over busy wallpapers. Each icon opens a panel above the bar (clicking again or clicking elsewhere closes it):
+Order, left to right: keyboard, Wi-Fi, Bluetooth, brightness, sound, AI usage, mail, battery, profiles, clock (default order and placement are configurable, see Tray layout). All flyouts share one opaque, theme-tinted surface with an 18 pt content inset for readability over busy wallpapers. Each icon opens a panel above the bar (clicking again or clicking elsewhere closes it):
 
 | Icon | Panel |
 |---|---|
@@ -75,6 +76,7 @@ Order, left to right: keyboard, Wi-Fi, Bluetooth, brightness, sound, AI usage, b
 | Brightness (only if macOS exposes it) | Slider |
 | Sound | Mute switch, volume slider; mouse wheel over the icon changes volume |
 | AI usage (Claude + Codex) | One shared control for both providers; remaining quota, reset times, plan badges, update age and refresh |
+| Mail (envelope with the unread count) | Latest inbox emails with filter chips for two or more accounts; open one to read it inside Cala, then Archive, Delete or open it in the provider's web inbox (see Mail below) |
 | Profiles | Photo and name of each user (photo shown in the tray). Clicking another user opens the login screen with that user preselected, including users without an open session; "login window" locks the screen |
 | Battery (same monochrome style as the other icons, percentage underneath; battery-with-bolt symbol whenever it is plugged in) | Power source (adapter or battery), percentage, time remaining, Low Power Mode switch (runs `pmset` through an administrator-password prompt on every change), battery settings |
 | Clock | Large time with seconds, full date, month calendar (navigate months, back to today), upcoming events from selected calendars, open Calendar, notification settings |
@@ -137,6 +139,16 @@ Cala runs `/bin/ps` while **Sistema y otros** is expanded and the selected list 
 - **Processor.** On reopening, Cala immediately shows the last validated list when it is at most 30 seconds old, marked **Lectura anterior** while it refreshes. The large CPU number uses that same window so the rows, including **Sistema y otros**, add up to it. The graph continues to show the global sample history. **Cerrar** and **Ir a…** require a validated reading from the current opening that is less than four seconds old.
 - **Memory.** Each process scan provides memory footprints in one pass. Cala can show the last list for up to 30 seconds while it refreshes. If none is available, the list shows a short status until the first reading. Cala scales overlapping footprints proportionally if their sum exceeds used memory. **Sistema y otros** shows any positive remainder.
 
+## Mail
+Providers: Gmail (and Google Workspace when the admin allows IMAP and app passwords), iCloud and Yahoo. Outlook and Hotmail are not supported (Microsoft requires OAuth). Accounts are added in Settings → Mail with an app password; the password is stored in the macOS Keychain (service "Cala Mail") and the account list in `mail-accounts.json`.
+- **Inbox:** the tray envelope shows the combined unread count. The panel lists the latest messages (unread rows on an accent card, sender avatar with stable colors) with account filter chips. Loading shows a skeleton; "empty" is only shown after every account has synced once.
+- **Reading:** opening a message renders its real HTML in a web view with JavaScript disabled; links open in the browser. Opening marks it read on the server. Messages over 25 MB are not downloaded and link to the web inbox.
+- **Actions:** Archive, Delete, Open in Gmail / iCloud Mail / Yahoo Mail.
+- **Sync:** one IMAP connection per account; it uses IDLE for real-time arrivals when the server supports it, otherwise it polls.
+- **Images:** remote images load by default; Settings → Mail turns it off (`mailLoadsRemoteImages`).
+- **Keychain prompt:** after each update macOS asks for the Mac password once per account. A small notice window explains it first and mail sync waits for "Got it".
+- **Tray panels and the auto-hide bar:** a panel opened with a click stays open until a click outside, Esc or the same tray icon again; the pointer leaving never closes it, and the bar that owns an open panel stays visible (`PanelPolicy`).
+
 ## Tray layout and the "^" panel
 Every tray item (keyboard, Wi-Fi, Bluetooth, brightness, volume, Claude and Codex, CPU and memory, disk, battery, user, Downloads, Trash) can be set to **En la barra** (always visible), **En ^** (behind the chevron at the start of the tray) or **Oculto**, and dragged to change its order (top to bottom = left to right on the bar). Settings → **Bandeja**; "Restablecer valores" returns to the defaults. By default Wi-Fi, volume, Claude and Codex, CPU, disk and battery are on the bar; keyboard, Bluetooth, brightness, user, Downloads and Trash are behind **^**. The chevron appears only when something is inside, shows its items as tiles, and each tile opens that item's usual panel with a "‹ Más" back button. The old on/off switches for the disk and system monitor items still apply to configs saved before this existed.
 
@@ -171,18 +183,20 @@ When the reasons need more space, they scroll within the page. **N motivos más 
 Reasons include a pending macOS update that requires a restart, 14+ days of uptime (strong at 30), swap at or above the greater of 4 GiB and 25% of RAM with 3+ days of uptime, compressed memory at or above 35% with 3+ days of uptime, 10+ minutes of elevated memory pressure, and under 15% free disk space with 4+ GiB of allocated swap.
 
 ## Guidance in the system panel
-The panel shows one message at a time. Higher severity wins. At the same severity, memory comes first, then heat, then CPU. A short CPU spike or Low Power Mode can show a neutral note.
+The panel shows one message at a time, as a card right under the **Sistema** title and above the three meters (**Procesador**, **Memoria**, **Energía**). Nothing appears there when everything is normal. Higher severity wins. At the same severity, memory comes first, then heat, then CPU. A short CPU spike, a processor that has been busy for a while, or Low Power Mode can show a neutral note.
 
-- **Todo bien.** A CPU spike can show as busy before it reaches two minutes. High memory pressure under two minutes can show as **Justa** with a neutral status.
-- **Revisa esto** (amber). CPU at or above 75% on the smoothed reading for two minutes, high memory pressure for two minutes, serious thermal state, or a critical memory or thermal reading that has yet to reach the red threshold.
-- **Actúa ahora** (red). Memory pressure that stays critical for at least one minute or a thermal state that stays critical for at least two minutes. Sustained CPU load stays amber. The tray gauge uses the same severity.
+- **Normal.** A CPU spike can show as busy before it reaches 45 seconds. Under 15 seconds the note says **Pico momentáneo**; from 15 to 45 seconds it says **Lleva un rato ocupado**. High memory pressure under two minutes can show as **Justa** with a neutral status. A fair thermal state reads **Elevada** with a neutral dot.
+- **Amber.** CPU at or above 75% on the smoothed reading for 45 seconds, high memory pressure for two minutes, serious thermal state (**Alta**), or a critical memory or thermal reading that has yet to reach the red threshold.
+- **Red.** Memory pressure that stays critical for at least one minute or a thermal state that stays critical for at least two minutes (**Crítica**). Sustained CPU load stays amber. The tray gauge uses the same severity.
+
+**Lo que más usa** has three tabs: **Procesador**, **Memoria** and **Energía**. Energía ranks apps by an energy impact score computed from `proc_pid_rusage` deltas: 100 × (CPU seconds + 0.0002 × wakeups) per second, so one busy core scores 100. Load from processes Cala cannot read counts as processor time in **Sistema y otros**. The **Energía** meter follows the same pattern as the others: the title with the thermal state under it (**Normal**, **Elevada**, **Alta**, **Crítica**) and, on the right, the total score with the suffix **de impacto**. That total is what the tab's rows add up to. Its line is sampled in the background about every 5 seconds from `proc_pid_rusage` (no spawned processes) and kept while the panel is closed, so it is continuous like the processor and memory lines. The tab's per-process list still needs the panel to be open, and its first scan after opening shows the loading skeleton: until two scans give per-process deltas, the **Procesador** and **Energía** lists do not attribute the whole load to **Sistema y otros**. When heat leads, the panel opens on Energía and the card names what uses the most energy, offering **Cerrar** only for an eligible app.
 
 For sustained CPU load, the message distinguishes how long the Mac has been busy from which group leads in the latest valid reading. A group is singled out when it accounts for at least 10 percentage points and a quarter of the total, provided less than half of the load is unattributed. While sustained CPU guidance is waiting for a valid reading, its card shows a loading placeholder. If at least half the load is unattributed, Cala says it could come from macOS or another account and suggests waiting a few minutes, then opening **Monitor de Actividad** if it persists. When the load is attributable but no group meets the threshold, the message describes it as spread across processes.
 
 The panel’s **Cerrar** button is available for a single eligible app instance and asks for confirmation. For a standalone tool with a known launcher, **Ir a** brings that app forward. Memory guidance prefers the largest eligible app and shows its footprint.
 
 ## Checking the system panel
-From the repository root, run `scripts/check-rules.sh` to check the rules with `swiftc`. To render the sample panels in light and dark mode, build and run the debug executable:
+From the repository root, run `scripts/check-rules.sh` (system rules and panel policy) and `scripts/check-mail.sh` (mail parsing) to check the rules with `swiftc`. To render the sample panels in light and dark mode, build and run the debug executable:
 
 ```sh
 swift build && .build/debug/Cala --render-system "$TMPDIR/cala-system" -AppleLanguages '(es)'

@@ -170,7 +170,7 @@ struct RestartPanelView: View {
             .frame(maxHeight: viewport, alignment: .top)
 
             if !message.isEmpty {
-                Text(message).font(.system(size: 11.5)).foregroundStyle(Color.orange)
+                Text(message).font(.system(size: 11.5)).foregroundStyle(StatusColor.color(.attention))
                     .lineLimit(3).frame(height: errorHeight, alignment: .topLeading)
                     .help(message)
             }
@@ -275,7 +275,7 @@ struct RestartPanelView: View {
 
     private func card(_ r: RestartReason) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: r.symbol).font(.system(size: 15)).foregroundStyle(r.strong ? Color.orange : Color.yellow).frame(width: 22)
+            Image(systemName: r.symbol).font(.system(size: 15)).foregroundStyle(StatusColor.color(.pending).opacity(r.strong ? 1 : 0.6)).frame(width: 22)
             VStack(alignment: .leading, spacing: 4) {
                 Text(r.title).font(.system(size: 12.5, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                 Text(r.detail).font(.system(size: 11.5)).flyoutSecondary().fixedSize(horizontal: false, vertical: true)

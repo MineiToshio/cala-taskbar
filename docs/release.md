@@ -89,7 +89,7 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 
 #### Qué comprueba `release.sh`
 
-- Que pasen `scripts/check-rules.sh`.
+- Que pasen `scripts/check-rules.sh` y `scripts/check-mail.sh`.
 - Que la firma sea válida y que las entitlements estén puestas (`packaging/Cala.entitlements`: Apple Events para Finder, Calendario y Ubicación; nada más).
 - Que notarytool devuelva *Accepted*. Si no, imprime el `id` para pedir el log con `xcrun notarytool log <id> --keychain-profile cala-notary`.
 - `spctl` sobre la app y el DMG, es decir, lo mismo que mira Gatekeeper.

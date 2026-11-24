@@ -33,6 +33,7 @@ enum TrayItems {
         TrayItemInfo(id: trayUsage, title: tx("Claude and Codex", "Claude y Codex"), symbol: "chart.bar.fill", defaultPlace: .bar),
         TrayItemInfo(id: traySystem, title: tx("CPU and memory", "CPU y memoria"), symbol: "cpu", defaultPlace: .bar),
         TrayItemInfo(id: trayDisk, title: tx("Disk", "Disco"), symbol: "internaldrive", defaultPlace: .bar),
+        TrayItemInfo(id: trayMail, title: tx("Mail", "Correo"), symbol: "envelope", defaultPlace: .bar),
         TrayItemInfo(id: trayBatt, title: tx("Battery", "Batería"), symbol: "battery.75", defaultPlace: .bar),
         TrayItemInfo(id: trayUser, title: tx("User", "Usuario"), symbol: "person.crop.circle", defaultPlace: .more),
         TrayItemInfo(id: trayDownloads, title: tx("Downloads", "Descargas"), symbol: "arrow.down.circle", defaultPlace: .more),

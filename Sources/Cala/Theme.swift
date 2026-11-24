@@ -43,12 +43,58 @@ enum FlyoutStyle {
     static func secondary(dark: Bool) -> Color { BarTheme.hex(dark ? 0xB8BDC8 : 0x626570) }
     static func controlAccent(dark: Bool) -> Color { BarTheme.hex(dark ? 0x0A84FF : 0x007AFF) }
     static func quotaText(_ remaining: Int, dark: Bool) -> Color {
-        if remaining >= 25 { return .primary }
-        return BarTheme.hex(remaining < 10 ? (dark ? 0xFF6961 : 0xD70015) : (dark ? 0xFFB340 : 0xC77700))
+        if remaining >= 25 { return StatusColor.color(.normal, dark: dark) }
+        return StatusColor.color(remaining < 10 ? .critical : .attention, dark: dark)
     }
     static func quota(_ remaining: Int, dark: Bool) -> Color {
-        remaining < 25 ? quotaText(remaining, dark: dark) : BarTheme.hex(dark ? 0x65D5AA : 0x147D59)
+        remaining < 25 ? quotaText(remaining, dark: dark) : StatusColor.color(.ok, dark: dark)
     }
+}
+
+/// The meaning of a status color. Every status signal in the app uses this one palette.
+enum StatusTone {
+    case normal      // nothing to say: regular text
+    case ok          // healthy status
+    case attention   // look at this
+    case critical    // act now
+    case pending     // something to do, not a problem
+
+    init(_ level: SystemLevel) {
+        switch level {
+        case .normal: self = .normal
+        case .attention: self = .attention
+        case .critical: self = .critical
+        }
+    }
+}
+
+enum StatusColor {
+    private static func hex(_ tone: StatusTone, dark: Bool) -> UInt32? {
+        switch tone {
+        case .normal: return nil
+        case .ok: return dark ? 0x65D5AA : 0x147D59
+        case .attention: return dark ? 0xFFB340 : 0xC77700
+        case .critical: return dark ? 0xFF6961 : 0xD70015
+        case .pending: return dark ? 0x0A84FF : 0x007AFF
+        }
+    }
+
+    static func color(_ tone: StatusTone, dark: Bool) -> Color {
+        hex(tone, dark: dark).map(BarTheme.hex) ?? .primary
+    }
+
+    /// Same palette, resolved against the appearance of the view that draws it.
+    static func color(_ tone: StatusTone) -> Color {
+        guard hex(tone, dark: false) != nil else { return .primary }
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let v = hex(tone, dark: dark) ?? 0
+            return NSColor(srgbRed: CGFloat((v >> 16) & 255) / 255, green: CGFloat((v >> 8) & 255) / 255,
+                           blue: CGFloat(v & 255) / 255, alpha: 1)
+        })
+    }
+
+    static func color(for level: SystemLevel, dark: Bool) -> Color { color(StatusTone(level), dark: dark) }
 }
 
 struct FlyoutSection: ViewModifier {

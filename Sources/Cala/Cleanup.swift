@@ -518,7 +518,7 @@ struct CleanupView: View {
             }
             Spacer(minLength: 8)
             if let reason = g.reason {
-                Text(reason).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.orange)
+                Text(reason).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(StatusColor.color(.attention))
             } else if g.checked {
                 Text(g.integrated ? calendarText("Merged", "Integrado") : calendarText("Safe", "Seguro")).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.green)
             } else {
@@ -535,7 +535,7 @@ struct CleanupView: View {
             check(CleanupModel.trashID, enabled: (model.trashCount ?? 0) > 0)
             VStack(alignment: .leading, spacing: 3) {
                 Text(calendarText("Empty the Trash", "Vaciar la Papelera")).font(.system(size: 13, weight: .medium))
-                Text(trashNote).font(.system(size: 11)).foregroundStyle(model.trashDenied ? .orange : .secondary).fixedSize(horizontal: false, vertical: true)
+                Text(trashNote).font(.system(size: 11)).foregroundStyle(model.trashDenied ? StatusColor.color(.attention) : Color.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             if model.trashChecking {

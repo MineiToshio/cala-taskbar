@@ -30,6 +30,8 @@ Free · Source available · No accounts · Nothing leaves your Mac · macOS 14 o
 
 **The tray on the right** has Wi‑Fi, Bluetooth, sound, brightness, battery, disk, keyboard, Downloads, Trash, and a clock with your upcoming events and a button to join the video call.
 
+**Your mail, in the tray.** An envelope with the unread count of your Gmail, iCloud or Yahoo accounts; read, archive or delete without opening a browser. See [Mail](#mail).
+
 **Why is my Mac slow?** The CPU and memory panel tells you which app weighs the most and recommends a restart when it is worth it.
 
 </td>
@@ -83,6 +85,18 @@ xattr -dr com.apple.quarantine /Applications/Cala.app
 
 ---
 
+## Mail
+
+Click the envelope in the tray to see the latest emails in your inbox, with filter chips when you have two or more accounts. Open one to read it inside Cala with its real formatting, then **Archive**, **Delete** or **Open in Gmail / iCloud Mail / Yahoo Mail**. Opening an email in Cala marks it as read on the server, and new mail arrives in real time.
+
+**Providers:** Gmail (also Google Workspace, if your company admin allows IMAP and app passwords), iCloud and Yahoo. Outlook and Hotmail are not supported: Microsoft requires an OAuth sign-in.
+
+**Connect an account:** *Settings → Mail* guides you step by step, with buttons to the right pages of your provider. Cala signs in with an **app password**: a code your provider generates just for Cala. It is **not** your normal email password. Gmail needs 2-Step Verification turned on to create one.
+
+**Images:** remote images in emails load by default. Turn that off in *Settings → Mail* if you prefer to block them: when images load, the sender can tell you opened the email. No JavaScript runs in emails, and links open in your browser.
+
+---
+
 ## Permissions
 
 <img src="docs/images/permissions.jpg" alt="Permissions in the welcome window" width="380" align="right">
@@ -105,6 +119,10 @@ Said no to something? Everything else keeps working. Turn it on whenever you lik
 
 <br clear="right">
 
+### The Keychain prompt (Mail)
+
+After each Cala update, macOS shows *"Cala wants to access key "Cala Mail" in your keychain"*, once per mail account, and asks for your **Mac login password**. Type it and choose **Always Allow**. That password goes to macOS only: Cala never sees it. It happens because Cala is free and not signed with a paid Apple Developer ID, so macOS re-checks each new version before handing it the saved app password.
+
 ---
 
 ## Everyday use
@@ -125,11 +143,14 @@ Permissions stay listed in *System Settings → Privacy & Security*; you can rem
 
 Nothing leaves your Mac unless you send it. *Report a problem* shows you exactly what is included before sending, and removes your home folder, user name, Mac name and email addresses. If the version you downloaded has no reporting destination set up, you can **copy the report** and paste it in an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
+**Mail:** app passwords are stored in the macOS Keychain (service "Cala Mail"), and the content of your emails stays on your Mac. Cala only talks to your provider's IMAP server. You can revoke access at any time by deleting the app password in your Google, Apple or Yahoo account.
+
 ## Troubleshooting
 
 - **"Cala can't be opened" / "Apple could not verify…"**: that is the one-time block; see step 3 of [Install](#install), or install with the Option 1 command, which avoids it.
 - **No thumbnails**: turn on Screen Recording in *Settings → Permissions*.
 - **The Dock disappeared**: Cala only hides it if you asked. Turn it off in *Settings → General*, or quit Cala.
+- **macOS asks for my Mac password for "Cala Mail"**: it is expected after each update; see [The Keychain prompt](#the-keychain-prompt-mail). Type your Mac password and choose **Always Allow**; it goes to macOS, not to Cala.
 - **Something is wrong**: right-click the bar → *Report a problem…*, or open an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
 ## Build from source

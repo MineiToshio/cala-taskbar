@@ -344,7 +344,7 @@ struct FeedbackView: View {
             }
             Text(tx("Your home folder, user name, Mac name and email addresses are removed from the technical text. Your window titles, files and credentials are not sent.", "Se quitan tu carpeta personal, tu nombre de usuario, el nombre del Mac y las direcciones de correo del texto técnico. No se envían los títulos de tus ventanas, tus archivos ni tus credenciales."))
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if !status.isEmpty { Text(status).font(.system(size: 12)).foregroundStyle(sent ? Color.green : Color.orange).fixedSize(horizontal: false, vertical: true) }
+            if !status.isEmpty { Text(status).font(.system(size: 12)).foregroundStyle(sent ? Color.green : StatusColor.color(.attention)).fixedSize(horizontal: false, vertical: true) }
             HStack {
                 // Always a way out: without a configured destination (or offline) the report can still be copied and
                 // pasted into an e-mail or an issue.

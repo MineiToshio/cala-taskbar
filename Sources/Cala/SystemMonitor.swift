@@ -11,8 +11,8 @@ enum RestProbe {
 }
 
 /// CPU, memory and per-app load, read with the same system calls Activity Monitor uses (no helper, no admin rights).
-/// The cheap numbers (CPU %, memory, pressure) are sampled every few seconds while the tray item is on; the
-/// per-process list is only sampled while the panel is open.
+/// The cheap numbers (CPU %, memory, pressure) are sampled every few seconds while the tray item is on, and so is the
+/// total energy impact (every ~5 s on a background queue). The per-process list is only sampled while the panel is open.
 final class SystemMonitor: ObservableObject {
     static let shared = SystemMonitor()
 
@@ -30,10 +30,15 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var thermal = ProcessInfo.ThermalState.nominal
     @Published private(set) var cpuHistory: [Double] = []
     @Published private(set) var memoryHistory: [Double] = []
+    /// Total energy impact (the score the Energía tab's rows add up to), one point about every 5 s, kept while the
+    /// panel is closed. It comes from `EnergySampler`, never from the panel's own scan.
+    @Published private(set) var energyHistory: [Double] = []
     @Published private var lastReading: ProcessReading?
     @Published private var lastInventory: ProcessInventory?
     @Published private var processSessionStartedAt: TimeInterval = .infinity
     @Published private(set) var restProbe: RestProbe?
+    /// The metric the tray cell shows right now, after the hold that keeps it from flickering.
+    @Published private(set) var shownMetric = SystemMetric.cpu
 
     var processReading: ProcessReading? {
         snapshot().reading
@@ -50,7 +55,14 @@ final class SystemMonitor: ObservableObject {
     private var pressureSince: TimeInterval?
     private var criticalPressure = CriticalDuration()
     private var criticalThermal = CriticalDuration()
+    private var metricHold = MetricHold()
     private var lastProcessSample: ProcessSample?
+    private var scanCancel = ScanCancellation()
+    private lazy var energySampler = EnergySampler(timebase: timebase) { [weak self] total in
+        guard let self else { return }
+        self.energyHistory.append(total)
+        if self.energyHistory.count > 60 { self.energyHistory.removeFirst() }
+    }
     private var processGeneration = 0
     private let processQueue = DispatchQueue(label: "local.cala.monitor", qos: .utility)
     private var sampling = false
@@ -70,15 +82,19 @@ final class SystemMonitor: ObservableObject {
     // MARK: Cheap sampling (main thread)
 
     func tick() {
+        energySampler.keepAlive()
         sampleCPU()
         sampleMemory()
         let info = ProcessInfo.processInfo
         let state = info.thermalState
         criticalThermal.observe(state == .critical, at: samplingTime)
         thermal = state
+        let preferred = SystemMetric(rawValue: ConfigStore.shared.config.monitorBarMetric) ?? .cpu
+        let metric = metricHold.update(SystemRules.levels(snapshot()), preferred: preferred, at: samplingTime)
+        if metric != shownMetric { shownMetric = metric }
     }
 
-    private struct CPUTicks {
+    fileprivate struct CPUTicks {
         var user: UInt32
         var system: UInt32
         var idle: UInt32
@@ -92,7 +108,7 @@ final class SystemMonitor: ObservableObject {
         }
     }
 
-    private static func readTicks() -> CPUTicks? {
+    fileprivate static func readTicks() -> CPUTicks? {
         var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.size / MemoryLayout<integer_t>.size)
         var info = host_cpu_load_info()
         let host = mach_host_self()
@@ -189,7 +205,7 @@ final class SystemMonitor: ObservableObject {
         let date: TimeInterval
         let capturedAt: TimeInterval
         let ticks: CPUTicks?
-        let cpuNs: [pid_t: (start: UInt64, time: UInt64)]
+        let counters: [pid_t: EnergyCounters]
     }
 
     func sampleProcesses() {
@@ -205,7 +221,10 @@ final class SystemMonitor: ObservableObject {
         }
         let regularPIDs = Dictionary(uniqueKeysWithValues: apps.filter(\.regular).map { ($0.pid, $0.name) })
         let cores = Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
+        let cancel = scanCancel
         processQueue.async {
+            func abandon() { DispatchQueue.main.async { _ = self.finishProcessScan(generation: generation) } }
+            guard !cancel.isCancelled else { return abandon() }
             let capturedAt = self.samplingTime
             let now = ProcessInfo.processInfo.systemUptime
             let ticks = Self.readTicks()
@@ -219,42 +238,42 @@ final class SystemMonitor: ObservableObject {
                 (0...ProcessReading.maxAge).contains(capturedAt - $0.capturedAt) ? $0 : nil
             }
             let elapsed = previous.map { now - $0.date } ?? 0
-            let delta = previous?.ticks.flatMap { ticks?.since($0) }
+            // A window that is too short is not a baseline either: the next scan measures from the older sample.
+            let windowTooShort = previous != nil && !SystemRules.deltaWindowUsable(elapsed: elapsed)
+            let delta = windowTooShort ? nil : previous?.ticks.flatMap { ticks?.since($0) }
             let cpuWindow = delta.flatMap { ticks in
                 ticks.total > 0 && elapsed > 0 ? Double(ticks.busy) / Double(ticks.total) * 100 : nil
             }
             var unreadable = 0
+            var withDeltas = 0
             var otherAccounts = 0
             var executableNames: [String: String] = [:]
             let parents = table.mapValues(\.parent)
             let uid = getuid()
-            var cpuNs: [pid_t: (start: UInt64, time: UInt64)] = [:]
+            var counters: [pid_t: EnergyCounters] = [:]
             var groups: [String: AppLoad] = [:]
             var measured: [MeasuredProcess] = []
-            for pid in table.keys.sorted() {
+            for (index, pid) in table.keys.sorted().enumerated() {
+                if index.isMultiple(of: 64), cancel.isCancelled { return abandon() }
                 guard let owner = table[pid]?.uid else { continue }
                 let otherAccount = SystemRules.isOtherAccount(owner, currentUID: uid)
                 if otherAccount { otherAccounts += 1 }
-                var usage = rusage_info_v4()
-                let result = withUnsafeMutablePointer(to: &usage) {
-                    $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
-                }
-                guard result == 0 else {
+                guard let (current, footprint) = Self.rusageCounters(pid, timebase: self.timebase) else {
                     unreadable += 1
                     continue
                 }
-                let time = usage.ri_user_time + usage.ri_system_time
-                let start = usage.ri_proc_start_abstime
-                let denominator = UInt64(max(1, self.timebase.denom))
-                let numerator = UInt64(self.timebase.numer)
-                let ns = time / denominator * numerator + time % denominator * numerator / denominator
-                cpuNs[pid] = (start, ns)
+                counters[pid] = current
                 var cpu = 0.0
-                if cpuWindow != nil, let before = previous?.cpuNs[pid], before.start == start, ns >= before.time {
-                    cpu = Double(ns - before.time) / (elapsed * 1_000_000_000) * 100 / cores
+                var energy = 0.0
+                if cpuWindow != nil, let before = previous?.counters[pid], before.start == current.start,
+                   current.cpuNanoseconds >= before.cpuNanoseconds {
+                    cpu = Double(current.cpuNanoseconds - before.cpuNanoseconds) / (elapsed * 1_000_000_000) * 100 / cores
+                    energy = SystemRules.energyScore(from: before, to: current, elapsed: elapsed) ?? 0
+                    withDeltas += 1
                 }
                 if otherAccount {
-                    let sample = ProcessUsage(pid: pid, uid: owner, executable: "", cpu: cpu, memory: usage.ri_phys_footprint)
+                    let sample = ProcessUsage(pid: pid, uid: owner, executable: "", cpu: cpu, memory: footprint,
+                                              energy: energy)
                     measured.append(MeasuredProcess(usage: sample, loadKey: nil))
                     continue
                 }
@@ -265,10 +284,12 @@ final class SystemMonitor: ObservableObject {
                 let (key, name, kind) = SystemRules.classify(path: path, executable: executable, apps: apps, launcher: launcher)
                 var group = groups[key] ?? AppLoad(key: key, name: name, kind: kind, cpu: 0, memory: 0, count: 0, closable: false)
                 group.cpu += cpu
-                group.memory += usage.ri_phys_footprint
+                group.memory += footprint
+                group.energy += energy
                 group.count += 1
                 groups[key] = group
-                let sample = ProcessUsage(pid: pid, uid: owner, executable: executable, cpu: cpu, memory: usage.ri_phys_footprint)
+                let sample = ProcessUsage(pid: pid, uid: owner, executable: executable, cpu: cpu, memory: footprint,
+                                          energy: energy)
                 measured.append(MeasuredProcess(usage: sample, loadKey: key))
 
                 if case .app(let appPID) = kind, appPID == pid {
@@ -278,13 +299,16 @@ final class SystemMonitor: ObservableObject {
                 }
             }
             let orderedLoads = groups.values.sorted { $0.cpu == $1.cpu ? $0.key < $1.key : $0.cpu > $1.cpu }
-            let sample = ProcessSample(date: now, capturedAt: capturedAt, ticks: ticks, cpuNs: cpuNs)
-            let details = (unreadable: unreadable, otherAccounts: otherAccounts, executableNames: executableNames, measured: measured)
+            let sample = ProcessSample(date: now, capturedAt: capturedAt, ticks: ticks, counters: counters)
+            let details = (unreadable: unreadable, withDeltas: withDeltas, otherAccounts: otherAccounts, executableNames: executableNames, measured: measured)
             DispatchQueue.main.async {
                 guard self.finishProcessScan(generation: generation) else { return }
-                self.lastProcessSample = sample
+                if !windowTooShort { self.lastProcessSample = sample }
                 self.lastInventory = ProcessInventory(capturedAt: capturedAt, loads: orderedLoads, processes: details.measured)
-                guard let cpuWindow else { return }
+                // The first scan has no previous counters: every process would read zero and the whole load would
+                // fall into “Sistema y otros”. Without a reading the CPU and Energía lists keep their skeleton.
+                guard let cpuWindow,
+                      SystemRules.canPublishReading(cpuWindow: cpuWindow, processesWithDeltas: details.withDeltas) else { return }
                 let loads = orderedLoads.map { load in
                     var load = load
                     if case .app(let pid?) = load.kind {
@@ -379,11 +403,29 @@ final class SystemMonitor: ObservableObject {
 
     func setProcessPanelOpen(_ open: Bool) {
         processGeneration += 1
+        scanCancel.cancel()
+        scanCancel = ScanCancellation()
         lastProcessSample = nil
         processSessionStartedAt = open ? samplingTime : .infinity
     }
 
-    private static func processTable() -> [pid_t: (parent: pid_t, uid: uid_t)]? {
+    /// One `proc_pid_rusage` read: the counters behind the energy score and the physical footprint. nil when unreadable.
+    fileprivate static func rusageCounters(_ pid: pid_t, timebase: mach_timebase_info_data_t) -> (EnergyCounters, UInt64)? {
+        var usage = rusage_info_v4()
+        let result = withUnsafeMutablePointer(to: &usage) {
+            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+        }
+        guard result == 0 else { return nil }
+        let time = usage.ri_user_time + usage.ri_system_time
+        let denominator = UInt64(max(1, timebase.denom))
+        let numerator = UInt64(timebase.numer)
+        let ns = time / denominator * numerator + time % denominator * numerator / denominator
+        return (EnergyCounters(start: usage.ri_proc_start_abstime, cpuNanoseconds: ns,
+                               wakeups: usage.ri_pkg_idle_wkups &+ usage.ri_interrupt_wkups),
+                usage.ri_phys_footprint)
+    }
+
+    fileprivate static func processTable() -> [pid_t: (parent: pid_t, uid: uid_t)]? {
         var mib = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
         var size = 0
         guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0, size > 0 else { return nil }
@@ -415,12 +457,96 @@ final class SystemMonitor: ObservableObject {
     }
 }
 
-func monitorTint(_ m: SystemMonitor) -> Color {
-    switch SystemRules.level(m.snapshot()) {
-    case .normal: return Color.primary.opacity(0.85)
-    case .attention: return .orange
-    case .critical: return .red
+/// Samples the machine's total energy impact in the background so the Energía sparkline is continuous, like CPU and
+/// memory, even while the panel is closed. It reads `proc_pid_rusage` for every process about every 5 s on its own
+/// utility queue (no `top`, no `ps`, nothing on the main thread). It only runs while `keepAlive()` keeps being called
+/// from the monitor's tick, so a hidden tray item costs nothing.
+private final class EnergySampler: @unchecked Sendable {
+    private struct Baseline {
+        let capturedAt: TimeInterval
+        let uptime: TimeInterval
+        let ticks: SystemMonitor.CPUTicks
+        let counters: [pid_t: EnergyCounters]
     }
+
+    private static let idleLimit: TimeInterval = 30  // No tick for this long: drop the baseline and stop scanning.
+
+    private let queue = DispatchQueue(label: "local.cala.monitor.energy", qos: .utility)
+    private let timebase: mach_timebase_info_data_t
+    private let deliver: (Double) -> Void
+    private let lock = NSLock()
+    private var lastKeepAlive: TimeInterval = -.infinity
+    private var timer: DispatchSourceTimer?
+    private var baseline: Baseline?  // Only touched on `queue`.
+
+    init(timebase: mach_timebase_info_data_t, deliver: @escaping (Double) -> Void) {
+        self.timebase = timebase
+        self.deliver = deliver
+    }
+
+    /// Called from the main thread on every monitor tick. Starts the timer the first time.
+    func keepAlive() {
+        lock.lock(); defer { lock.unlock() }
+        lastKeepAlive = ProcessInfo.processInfo.systemUptime
+        guard timer == nil else { return }
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + 0.2, repeating: SystemRules.energyInterval, leeway: .milliseconds(500))
+        source.setEventHandler { [weak self] in self?.scan() }
+        timer = source
+        source.resume()
+    }
+
+    private var isAlive: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ProcessInfo.processInfo.systemUptime - lastKeepAlive < Self.idleLimit
+    }
+
+    private func scan() {
+        guard isAlive else { baseline = nil; return }
+        let capturedAt = Double(mach_continuous_time()) * Double(timebase.numer) / Double(timebase.denom) / 1_000_000_000
+        let uptime = ProcessInfo.processInfo.systemUptime
+        guard let ticks = SystemMonitor.readTicks(), let table = SystemMonitor.processTable() else { baseline = nil; return }
+        var counters: [pid_t: EnergyCounters] = [:]
+        counters.reserveCapacity(table.count)
+        for pid in table.keys {
+            if let (current, _) = SystemMonitor.rusageCounters(pid, timebase: timebase) { counters[pid] = current }
+        }
+        let before = baseline
+        baseline = Baseline(capturedAt: capturedAt, uptime: uptime, ticks: ticks, counters: counters)
+        guard let before, SystemRules.energyWindowUsable(gap: capturedAt - before.capturedAt) else { return }
+
+        let elapsed = uptime - before.uptime
+        let window = ticks.since(before.ticks)
+        guard elapsed > 0, window.total > 0 else { return }
+        let cores = Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
+        var energy = 0.0
+        var measuredCPU = 0.0
+        for (pid, current) in counters {
+            guard let old = before.counters[pid], old.start == current.start,
+                  current.cpuNanoseconds >= old.cpuNanoseconds else { continue }
+            measuredCPU += Double(current.cpuNanoseconds - old.cpuNanoseconds) / (elapsed * 1_000_000_000) * 100 / cores
+            energy += SystemRules.energyScore(from: old, to: current, elapsed: elapsed) ?? 0
+        }
+        let cpuWindow = Double(window.busy) / Double(window.total) * 100
+        let total = SystemRules.energyTotal(measuredEnergy: energy, measuredCPU: measuredCPU, cpuWindow: cpuWindow,
+                                            cores: Int(cores))
+        DispatchQueue.main.async { [deliver] in deliver(total) }
+    }
+}
+
+/// Lets the panel stop a process scan in flight when it closes or reopens.
+private final class ScanCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+}
+
+/// Tint of the tray cell: the level of the metric it shows.
+func monitorTint(_ m: SystemMonitor, dark: Bool) -> Color {
+    let level = SystemRules.levels(m.snapshot())[m.shownMetric]
+    return level == .normal ? Color.primary.opacity(0.85) : StatusColor.color(for: level, dark: dark)
 }
 
 // MARK: - Panel
@@ -429,6 +555,7 @@ struct Spark: View {
     let values: [Double]
     let color: Color
     var height: CGFloat = 34
+    var scale = 100.0
     var body: some View {
         GeometryReader { g in
             let pts = values.suffix(60)
@@ -438,7 +565,7 @@ struct Spark: View {
                     Path { p in
                         for (i, v) in pts.enumerated() {
                             let x = g.size.width * CGFloat(i) / CGFloat(max(1, 59))
-                            let y = g.size.height * (1 - CGFloat(min(100, max(0, v)) / 100))
+                            let y = g.size.height * (1 - CGFloat(min(scale, max(0, v)) / scale))
                             i == 0 ? p.move(to: CGPoint(x: x + g.size.width * CGFloat(60 - pts.count) / 59, y: y)) : p.addLine(to: CGPoint(x: x + g.size.width * CGFloat(60 - pts.count) / 59, y: y))
                         }
                     }.stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
@@ -453,6 +580,7 @@ struct SystemPanelModel {
     var snapshot: LoadSnapshot
     var cpuHistory: [Double]
     var memoryHistory: [Double]
+    var energyHistory: [Double] = []
     var maintenance: (text: String, strong: Bool, more: Int)?
     var tab: Int
     var icons: [String: NSImage] = [:]
@@ -462,11 +590,18 @@ struct SystemPanelModel {
     var currentUID: UInt32 = 0
     var cores = 1
     var reservation = PanelReservation()
+    /// Room the screen allows for the panel, including the flyout padding.
+    var maxHeight = SystemPanelLayout.maxHeight
 
     var message: SystemMessage? { SystemRules.message(snapshot) }
     var showsCPUMeterSkeleton: Bool { cpuHistory.isEmpty && snapshot.displayedReading == nil }
     var showsMemoryMeterSkeleton: Bool { memoryHistory.isEmpty }
-    var showsCPUSkeleton: Bool { metric == .cpu && snapshot.cpuAvailability == .missing }
+    var showsEnergyMeterSkeleton: Bool { energyHistory.isEmpty && snapshot.displayedReading == nil }
+    /// The Procesador and Energía lists wait for per-process deltas, which a single scan cannot give.
+    var showsCPUSkeleton: Bool { SystemRules.listIsLoading(metric: metric, availability: snapshot.cpuAvailability) }
+
+    /// The Energía meter's number: the same total the Energía tab's rows add up to.
+    var energyValue: Int { SystemRules.energyValue(reading: snapshot.displayedReading, history: energyHistory, cores: cores) ?? 0 }
 
     var slots: PanelReservation {
         let currentHeight = switch message?.style {
@@ -480,10 +615,12 @@ struct SystemPanelModel {
 
     var layout: SystemPanelLayout {
         let slots = slots
-        return SystemPanelLayout(messageHeight: slots.messageHeight, hasMaintenance: slots.hasMaintenance)
+        return SystemPanelLayout(messageHeight: slots.messageHeight, hasMaintenance: slots.hasMaintenance, maxHeight: maxHeight)
     }
 
-    var metric: LoadMetric { tab == 1 ? .memory : .cpu }
+    static let tabs: [LoadMetric] = [.cpu, .memory, .energy]
+
+    var metric: LoadMetric { Self.tabs.indices.contains(tab) ? Self.tabs[tab] : .cpu }
 
     // The number and rows always refer to the same CPU window, even while a previous one is displayed.
     var cpuValue: Int { Int((snapshot.displayedReading?.cpuWindow ?? snapshot.cpuNow).rounded()) }
@@ -495,21 +632,33 @@ struct SystemPanelModel {
     }
 
     var breakdown: Breakdown? {
-        guard tab == 1 else { return cpuBreakdown }
+        switch metric {
+        case .cpu: return cpuBreakdown
+        case .energy: return energyBreakdown
+        case .memory: break
+        }
         guard let inventory = snapshot.displayedInventory else { return nil }
         return SystemRules.memoryBreakdown(inventory.loads, used: snapshot.memoryUsed,
                                            lang: appLanguage, locale: .current, rowLimit: layout.rowLimit)
     }
 
+    // Energy comes from the same window as the processor rows.
+    var energyBreakdown: Breakdown? {
+        guard let reading = snapshot.displayedReading else { return nil }
+        return SystemRules.energyBreakdown(reading.loads, unattributed: SystemRules.unattributedEnergy(reading, cores: cores),
+                                           lang: appLanguage, locale: .current, rowLimit: layout.rowLimit)
+    }
+
     private var inventory: ProcessInventory? {
-        metric == .cpu ? snapshot.displayedReading?.inventory : snapshot.displayedInventory
+        metric == .memory ? snapshot.displayedInventory : snapshot.displayedReading?.inventory
     }
 
     var listAvailability: ProcessReadingAvailability {
         inventory.map { snapshot.processAvailability(capturedAt: $0.capturedAt) } ?? .missing
     }
 
-    private var usableRestProbe: RestProbe? { listAvailability == .fresh ? restProbe : nil }
+    // `ps` has no energy column, so the Energy tab breaks down measured processes only.
+    private var usableRestProbe: RestProbe? { listAvailability == .fresh && metric != .energy ? restProbe : nil }
 
     func detailRows(for row: Breakdown.Row, in breakdown: Breakdown) -> [LoadDetail] {
         let lang = appLanguage
@@ -538,10 +687,9 @@ struct SystemPanelModel {
         return calendarText("Only available measurements", "Solo mediciones disponibles")
     }
 
-    static func initialTab(_ s: LoadSnapshot) -> Int {
-        let memory = SystemRules.memoryState(s)
-        let cpu = SystemRules.cpuState(smoothed: s.cpuSmoothed, busyMinutes: s.busyMinutes)
-        return memory.level > cpu.level ? 1 : 0
+    /// Opens on the worst metric right now (heat opens Energía), or on the user's choice when all is fine.
+    static func initialTab(_ s: LoadSnapshot, preferred: SystemMetric = .cpu) -> Int {
+        tabs.firstIndex(of: SystemRules.openingMetric(SystemRules.levels(s), preferred: preferred)) ?? 0
     }
 }
 
@@ -562,6 +710,8 @@ struct SystemPane: View {
         let layout: SystemPanelLayout
     }
 
+    /// Room the screen allows, capped at `SystemPanelLayout.maxHeight`.
+    var maxHeight = SystemPanelLayout.maxHeight
     @ObservedObject private var m = SystemMonitor.shared
     @ObservedObject private var advisor = RestartAdvisor.shared
     @State private var page = Page.main
@@ -574,7 +724,7 @@ struct SystemPane: View {
         let snapshot = m.snapshot()
         let model = panelModel(snapshot)
         let message = model.message
-        let restIsExpanded = page == .main && expandedKey == "rest" && model.listAvailability == .fresh
+        let restIsExpanded = page == .main && expandedKey == "rest" && model.listAvailability == .fresh && model.metric != .energy
             && model.breakdown?.rows.contains(where: \.isRest) == true
         let signature = LayoutSignature(page: page, kind: message?.kind, style: message?.style,
                                         maintenance: model.maintenance != nil, expanded: reservesExpandedHeight,
@@ -608,7 +758,8 @@ struct SystemPane: View {
         .onAppear {
             m.setProcessPanelOpen(true)
             m.tick()
-            tab = SystemPanelModel.initialTab(m.snapshot())
+            let preferred = SystemMetric(rawValue: ConfigStore.shared.config.monitorBarMetric) ?? .cpu
+            tab = SystemPanelModel.initialTab(m.snapshot(), preferred: preferred)
             m.sampleProcesses()
             advisor.refresh(disk: DiskInfo.read())
         }
@@ -647,10 +798,10 @@ struct SystemPane: View {
     private func panelModel(_ snapshot: LoadSnapshot) -> SystemPanelModel {
         let maintenance = advisor.visible ? RestartRules.summary(advisor.advice, lang: appLanguage) : nil
         var model = SystemPanelModel(snapshot: snapshot, cpuHistory: m.cpuHistory, memoryHistory: m.memoryHistory,
-                                     maintenance: maintenance, tab: tab, expandedKey: expandedKey,
+                                     energyHistory: m.energyHistory, maintenance: maintenance, tab: tab, expandedKey: expandedKey,
                                      reservesExpandedHeight: reservesExpandedHeight, restProbe: m.restProbe,
                                      currentUID: getuid(), cores: ProcessInfo.processInfo.activeProcessorCount,
-                                     reservation: reservation)
+                                     reservation: reservation, maxHeight: maxHeight)
         let visibleKeys = Set(model.breakdown?.rows.flatMap(\.loadKeys) ?? [])
         for load in snapshot.loads where visibleKeys.contains(load.key) {
             if case .app(let pid?) = load.kind {
@@ -686,13 +837,20 @@ struct SystemPanelView: View {
         let contentHeight = breakdown == nil ? CGFloat(layout.listHeight) : foldedHeight
         let listHeight = expanded != nil || loadingExpanded ? retainedHeight
             : (retainedAfterFold ? contentHeight : CGFloat(layout.listHeight))
+        // The message keeps its natural height. The block reserves the largest message seen while the panel is open,
+        // so a shorter card or a recovery note leaves its spare room below the list and the footer does not jump.
+        let reserved = slots.messageHeight
+        let blockHeight = (reserved > 0 ? reserved + 10 : 0) + layout.meterHeight + 10 + SystemPanelLayout.listHeaderHeight
         VStack(alignment: .leading, spacing: 10) {
-            header(SystemRules.level(s))
-            meters(s)
-            if slots.messageHeight > 0 {
-                messageSlot(message, height: CGFloat(slots.messageHeight))
+            header
+            VStack(alignment: .leading, spacing: 10) {
+                if reserved > 0 {
+                    messageSlot(message, reserved: reserved)
+                }
+                meters(s, rowHeight: CGFloat(layout.meterRowHeight))
+                usageList(breakdown, rows: rows, expanded: expanded, height: listHeight)
             }
-            usageList(breakdown, rows: rows, expanded: expanded, height: listHeight)
+            .frame(height: CGFloat(blockHeight) + listHeight, alignment: .top)
             VStack(spacing: 8) {
                 Divider().frame(height: 1)
                     .accessibilityHidden(true)
@@ -705,61 +863,42 @@ struct SystemPanelView: View {
         .padding(.bottom, retainedAfterFold ? retainedHeight - contentHeight : 0)
     }
 
-    private func header(_ level: SystemLevel) -> some View {
-        let symbol = switch level {
-        case .normal: "checkmark.circle.fill"
-        case .attention: "exclamationmark.circle.fill"
-        case .critical: "exclamationmark.triangle.fill"
-        }
-        let color: Color = switch level {
-        case .normal: .green
-        case .attention: .orange
-        case .critical: .red
-        }
-        let labelColor: Color = switch level {
-        case .normal: .secondary
-        case .attention where colorScheme == .light: .primary
-        default: color
-        }
-        return HStack {
-            Text(calendarText("System", "Sistema")).font(.system(size: 14, weight: .semibold))
-            Spacer()
-            HStack(spacing: 4) {
-                Image(systemName: symbol).font(.system(size: 11)).foregroundStyle(color)
-                    .accessibilityHidden(true)
-                Text(SystemRules.chip(level, lang: appLanguage))
-                    .font(.system(size: 11.5)).foregroundStyle(labelColor)
-            }
-        }
-        .frame(height: 20)
+    private var header: some View {
+        Text(calendarText("System", "Sistema")).font(.system(size: 14, weight: .semibold))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 20)
     }
 
-    private func meters(_ s: LoadSnapshot) -> some View {
+    private func meters(_ s: LoadSnapshot, rowHeight: CGFloat) -> some View {
         let cpu = SystemRules.cpuState(smoothed: s.cpuSmoothed, busyMinutes: s.busyMinutes)
         let memory = SystemRules.memoryState(s)
-        let cpuText = switch cpu {
-        case .busy: calendarText("Busy", "Ocupado")
-        case .veryBusy: calendarText("Very busy", "Muy ocupado")
-        default: calendarText("Normal", "Normal")
-        }
+        let heat = SystemRules.heatLevel(s)
+        let heatText = SystemRules.heatStatus(s)
+        let cpuText = SystemRules.cpuStatus(cpu)
         let memoryTextLabel = SystemRules.memoryStatus(s.pressure, state: memory)
         let gigabytes = Int((Double(s.memoryTotal) / 1_073_741_824).rounded())
-        return HStack(alignment: .top, spacing: 12) {
-            MeterTile(label: calendarText("Processor", "Procesador"), status: cpuText, state: cpu,
-                      strained: cpu == .busy, value: "\(model.cpuValue)%", history: model.cpuHistory,
-                      loading: model.showsCPUMeterSkeleton)
-            MeterTile(label: calendarText("Memory", "Memoria"), status: memoryTextLabel, state: memory,
-                      strained: s.pressure != .normal, value: memoryText(s.memoryUsed),
-                      unit: calendarText("of \(gigabytes) GB", "de \(gigabytes) GB"), history: model.memoryHistory,
-                      loading: model.showsMemoryMeterSkeleton)
+        return VStack(spacing: 0) {
+            MeterRow(label: calendarText("Processor", "Procesador"), status: cpuText, level: cpu.level,
+                     strained: cpu == .busy, value: "\(model.cpuValue)%", history: model.cpuHistory, height: rowHeight,
+                     loading: model.showsCPUMeterSkeleton, select: { onTab(0) })
+            MeterRow(label: calendarText("Memory", "Memoria"), status: memoryTextLabel, level: memory.level,
+                     strained: s.pressure != .normal, value: memoryText(s.memoryUsed),
+                     unit: calendarText("of \(gigabytes) GB", "de \(gigabytes) GB"), history: model.memoryHistory,
+                     height: rowHeight, loading: model.showsMemoryMeterSkeleton, select: { onTab(1) })
+            // Same layout as the others: title over the thermal state, the total energy impact on the right.
+            MeterRow(label: calendarText("Energy", "Energía"), status: heatText, level: heat,
+                     strained: SystemRules.heatWarm(s), value: "\(model.energyValue)",
+                     unit: calendarText("impact", "de impacto"), history: model.energyHistory,
+                     scale: max(100, model.energyHistory.suffix(60).max() ?? 0), height: rowHeight,
+                     loading: model.showsEnergyMeterSkeleton, separated: false, select: { onTab(2) })
         }
     }
 
-    private func messageSlot(_ message: SystemMessage?, height: CGFloat) -> some View {
+    private func messageSlot(_ message: SystemMessage?, reserved: Int) -> some View {
         Group {
             if let message, message.style == .card {
                 StatusCard(message: message, text: SystemRules.text(message), onAction: onAction)
-            } else if height > CGFloat(SystemPanelLayout.noteHeight) {
+            } else if reserved > SystemPanelLayout.noteHeight {
                 StatusNote(title: calendarText("Better now. Nothing to do.", "Ya está mejor. No hace falta hacer nada."), recovered: true)
             } else if let message {
                 StatusNote(title: SystemRules.text(message).title)
@@ -767,28 +906,36 @@ struct SystemPanelView: View {
                 Color.clear
             }
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: height, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func usageList(_ breakdown: Breakdown?, rows: [Breakdown.Row], expanded: Breakdown.Row?,
                            height: CGFloat) -> some View {
         let layout = breakdown.flatMap { data in expanded.map { model.detailLayout(for: $0, in: data) } }
-        return VStack(spacing: 6) {
+        return VStack(spacing: CGFloat(SystemPanelLayout.listHeaderHeight - 22)) {
             HStack(spacing: 6) {
                 Text(calendarText("What uses the most", "Lo que más usa")).font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1).fixedSize()
                 if model.listAvailability == .remembered {
-                    Text(calendarText("Previous sample", "Lectura anterior"))
-                        .font(.system(size: 10)).flyoutSecondary().lineLimit(1)
+                    // With three tabs the note falls back to an icon when the words do not fit.
+                    ViewThatFits(in: .horizontal) {
+                        Text(calendarText("Previous sample", "Lectura anterior"))
+                            .font(.system(size: 10)).flyoutSecondary().lineLimit(1)
+                        Image(systemName: "clock.arrow.circlepath").font(.system(size: 10)).flyoutSecondary()
+                            .help(calendarText("Previous sample", "Lectura anterior"))
+                            .accessibilityLabel(calendarText("Previous sample", "Lectura anterior"))
+                    }
                 }
-                Spacer(minLength: 4)
+                Spacer(minLength: 0)
                 Picker(calendarText("What uses the most", "Lo que más usa"),
                        selection: Binding(get: { model.tab }, set: onTab)) {
                     Text(calendarText("Processor", "Procesador")).tag(0)
                     Text(calendarText("Memory", "Memoria")).tag(1)
+                    Text(calendarText("Energy", "Energía")).tag(2)
                 }
                 .pickerStyle(.segmented).labelsHidden().controlSize(.small)
-                .frame(width: 150)
+                .frame(maxWidth: 234)  // Natural width in Spanish; English is narrower.
             }
             .frame(height: 22)
             Group {
@@ -898,7 +1045,7 @@ struct SystemPanelView: View {
                 StatusNote(title: calendarText("No active maintenance notices.", "Sin avisos de mantenimiento."), recovered: true)
             }
         }
-        .frame(height: 26, alignment: .leading)
+        .frame(height: CGFloat(SystemPanelLayout.maintenanceHeight - 8), alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
@@ -957,80 +1104,80 @@ struct SystemLoadingPulse<Content: View>: View {
 }
 
 struct MeterStatusIndicator: View {
-    let state: MeterState
+    @Environment(\.colorScheme) private var scheme
+    let level: SystemLevel
     let strained: Bool
 
+    init(state: MeterState, strained: Bool) { self.init(level: state.level, strained: strained) }
+    init(level: SystemLevel, strained: Bool) { self.level = level; self.strained = strained }
+
     var body: some View {
-        let color: Color = switch state.level {
-        case .normal: strained ? .gray : .green
-        case .attention: .orange
-        case .critical: .red
-        }
+        let tone: StatusTone = level == .normal ? .ok : StatusTone(level)
+        let color: Color = level == .normal && strained ? .secondary : StatusColor.color(tone, dark: scheme == .dark)
         Circle().fill(color).frame(width: 7, height: 7).accessibilityHidden(true)
     }
 }
 
-struct MeterTile: View {
-    static let width: CGFloat = 166
-    static let height: CGFloat = 68
+/// One line of the meter list: title over its status on the left, then the value and sparkline in right-aligned
+/// columns. Clicking it shows the matching tab of “What uses the most”.
+struct MeterRow: View {
+    static let width = CGFloat(SystemPanelLayout.contentWidth)
+    static let sparkWidth: CGFloat = 130
+    static let valueGap: CGFloat = 16
 
     @Environment(\.themeAccent) private var accent
+    @Environment(\.colorScheme) private var scheme
     let label: String
     let status: String
-    let state: MeterState
+    let level: SystemLevel
     let strained: Bool
     let value: String
     var unit: String?
     let history: [Double]
+    var scale = 100.0
+    var height = CGFloat(SystemPanelLayout.meterRowHeight)
     var loading = false
+    var separated = true
+    var select: () -> Void = {}
 
     var body: some View {
-        let graph: Color = switch state.level {
-        case .normal: accent
-        case .attention: .orange
-        case .critical: .red
-        }
-        Group {
-            if loading {
-                SystemLoadingPulse {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            SystemSkeletonMark().frame(width: 68, height: 10)
-                            Spacer()
-                            SystemSkeletonMark().frame(width: 42, height: 9)
+        let graph: Color = level == .normal ? accent : StatusColor.color(for: level, dark: scheme == .dark)
+        Button(action: select) {
+            HStack(spacing: 0) {
+                // Title over status (31 pt, within the 34 pt floor) leaves the value and sparkline columns room for
+                // “99,6 GB de 128 GB”.
+                VStack(alignment: .leading, spacing: 2) { title; statusLabel }
+                    .lineLimit(1).fixedSize()
+                Spacer(minLength: Self.valueGap)
+                if loading {
+                    SystemLoadingPulse {
+                        HStack(spacing: 12) {
+                            SystemSkeletonMark().frame(width: unit == nil ? 44 : 120, height: 16)
+                            SystemSkeletonMark().frame(width: Self.sparkWidth, height: min(26, height - 10))
                         }
-                        .frame(height: 14)
-                        SystemSkeletonMark().frame(width: unit == nil ? 59 : 97, height: 21)
-                            .frame(height: 24, alignment: .leading)
-                        SystemSkeletonMark().frame(height: 22)
                     }
-                }
-                .accessibilityHidden(true)
-            } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 4) {
-                        Text(label).font(.system(size: 11.5, weight: .semibold)).flyoutSecondary()
-                        Spacer(minLength: 2)
-                        MeterStatusIndicator(state: state, strained: strained)
-                        Text(status).font(.system(size: 11))
-                    }
-                    .lineLimit(1)
-                    .frame(height: 14)
+                    .accessibilityHidden(true)
+                } else {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(value).font(.system(size: 22, weight: .semibold)).monospacedDigit().layoutPriority(1)
+                        Text(value).font(.system(size: 20, weight: .semibold)).monospacedDigit()
                         if let unit { Text(unit).font(.system(size: 11)).flyoutSecondary() }
                     }
-                    .lineLimit(1)
-                    .frame(height: 26)
-                    .padding(.top, 2)
-                    Spark(values: history, color: graph, height: 22)
-                        .padding(.top, 4)
+                    .lineLimit(1).fixedSize()
+                    Spark(values: history, color: graph, height: min(26, height - 10), scale: scale)
+                        .frame(width: Self.sparkWidth)
+                        .padding(.leading, 12)
                         .accessibilityHidden(true)
                 }
             }
+            .frame(width: Self.width, height: height)
+            .contentShape(Rectangle())
         }
-        .frame(width: Self.width, height: Self.height, alignment: .topLeading)
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) {
+            if separated { Divider().opacity(0.6).accessibilityHidden(true) }
+        }
         .accessibilityElement(children: .combine)
+        .accessibilityHint(calendarText("Shows it in What uses the most", "Lo muestra en Lo que más usa"))
 #if DEBUG
         .background {
             GeometryReader { geometry in
@@ -1038,6 +1185,17 @@ struct MeterTile: View {
             }
         }
 #endif
+    }
+
+    private var title: some View {
+        Text(label).font(.system(size: 12, weight: .semibold)).flyoutSecondary()
+    }
+
+    private var statusLabel: some View {
+        HStack(spacing: 4) {
+            MeterStatusIndicator(level: level, strained: strained)
+            Text(status).font(.system(size: 11.5))
+        }
     }
 }
 
@@ -1103,6 +1261,7 @@ struct LoadRowView: View {
     }
 }
 
+/// A discreet line above the footer. Strong advice keeps its dot.
 struct MaintenanceRow: View {
     let text: String
     let strong: Bool
@@ -1113,16 +1272,17 @@ struct MaintenanceRow: View {
         Button(action: open) {
             HStack(spacing: 4) {
                 if strong {
-                    Circle().fill(Color.orange).frame(width: 6, height: 6).accessibilityHidden(true)
+                    Circle().fill(StatusColor.color(.pending)).frame(width: 6, height: 6).accessibilityHidden(true)
                 }
-                Image(systemName: "wrench.and.screwdriver").font(.system(size: 12)).flyoutSecondary()
+                Image(systemName: "wrench.and.screwdriver").font(.system(size: 10))
                 Text(text).lineLimit(1).truncationMode(.tail)
+                if more > 0 { Text("+\(more)") }
+                Image(systemName: "chevron.right").font(.system(size: 9))
                 Spacer(minLength: 0)
-                if more > 0 { Text("+\(more)").flyoutSecondary() }
-                Image(systemName: "chevron.right").font(.system(size: 10)).flyoutSecondary()
             }
-            .font(.system(size: 11.5))
-            .frame(height: 26)
+            .font(.system(size: 11))
+            .flyoutSecondary()
+            .frame(height: CGFloat(SystemPanelLayout.maintenanceHeight - 8))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

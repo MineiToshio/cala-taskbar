@@ -20,6 +20,8 @@
 | Option+Tab does nothing | Accessibility not granted yet (the tap is created within 3 s of granting) or the switcher is off in Settings → General |
 | I quit the bar by accident | Open "Cala" from Spotlight or Launchpad; reopening a running app opens Settings |
 | Previews from another tool still appear | A previously started copy keeps running after deleting the app. Quit it, or log out / reboot (other user sessions need their own logout) |
+| macOS asks for the Mac password for "Cala Mail" | Expected once per mail account after each update (Cala is not signed with a paid Developer ID). Type it and choose Always Allow; it goes to macOS only |
+| Mail account shows an error | Check that IMAP is on and that you used an app password, not the normal password (Gmail needs 2-Step Verification). Outlook and Hotmail are not supported |
 | Two bars overlap or one is missing after plugging a screen | Bars are rebuilt 0.4 s after a screen change. Quit and reopen if it does not settle |
 
 An unreadable or malformed configuration is preserved as `~/Library/Application Support/Cala/config.json.bad` when possible, and the app uses defaults. Mistyped individual fields use their defaults while valid fields are retained; the bar's numeric settings are clamped (the saved original Dock values are never altered). Check `config:` log entries before recovering the backup. If the invalid file cannot be preserved, saving is disabled for that run so the original is not overwritten.

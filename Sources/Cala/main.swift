@@ -91,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var bars: [Bar] = []
     var hoverBar: Bar?
     var overlayBar: Bar?
+    /// The bar whose tray item opened the flyout. While the flyout is open this bar never auto-hides (PanelPolicy).
+    var flyoutBar: Bar?
     let preview = PreviewController()
     lazy var flyout = FlyoutController(model: model)
     var bag = Set<AnyCancellable>()
@@ -111,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.shared.show(); return true
     }
 
-    func applicationWillTerminate(_ n: Notification) { DockControl.onQuit(store); MenuBarControl.onQuit(store); MenuBarIcons.onQuit(store); Watchdog.cleanExit() }
+    func applicationWillTerminate(_ n: Notification) { MailService.shared.stop(); DockControl.onQuit(store); MenuBarControl.onQuit(store); MenuBarIcons.onQuit(store); Watchdog.cleanExit() }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
@@ -165,10 +167,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UsagePace.shared.start(store: self.store)
             if usageVisible { UsageService.shared.refresh() }
         }
-        OnboardingWindowController.shared.onFinish = startUsage
+        // Mail reads the Keychain too, and after an update a short explanation comes first (see MailKeychainNotice).
+        // Only mail sync waits for it; it also waits for the welcome so the two never overlap.
+        let startMail = { MailService.shared.start(explainingKeychain: MailKeychainNoticeController.shared.show) }
+        OnboardingWindowController.shared.onFinish = { startUsage(); startMail() }
         if !OnboardingWindowController.shared.showIfNeeded(existingInstall: store.existedAtLaunch) {
             OnboardingWindowController.shared.onFinish = nil
             startUsage()
+            startMail()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, !self.store.config.autoHide || self.bars.contains(where: { !$0.hidden }) else { return }
@@ -261,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func rebuildBars() {
         bars.forEach { $0.panel.orderOut(nil) }
-        preview.hide(); flyout.hide()
+        preview.hide(); flyout.hide(); flyoutBar = nil
         bars = NSScreen.screens.enumerated().map { i, sc in
             Bar(screen: sc, primary: i == 0, model: model, store: store)
         }
@@ -325,7 +331,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func tick() {
         let m = NSEvent.mouseLocation
-        let overPreview = preview.contains(m) || flyout.contains(m)
+        let overFlyout = flyout.contains(m)
+        let overPreview = preview.contains(m) || overFlyout
         if flyout.isVisible { flyout.refit() }
 
         if store.config.autoHide {
@@ -333,12 +340,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let f = b.screen.frame
                 let overBar = !b.hidden && barFrame(b, hidden: false).contains(m)
                 let atEdge = f.contains(m) && m.y <= f.minY + 2
-                if atEdge || overBar || (overPreview && overlayBar === b) {
+                // One rule for every tray panel: while one is open on this bar the bar stays, wherever the pointer is.
+                // Refreshing lastInside also gives the usual 0.5 s delay from the moment the panel closes.
+                let pinned = PanelPolicy.keepsBarVisible(panelOpen: flyout.isVisible, panelBarIsThisBar: flyoutBar === b)
+                let near = atEdge || overBar || (overPreview && overlayBar === b)
+                if near || pinned {
                     b.lastInside = Date()
                     if b.hidden { b.hidden = false; layoutBar(b, animated: true) }
-                } else if !b.hidden && Date().timeIntervalSince(b.lastInside) > 0.5 {
+                } else if PanelPolicy.barShouldHide(autoHide: true, barHidden: b.hidden, pointerNearBar: near, panelPinsBar: pinned,
+                                                    secondsSinceInside: Date().timeIntervalSince(b.lastInside), delay: 0.5) {
                     b.hidden = true
-                    if overlayBar === b { preview.hide(); flyout.hide() }
+                    if overlayBar === b { preview.hide() }
                     layoutBar(b, animated: true)
                 }
             }
@@ -350,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if dragging {
             NSCursor.closedHand.set()
         } else if overPreview {
-            NSCursor.pointingHand.set()
+            if !(overFlyout && flyout.kind == trayMail) { NSCursor.pointingHand.set() }
         } else if let hi {
             (hi.id != nil ? NSCursor.pointingHand : NSCursor.arrow).set()
         }
@@ -443,6 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if flyout.isVisible && flyout.kind == id { flyout.hide(); return }
         model.refreshTray()
         overlayBar = bar
+        flyoutBar = bar
         flyout.show(kind: id, barTop: barFrame(bar, hidden: false).maxY,
                     centerX: iconCenterX(bar, id, fallback: NSEvent.mouseLocation.x), screen: bar.screen)
     }
