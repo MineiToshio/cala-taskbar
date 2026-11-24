@@ -247,7 +247,7 @@ struct SliderControl: View {
     let label: (Double) -> String
     var body: some View {
         HStack(spacing: 10) {
-            Slider(value: $value, in: range, step: step).frame(width: 200)
+            StepSlider(value: $value, range: range, step: step).frame(width: 200)
             Text(label(value)).font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
                 .frame(width: 56, alignment: .trailing)
         }
