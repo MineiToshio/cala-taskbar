@@ -89,6 +89,7 @@ private struct ZoneEditorArtwork: View {
         let preview = session.preview
         let grid = session.gridEnabled
         let dark = scheme == .dark
+        let equalColor = StatusColor.color(.ok, dark: dark)
         Canvas { context, size in
             func flipped(_ rect: CGRect) -> CGRect {
                 ZoneGeometry.axRect(fromAppKit: rect, primaryHeight: size.height)
@@ -106,7 +107,8 @@ private struct ZoneEditorArtwork: View {
                     startPoint: work.origin, endPoint: CGPoint(x: work.maxX, y: work.maxY)))
             }
 
-            /// Snapping guides are dashed so they never read as a zone border; grid lines stay solid and faint.
+            /// Snapping guides are dashed so they never read as a zone border; grid lines stay solid and faint. The
+            /// screen-centre guide is dash-dotted and the equal-size guide green, so each snap says what it did.
             func line(_ guide: ZoneSnapping.Guide, color: Color, dashed: Bool = false) {
                 let fraction = guide.axis == .x ? ZoneRect(x: guide.position, y: 0, w: 0, h: 1)
                     : ZoneRect(x: 0, y: guide.position, w: 1, h: 0)
@@ -123,7 +125,10 @@ private struct ZoneEditorArtwork: View {
                     path.addLine(to: CGPoint(x: work.maxX, y: y))
                 }
                 if dashed {
-                    context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: max(pixel, 1), lineCap: .butt, dash: [6, 4]))
+                    let pattern: [CGFloat] = guide.kind == .center ? [10, 3, 2, 3] : [6, 4]
+                    let width = guide.kind == .edge ? max(pixel, 1) : 1.5
+                    context.stroke(path, with: .color(guide.kind == .equalSize ? equalColor : color),
+                                   style: StrokeStyle(lineWidth: width, lineCap: .butt, dash: pattern))
                 } else {
                     context.stroke(path, with: .color(color), lineWidth: pixel)
                 }
@@ -136,30 +141,47 @@ private struct ZoneEditorArtwork: View {
             }
             context.strokeBorderOfWorkArea(work, scale: scale, accent: theme.accent)
 
-            func drawZone(_ rect: CGRect, number: Int, active: Bool) {
+            let activeID = preview == nil ? selected : preview?.zoneID
+            let activeIndex = zones.firstIndex { $0.id == activeID }
+            let activeRect = preview?.rect ?? activeIndex.map { zones[$0].rect }
+            let activeSize = activeRect.map { ZoneMeasure.size($0, in: usable.size) }
+
+            /// The zone number, and under it its size in the monitor's points. A width or height equal to the
+            /// selected (or dragged) zone's is shown in green, so equal side zones are easy to make.
+            func drawZone(_ rect: CGRect, zone: ZoneRect, number: Int, active: Bool, affected: Bool = false) {
                 let width: CGFloat = active ? 2 : 1
                 func align(_ position: CGFloat) -> CGFloat { (position * scale).rounded() / scale }
                 let aligned = CGRect(x: align(rect.minX), y: align(rect.minY),
                                      width: align(rect.maxX) - align(rect.minX),
                                      height: align(rect.maxY) - align(rect.minY))
                 let outline = Path(roundedRect: aligned.insetBy(dx: width / 2, dy: width / 2), cornerRadius: 3)
-                context.fill(outline, with: .color(theme.accent.opacity(active ? 0.24 : 0.07)))
-                context.stroke(outline, with: .color(theme.accent.opacity(active ? 1 : 0.7)), lineWidth: width)
-                if rect.width >= 30, rect.height >= 24 {
-                    let label = Text(number.formatted()).font(.system(size: active ? 28 : 20, weight: .semibold, design: .rounded))
-                        .foregroundStyle(active ? theme.accent : FlyoutStyle.secondary(dark: dark))
-                    context.draw(label, at: CGPoint(x: rect.midX, y: rect.midY))
-                }
+                context.fill(outline, with: .color(theme.accent.opacity(active ? 0.24 : affected ? 0.15 : 0.07)))
+                context.stroke(outline, with: .color(theme.accent.opacity(active || affected ? 1 : 0.7)), lineWidth: width)
+                guard rect.width >= 30, rect.height >= 24 else { return }
+                let showSize = rect.width >= 84 && rect.height >= 64
+                let label = Text(number.formatted()).font(.system(size: active ? 28 : 20, weight: .semibold, design: .rounded))
+                    .foregroundStyle(active ? theme.accent : FlyoutStyle.secondary(dark: dark))
+                context.draw(label, at: CGPoint(x: rect.midX, y: rect.midY - (showSize ? 10 : 0)))
+                guard showSize else { return }
+                let size = ZoneMeasure.size(zone, in: usable.size)
+                let base = active ? theme.accent : FlyoutStyle.secondary(dark: dark)
+                let sameW = !active && activeSize?.w == size.w
+                let sameH = !active && activeSize?.h == size.h
+                let font = Font.system(size: 12, weight: active ? .semibold : .medium).monospacedDigit()
+                let text = Text("\(size.w)").foregroundStyle(sameW ? equalColor : base)
+                    + Text(" × ").foregroundStyle(base)
+                    + Text("\(size.h)").foregroundStyle(sameH ? equalColor : base)
+                context.draw(text.font(font), at: CGPoint(x: rect.midX, y: rect.midY + (active ? 18 : 15)))
             }
 
-            let activeID = preview == nil ? selected : preview?.zoneID
             for (index, zone) in zones.enumerated() where zone.id != activeID {
-                drawZone(frame(zone.rect), number: index + 1, active: false)
+                let moved = preview?.others[zone.id]
+                drawZone(frame(moved ?? zone.rect), zone: moved ?? zone.rect, number: index + 1, active: false,
+                         affected: moved != nil)
             }
-            let activeIndex = zones.firstIndex { $0.id == activeID }
-            if let activeRect = preview?.rect ?? activeIndex.map({ zones[$0].rect }) {
+            if let activeRect {
                 let rect = frame(activeRect)
-                drawZone(rect, number: (activeIndex ?? zones.count) + 1, active: true)
+                drawZone(rect, zone: activeRect, number: (activeIndex ?? zones.count) + 1, active: true)
                 for guide in preview?.guides ?? [] { line(guide, color: theme.accent, dashed: true) }
                 if preview == nil || preview?.zoneID != nil {
                     let appKitRect = ZoneGeometry.frame(for: activeRect, in: usable)
@@ -198,6 +220,9 @@ final class ZoneCanvasView: NSView {
         let start: Point
         let hit: ZonePicking.EditorHit?
         let others: [ZoneRect]
+        /// The layout's zones when the gesture began, and whether Linked mode applies to it.
+        let zones: [Zone]
+        let linked: Bool
         var last: Point?
     }
 
@@ -269,13 +294,45 @@ final class ZoneCanvasView: NSView {
         guard session.dialog == nil else { return }
         window?.makeFirstResponder(self)
         resetGesture()
+        session.preview = nil
         let point = appKitPoint(for: event)
         guard let layout = session.layout, !session.usable.isEmpty else { return }
         let hit = editorHit(at: point, in: layout, drawing: event.modifierFlags.contains(.shift))
         guard hit != nil || isOnCanvas(point) else { return }
         session.selectedZone = hit?.zone.id
+        if event.clickCount == 2, hit != nil {
+            session.requestSize()   // double-click a zone: type its exact size
+            return
+        }
         gesture = Gesture(start: fraction(point), hit: hit,
-                          others: layout.zones.filter { $0.id != hit?.zone.id }.map(\.rect))
+                          others: layout.zones.filter { $0.id != hit?.zone.id }.map(\.rect),
+                          zones: layout.zones, linked: session.linked)
+    }
+
+    /// Right-click a zone: exact size, centring and equal sizes.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard session.dialog == nil, let layout = session.layout else { return nil }
+        let point = appKitPoint(for: event)
+        guard let zone = ZonePicking.chosen(point, zones: layout.zones, usable: session.usable) else { return nil }
+        resetGesture()
+        session.selectedZone = zone.id
+        let session = session
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(BlockItem(tx("Size…", "Tamaño…")) { session.requestSize() })
+        menu.addItem(.separator())
+        menu.addItem(BlockItem(tx("Center Horizontally", "Centrar horizontalmente")) { session.centerZone(horizontally: true) })
+        menu.addItem(BlockItem(tx("Center Vertically", "Centrar verticalmente")) { session.centerZone(horizontally: false) })
+        let widths = BlockItem(tx("Equal Widths in This Row", "Igualar anchos de esta fila")) { session.equalizeZones(horizontally: true) }
+        widths.isEnabled = session.canEqualize(horizontally: true)
+        menu.addItem(widths)
+        let heights = BlockItem(tx("Equal Heights in This Column", "Igualar altos de esta columna")) { session.equalizeZones(horizontally: false) }
+        heights.isEnabled = session.canEqualize(horizontally: false)
+        menu.addItem(heights)
+        menu.addItem(.separator())
+        menu.addItem(BlockItem(tx("Duplicate Zone", "Duplicar zona")) { session.duplicateZone() })
+        menu.addItem(BlockItem(tx("Delete Zone", "Eliminar zona")) { session.deleteZone() })
+        return menu
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -303,7 +360,10 @@ final class ZoneCanvasView: NSView {
             resetGesture()
             updateCursor(for: event)
         }
-        guard let gesture, gesture.last != nil else { return }
+        guard let gesture, gesture.last != nil else {
+            session.preview = nil   // a click without a drag never leaves a picture of a change behind
+            return
+        }
         update(gesture, to: fraction(appKitPoint(for: event)), snapping: !event.modifierFlags.contains(.option))
         if let preview = session.preview { session.apply(preview) }
         session.preview = nil
@@ -314,10 +374,15 @@ final class ZoneCanvasView: NSView {
             if event.keyCode == 53 { session.dismissDialog() }
             return
         }
+        let large = event.modifierFlags.contains(.shift)
         switch event.keyCode {
         case 51, 117: session.deleteZone()
         case 53: session.requestCancel()
         case 36, 76: session.save()
+        case 123: session.nudge(dx: -1, dy: 0, large: large)
+        case 124: session.nudge(dx: 1, dy: 0, large: large)
+        case 125: session.nudge(dx: 0, dy: 1, large: large)
+        case 126: session.nudge(dx: 0, dy: -1, large: large)
         default: super.keyDown(with: event)
         }
     }
@@ -373,23 +438,54 @@ final class ZoneCanvasView: NSView {
         let width = Double(usable.width)
         let height = Double(usable.height)
         let threshold = (x: 8 / width, y: 8 / height)
-        let minimum = (w: max(0.05, 80 / width), h: max(0.05, 80 / height))
+        let minimum = session.minimumSize
         let grid = session.gridEnabled
-        let result: (ZoneRect, [ZoneSnapping.Guide])
-        if let hit = gesture.hit {
-            let delta = (dx: point.x - gesture.start.x, dy: point.y - gesture.start.y)
-            if hit.edges.isEmpty {
-                result = ZoneSnapping.move(hit.zone.rect, by: delta, others: gesture.others,
-                                           grid: grid, snapping: snapping, threshold: threshold)
-            } else {
-                result = ZoneSnapping.resize(hit.zone.rect, edges: hit.edges, by: delta, others: gesture.others,
-                                             grid: grid, snapping: snapping, threshold: threshold, minSize: minimum)
-            }
-        } else {
-            result = ZoneSnapping.draw(from: gesture.start, to: point, others: gesture.others,
-                                       grid: grid, snapping: snapping, threshold: threshold, minSize: minimum)
+        guard let hit = gesture.hit, let index = gesture.zones.firstIndex(where: { $0.id == hit.zone.id }) else {
+            let result = ZoneSnapping.draw(from: gesture.start, to: point, others: gesture.others,
+                                           grid: grid, snapping: snapping, threshold: threshold, minSize: minimum)
+            session.preview = .init(zoneID: nil, rect: result.0, guides: result.1)
+            return
         }
-        session.preview = .init(zoneID: gesture.hit?.zone.id, rect: result.0, guides: result.1)
+        let rects = gesture.zones.map(\.rect)
+        let delta = (dx: point.x - gesture.start.x, dy: point.y - gesture.start.y)
+        if hit.edges.isEmpty {
+            // Linked: dropping a zone on another swaps them; otherwise it slides up to its neighbours.
+            if gesture.linked, let target = swapTarget(at: point, excluding: hit.zone.id, in: gesture.zones) {
+                session.preview = .init(zoneID: hit.zone.id, rect: target.rect, guides: [], others: [target.id: hit.zone.rect])
+                return
+            }
+            let result = ZoneSnapping.move(hit.zone.rect, by: delta, others: gesture.others,
+                                           grid: grid, snapping: snapping, threshold: threshold)
+            let rect = gesture.linked ? ZoneLinking.move(rects, index: index, to: result.0) : result.0
+            session.preview = .init(zoneID: hit.zone.id, rect: rect, guides: rect == result.0 ? result.1 : [])
+            return
+        }
+        guard gesture.linked else {
+            let result = ZoneSnapping.resize(hit.zone.rect, edges: hit.edges, by: delta, others: gesture.others,
+                                             grid: grid, snapping: snapping, threshold: threshold, minSize: minimum)
+            session.preview = .init(zoneID: hit.zone.id, rect: result.0, guides: result.1)
+            return
+        }
+        // Linked resize: every edge joined to the dragged one follows; joined zones are not snap targets.
+        var joined = Set<Int>()
+        for edge in [ZoneSnapping.Edges.left, .right, .top, .bottom] where hit.edges.contains(edge) {
+            joined.formUnion(ZoneLinking.linkedEdges(rects, index: index, edge: edge).map(\.index))
+        }
+        let others = rects.indices.filter { $0 != index && !joined.contains($0) }.map { rects[$0] }
+        let proposed = ZoneSnapping.resize(hit.zone.rect, edges: hit.edges, by: delta, others: others,
+                                           grid: grid, snapping: snapping, threshold: threshold, minSize: minimum)
+        let changes = ZoneLinking.resize(rects, index: index, edges: hit.edges, proposed: proposed.0, minSize: minimum)
+        let rect = changes[index] ?? hit.zone.rect
+        var moved: [UUID: ZoneRect] = [:]
+        for (i, r) in changes where i != index { moved[gesture.zones[i].id] = r }
+        session.preview = .init(zoneID: hit.zone.id, rect: rect, guides: rect == proposed.0 ? proposed.1 : [], others: moved)
+    }
+
+    /// The zone under the pointer, other than the one being moved (the smallest when they overlap).
+    private func swapTarget(at point: Point, excluding id: UUID, in zones: [Zone]) -> Zone? {
+        zones.filter { zone in
+            zone.id != id && point.x >= zone.rect.x && point.x < zone.rect.maxX && point.y >= zone.rect.y && point.y < zone.rect.maxY
+        }.min { $0.rect.area < $1.rect.area }
     }
 }
 

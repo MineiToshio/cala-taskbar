@@ -36,6 +36,8 @@ struct Config: Codable, Equatable {
     var zonesActivation = "both"
     var zonesGap: Double = 8
     var zonesEditorGrid = false
+    /// The zones editor keeps neighbouring zones joined (a shared edge moves both, moves never overlap).
+    var zonesEditorLinked = true
 
     var modules: ModuleSet {
         ModuleSet(bar: barEnabled, switcher: switcherEnabled, tray: trayEnabled, zones: zonesEnabled)
@@ -103,7 +105,7 @@ struct Config: Codable, Equatable {
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
         case mailLoadsRemoteImages
-        case modulesChosen, barEnabled, trayEnabled, zonesEnabled, zonesActivation, zonesGap, zonesEditorGrid
+        case modulesChosen, barEnabled, trayEnabled, zonesEnabled, zonesActivation, zonesGap, zonesEditorGrid, zonesEditorLinked
     }
 }
 
@@ -142,6 +144,7 @@ extension Config {
         if !["rightClick", "shift", "both"].contains(zonesActivation) { zonesActivation = "both"; invalid = true }
         zonesGap = clamped(field(Double.self, .zonesGap) ?? zonesGap, 0...40, 8)
         zonesEditorGrid = field(Bool.self, .zonesEditorGrid) ?? zonesEditorGrid
+        zonesEditorLinked = field(Bool.self, .zonesEditorLinked) ?? zonesEditorLinked
         restoreDockOnQuit = field(Bool.self, .restoreDockOnQuit) ?? restoreDockOnQuit
         dockBackupSaved = field(Bool.self, .dockBackupSaved) ?? dockBackupSaved
         dockOverridePending = field(Bool.self, .dockOverridePending)

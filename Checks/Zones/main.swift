@@ -446,6 +446,86 @@ expect("Deleted built-ins can be added back; an edited built-in can be restored 
        && restoredCenter.zones.map(\.rect) == ZoneTemplates.zones("wide-center") && restoredCenter.nextSeq == 3
        && !ZoneTemplates.isModified(ZoneLayout(name: "Blank")))
 
+// MARK: Linked editing, centre and equal-size snapping, measures
+
+let thirdsL = ZoneTemplates.zones("three-columns")
+let gridL = ZoneTemplates.zones("grid-2x2")
+let stackedL = ZoneTemplates.zones("main-two-stacked")
+expect("A shared divider links both columns; float noise still counts as shared",
+       ZoneLinking.linkedEdges(thirdsL, index: 0, edge: .right) == [.init(index: 0, isMax: true), .init(index: 1, isMax: false)]
+       && ZoneLinking.linkedEdges([rect(0, 0, 0.3333331, 1), rect(0.3333336, 0, 0.6666664, 1)], index: 1, edge: .left).count == 2
+       && ZoneLinking.linkedEdges(thirdsL, index: 0, edge: .left) == [.init(index: 0, isMax: false)])
+expect("In a 2 × 2 grid only the dragged row's divider moves; a tall zone drags the whole divider",
+       Set(ZoneLinking.linkedEdges(gridL, index: 0, edge: .right).map(\.index)) == [0, 1]
+       && Set(ZoneLinking.linkedEdges(stackedL, index: 1, edge: .left).map(\.index)) == [0, 1, 2]
+       && Set(ZoneLinking.linkedEdges(gridL, index: 0, edge: .bottom).map(\.index)) == [0, 2])
+let linkedGrow = ZoneLinking.resize(thirdsL, index: 0, edges: .right, proposed: rect(0, 0, 0.5, 1), minSize: (0.05, 0.05))
+expect("Linked resize grows one zone and shrinks its neighbour, nothing overlaps",
+       linkedGrow.count == 2 && near(linkedGrow[0]!, rect(0, 0, 0.5, 1)) && near(linkedGrow[1]!, rect(0.5, 0, 1.0 / 6, 1))
+       && abs(linkedGrow[0]!.maxX - linkedGrow[1]!.x) < 1e-12)
+let linkedStop = ZoneLinking.resize(thirdsL, index: 0, edges: .right, proposed: rect(0, 0, 0.95, 1), minSize: (0.1, 0.1))
+expect("Linked resize stops where the neighbour reaches the minimum size",
+       near(linkedStop[0]!, rect(0, 0, 2.0 / 3 - 0.1, 1)) && abs(linkedStop[1]!.w - 0.1) < 1e-12
+       && linkedStop[2] == nil)
+let linkedDivider = ZoneLinking.resize(stackedL, index: 2, edges: [.left, .top], proposed: rect(0.4, 0.6, 0.6, 0.4),
+                                       minSize: (0.05, 0.05))
+expect("A corner drag moves both linked dividers: three zones follow the vertical one, two the horizontal one",
+       near(linkedDivider[0]!, rect(0, 0, 0.4, 1)) && near(linkedDivider[1]!, rect(0.4, 0, 0.6, 0.6))
+       && near(linkedDivider[2]!, rect(0.4, 0.6, 0.6, 0.4)))
+expect("A screen-edge resize has no neighbours; an unlinked zone stays put",
+       ZoneLinking.resize(thirdsL, index: 0, edges: .left, proposed: rect(0.1, 0, 1.0 / 3 - 0.1, 1), minSize: (0.05, 0.05)).keys.sorted() == [0])
+
+let roomy = [rect(0, 0, 0.25, 1), rect(0.6, 0, 0.2, 0.5)]
+expect("Linked move slides up to a neighbour instead of covering it, and along it on the other axis",
+       near(ZoneLinking.move(roomy, index: 1, to: rect(0.1, 0.3, 0.2, 0.5)), rect(0.25, 0.3, 0.2, 0.5))
+       && near(ZoneLinking.move(roomy, index: 1, to: rect(0.7, 0.2, 0.2, 0.5)), rect(0.7, 0.2, 0.2, 0.5))
+       && near(ZoneLinking.move(thirdsL, index: 1, to: rect(0.4, 0, 1.0 / 3, 1)), thirdsL[1]))
+expect("Zones a Free-mode zone already overlapped do not block its linked move",
+       near(ZoneLinking.move([rect(0, 0, 0.5, 0.5), rect(0.25, 0.25, 0.5, 0.5)], index: 1, to: rect(0.3, 0.3, 0.5, 0.5)),
+            rect(0.3, 0.3, 0.5, 0.5)))
+
+let centreWide = ZoneTemplates.zones("wide-center")
+let equalRow = ZoneLinking.equalized(centreWide, index: 0, horizontal: true)
+expect("Equal widths shares the row evenly and keeps its outer edges; a lone zone is left alone",
+       equalRow.count == 3 && near(equalRow[1]!, rect(1.0 / 3, 0, 1.0 / 3, 1)) && near(equalRow[2]!, rect(2.0 / 3, 0, 1.0 / 3, 1))
+       && ZoneLinking.equalized(centreWide, index: 0, horizontal: false).isEmpty
+       && near(ZoneLinking.equalized([rect(0, 0, 0.2, 1), rect(0.3, 0, 0.6, 1)], index: 1, horizontal: true)[1]!,
+               rect(0.5, 0, 0.4, 1)))
+expect("Centre actions put the zone's centre on the screen's centre line",
+       near(ZoneLinking.centered(rect(0.1, 0.2, 0.3, 0.4), horizontally: true), rect(0.35, 0.2, 0.3, 0.4))
+       && near(ZoneLinking.centered(rect(0.1, 0.2, 0.3, 0.4), horizontally: false), rect(0.1, 0.3, 0.3, 0.4)))
+
+let (centredMove, centreGuides) = ZoneSnapping.move(rect(0.1, 0.1, 0.3, 0.3), by: (0.247, 0.0), others: [], grid: false,
+                                                     snapping: true, threshold: (0.01, 0.01))
+expect("Moving snaps the zone's centre to the screen's centre with a centre guide",
+       near(centredMove, rect(0.35, 0.1, 0.3, 0.3)) && centreGuides == [.init(axis: .x, position: 0.5, kind: .center)]
+       && ZoneSnapping.move(rect(0.1, 0.1, 0.3, 0.3), by: (0.247, 0.0), others: [], grid: false, snapping: false,
+                            threshold: (0.01, 0.01)).1.isEmpty)
+expect("A centred zone whose edges also meet grid lines shows the centre guide",
+       ZoneSnapping.move(rect(0.25, 0.1, 0.5, 0.3), by: (0.003, 0), others: [], grid: true, snapping: true,
+                         threshold: (0.01, 0.01)).1.first == .init(axis: .x, position: 0.5, kind: .center))
+let (equalWidth, equalGuides) = ZoneSnapping.resize(rect(0.5, 0, 0.3, 1), edges: .right, by: (dx: -0.054, dy: 0),
+                                                    others: [rect(0, 0, 0.243, 1)], grid: false, snapping: true,
+                                                    threshold: (0.01, 0.01), minSize: (0.05, 0.05))
+expect("Resizing snaps to another zone's width and marks it as equal size",
+       abs(equalWidth.w - 0.243) < 1e-12 && equalGuides == [.init(axis: .x, position: 0.743, kind: .equalSize)])
+let (drawnEqual, drawnGuides) = ZoneSnapping.draw(from: (0.6, 0.2), to: (0.893, 0.62), others: [rect(0, 0, 0.3, 0.3)],
+                                                  grid: false, snapping: true, threshold: (0.01, 0.01), minSize: (0.05, 0.05))
+expect("Drawing snaps to another zone's size too",
+       abs(drawnEqual.w - 0.3) < 1e-12
+       && drawnGuides.contains { $0.axis == .x && $0.kind == .equalSize && abs($0.position - 0.9) < 1e-12 })
+
+expect("Sizes in points add up across a shared edge and follow the monitor",
+       ZoneMeasure.size(rect(0, 0, 0.25, 1), in: CGSize(width: 3840, height: 1050)) == (960, 1050)
+       && ZoneMeasure.size(rect(1.0 / 3, 0, 1.0 / 3, 1), in: CGSize(width: 1000, height: 10)).w
+          + ZoneMeasure.size(rect(0, 0, 1.0 / 3, 1), in: CGSize(width: 1000, height: 10)).w
+          + ZoneMeasure.size(rect(2.0 / 3, 0, 1.0 / 3, 1), in: CGSize(width: 1000, height: 10)).w == 1000)
+expect("A typed size keeps the centre, stays on screen and respects the minimum",
+       near(ZoneMeasure.resized(rect(0.4, 0.4, 0.2, 0.2), to: (960, 525), in: CGSize(width: 3840, height: 1050), minSize: (0.05, 0.05)),
+            rect(0.375, 0.25, 0.25, 0.5))
+       && near(ZoneMeasure.resized(rect(0.9, 0, 0.1, 0.1), to: (1920, 10), in: CGSize(width: 3840, height: 1050), minSize: (0.05, 0.05)),
+               rect(0.5, 0.025, 0.5, 0.05)))
+
 // MARK: Drag gesture state machine
 
 do {

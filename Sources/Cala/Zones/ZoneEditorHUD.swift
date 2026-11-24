@@ -45,13 +45,19 @@ struct ZoneEditorHUD: View {
             iconButton(tx("Duplicate layout", "Duplicar distribución"), "plus.square.on.square") { session.duplicateLayout() }
             iconButton(tx("Delete layout…", "Eliminar distribución…"), "trash") { session.requestDeleteLayout() }
                 .disabled(session.draft.layouts.count <= 1)
+            iconButton(tx("Undo (⌘Z)", "Deshacer (⌘Z)"), "arrow.uturn.backward") { session.undo() }
+                .disabled(!session.canUndo)
+            iconButton(tx("Redo (⇧⌘Z)", "Rehacer (⇧⌘Z)"), "arrow.uturn.forward") { session.redo() }
+                .disabled(!session.canRedo)
             Spacer(minLength: 12)
             if session.monitors.count > 1 { monitorPicker }
+            linkPicker
             Toggle(isOn: Binding(get: { session.gridEnabled }, set: session.changeGrid)) {
-                Label(tx("Grid", "Cuadrícula"), systemImage: "grid")
+                Label(tx("Grid", "Cuadrícula"), systemImage: "grid").labelStyle(.iconOnly)
             }
             .toggleStyle(.button)
-            .help(tx("Also snap to a 12 × 12 grid", "Ajustar también a una cuadrícula de 12 × 12"))
+            .accessibilityLabel(tx("12 × 12 grid", "Cuadrícula de 12 × 12"))
+            .help(tx("Grid: also snap to a 12 × 12 grid", "Cuadrícula: ajustar también a una cuadrícula de 12 × 12"))
             Button(session.hasChanges ? tx("Cancel", "Cancelar") : tx("Close", "Cerrar"), action: session.requestCancel)
                 .keyboardShortcut(.cancelAction)
             Button(tx("Save", "Guardar"), action: session.save)
@@ -70,7 +76,7 @@ struct ZoneEditorHUD: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(nameFocused ? 0.08 : 0.04)))
-            .frame(minWidth: 140, maxWidth: 260)
+            .frame(width: 230)   // fixed, so the buttons beside it never shift as the name changes
             .focused($nameFocused)
             .onSubmit {
                 nameFocused = false
@@ -78,6 +84,24 @@ struct ZoneEditorHUD: View {
             }
             .help(tx("Click to rename", "Haz clic para cambiar el nombre"))
             .accessibilityLabel(title)
+    }
+
+    /// Linked: zones that touch stay joined (a shared edge moves both; a moved zone never covers another and swaps
+    /// places when dropped on one). Free: each zone on its own, overlaps allowed.
+    private var linkPicker: some View {
+        Picker(tx("Zones", "Zonas"), selection: Binding(get: { session.linked }, set: session.changeLinked)) {
+            Text(tx("Linked", "Unidas")).tag(true)
+            Text(tx("Free", "Libres")).tag(false)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .help(session.linked
+              ? tx("Linked: dragging a shared edge resizes the neighbouring zones too; zones never overlap (drop one on another to swap them)",
+                   "Unidas: al arrastrar un borde compartido también cambian las zonas vecinas; nunca se superponen (suelta una sobre otra para intercambiarlas)")
+              : tx("Free: each zone moves and resizes on its own and may overlap others",
+                   "Libres: cada zona se mueve y cambia de tamaño por su cuenta y puede superponerse"))
+        .accessibilityLabel(tx("Zone editing mode", "Modo de edición de zonas"))
     }
 
     private var monitorPicker: some View {
@@ -148,8 +172,8 @@ struct ZoneEditorHUD: View {
             return tx("Drag on the screen to draw a zone · Hold ⌥ to turn off snapping",
                       "Arrastra sobre la pantalla para dibujar una zona · Mantén ⌥ para desactivar el ajuste")
         }
-        return tx("Drag a zone to move it, its edges to resize · Drag empty space, or hold ⇧ over zones, to draw · ⌥ turns off snapping",
-                  "Arrastra una zona para moverla, sus bordes para cambiar su tamaño · Arrastra en un espacio vacío, o mantén ⇧ sobre las zonas, para dibujar · ⌥ desactiva el ajuste")
+        return tx("Drag a zone or its edges · Empty space or ⇧ draws · ⌥ no snapping · Arrows nudge · Double-click: exact size · Right-click: centre, equal widths",
+                  "Arrastra una zona o sus bordes · Espacio vacío o ⇧ dibuja · ⌥ sin ajuste · Flechas: mover · Doble clic: tamaño exacto · Clic derecho: centrar, igualar anchos")
     }
 }
 
@@ -278,6 +302,14 @@ struct ZoneEditorDialog: View {
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
+        if case let .zoneSize(id) = dialog {
+            ZoneSizeDialog(session: session, id: id)
+        } else {
+            message
+        }
+    }
+
+    private var message: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title).font(.headline).accessibilityAddTraits(.isHeader)
             if let detail {
@@ -311,6 +343,7 @@ struct ZoneEditorDialog: View {
         case .discard: tx("Discard changes to zones?", "¿Descartar los cambios en las zonas?")
         case .deleteLayout: tx("Delete layout?", "¿Eliminar la distribución?")
         case .saveError: tx("Couldn’t save zones", "No se pudieron guardar las zonas")
+        case .zoneSize: ""
         }
     }
 
@@ -320,6 +353,7 @@ struct ZoneEditorDialog: View {
         case let .deleteLayout(_, name):
             tx("“\(name)” will be removed when you save.", "«\(name)» se eliminará al guardar.")
         case let .saveError(message): message
+        case .zoneSize: nil
         }
     }
 
@@ -327,7 +361,68 @@ struct ZoneEditorDialog: View {
         switch dialog {
         case .discard: tx("Discard changes", "Descartar cambios")
         case .deleteLayout: tx("Delete layout", "Eliminar distribución")
-        case .saveError: nil
+        case .saveError, .zoneSize: nil
         }
+    }
+}
+
+/// "Zone size": width and height in the monitor's points, applied around the zone's centre.
+private struct ZoneSizeDialog: View {
+    let session: ZoneEditorSession
+    let id: UUID
+    @State private var width = ""
+    @State private var height = ""
+    @FocusState private var widthFocused: Bool
+
+    var body: some View {
+        let zones = session.layout?.zones ?? []
+        let number = (zones.firstIndex { $0.id == id } ?? 0) + 1
+        VStack(alignment: .leading, spacing: 12) {
+            Text(tx("Size of zone \(number)", "Tamaño de la zona \(number)")).font(.headline).accessibilityAddTraits(.isHeader)
+            HStack(spacing: 8) {
+                field(tx("Width", "Ancho"), text: $width).focused($widthFocused)
+                Text("×").flyoutSecondary()
+                field(tx("Height", "Alto"), text: $height)
+                Text(tx("pt", "pt")).flyoutSecondary()
+            }
+            Text(tx("The size macOS uses for this monitor (\(Int(session.usable.width)) × \(Int(session.usable.height)) usable). The zone keeps its centre.",
+                    "El tamaño que macOS usa en esta pantalla (\(Int(session.usable.width)) × \(Int(session.usable.height)) útiles). La zona mantiene su centro."))
+                .font(.caption).flyoutSecondary().fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button(tx("Cancel", "Cancelar"), action: session.dismissDialog).keyboardShortcut(.cancelAction)
+                Button(tx("Apply", "Aplicar"), action: apply)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(Double(width) == nil || Double(height) == nil)
+            }
+        }
+        .buttonStyle(.bordered)
+        .padding(16)
+        .frame(width: 330, alignment: .leading)
+        .themedPanel(radius: 14, theme: session.theme)
+        .onAppear {
+            if let zone = zones.first(where: { $0.id == id }) {
+                let size = session.pointSize(of: zone.rect)
+                width = String(size.w)
+                height = String(size.h)
+            }
+            widthFocused = true
+        }
+    }
+
+    private func field(_ title: String, text: Binding<String>) -> some View {
+        TextField(title, text: text)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 80)
+            .multilineTextAlignment(.trailing)
+            .onSubmit(apply)
+            .accessibilityLabel(title)
+    }
+
+    private func apply() {
+        guard let w = Double(width.trimmingCharacters(in: .whitespaces)),
+              let h = Double(height.trimmingCharacters(in: .whitespaces)) else { NSSound.beep(); return }
+        session.setSize(id, width: w, height: h)
     }
 }

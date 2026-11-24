@@ -14,6 +14,14 @@ final class ZoneEditor: NSObject {
         }
     }
 
+    var linked: Bool {
+        get { ConfigStore.shared.config.zonesEditorLinked }
+        set {
+            ConfigStore.shared.config.zonesEditorLinked = newValue
+            session?.linked = newValue
+        }
+    }
+
     var isOpen: Bool { window != nil }
 
     private var window: ZoneEditorWindow?
@@ -67,7 +75,7 @@ final class ZoneEditor: NSObject {
             return
         }
         guard let screen = NSScreen.screens.first else { return }
-        let session = ZoneEditorSession(state: store.state, gridEnabled: gridEnabled,
+        let session = ZoneEditorSession(state: store.state, gridEnabled: gridEnabled, linked: linked,
                                         theme: BarTheme.named(ConfigStore.shared.config.theme))
         let window = ZoneEditorWindow(contentRect: screen.frame, styleMask: [.borderless],
                                       backing: .buffered, defer: false)
@@ -95,6 +103,7 @@ final class ZoneEditor: NSObject {
         self.barIsRunning = barIsRunning
         session.selectDisplay = { [weak self] key in self?.showDisplay(key: key, selectLayout: true) }
         session.changeGrid = { [weak self] enabled in self?.gridEnabled = enabled }
+        session.changeLinked = { [weak self] linked in self?.linked = linked }
         session.save = { [weak self] in self?.save() }
         session.discard = { [weak self] in self?.close() }
         showDisplay(key: displayKey, selectLayout: true)
@@ -199,7 +208,7 @@ final class ZoneEditor: NSObject {
             state.layouts[index] = layout
         }
         state.defaultLayout = layout.id
-        let session = ZoneEditorSession(state: state, gridEnabled: true, theme: .named("graphite"))
+        let session = ZoneEditorSession(state: state, gridEnabled: true, linked: true, theme: .named("graphite"))
         session.monitors = [.init(key: "sample", name: tx("Right display", "Pantalla derecha"), size: "1280 × 800"),
                             .init(key: "external", name: tx("Left display", "Pantalla izquierda"), size: "3840 × 1080")]
         let bounds = CGRect(origin: .zero, size: size)
@@ -267,8 +276,16 @@ private final class ZoneEditorWindow: NSWindow {
             case "d":
                 if session?.dialog == nil { session?.duplicateZone() }
                 return true
+            case "z" where !(firstResponder is NSText):
+                if session?.dialog == nil { session?.undo() }
+                return true
             default: break
             }
+        }
+        // ⇧⌘Z redoes; while the layout name is being typed, the text field keeps its own undo.
+        if modifiers == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "z", !(firstResponder is NSText) {
+            if session?.dialog == nil { session?.redo() }
+            return true
         }
         return super.performKeyEquivalent(with: event)
     }
@@ -291,12 +308,15 @@ final class ZoneEditorSession {
         var zoneID: UUID?
         var rect: ZoneRect
         var guides: [ZoneSnapping.Guide]
+        /// Other zones that change with this gesture: linked neighbours, or the zone a moved zone swaps with.
+        var others: [UUID: ZoneRect] = [:]
     }
 
     enum Dialog {
         case discard
         case deleteLayout(UUID, name: String)
         case saveError(String)
+        case zoneSize(UUID)
     }
 
     let original: ZonesState
@@ -315,19 +335,29 @@ final class ZoneEditorSession {
     var preview: Preview?
     var hudCollapsed = false
     var gridEnabled: Bool
+    /// Linked: shared edges move together and moves never overlap. Free: every zone on its own (`zonesEditorLinked`).
+    var linked: Bool
     /// Bumped to put the cursor in the layout-name field (a new or duplicated layout, or "Rename").
     var renameRequest = 0
     private(set) var dialog: Dialog?
 
     var selectDisplay: (String) -> Void = { _ in }
     var changeGrid: (Bool) -> Void = { _ in }
+    var changeLinked: (Bool) -> Void = { _ in }
     var save: () -> Void = {}
     var discard: () -> Void = {}
 
-    init(state: ZonesState, gridEnabled: Bool, theme: BarTheme) {
+    /// Editor-session undo: each entry is the draft and the layout on the canvas before one change.
+    private var undoStack: [(ZonesState, UUID?)] = []
+    private var redoStack: [(ZonesState, UUID?)] = []
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
+
+    init(state: ZonesState, gridEnabled: Bool, linked: Bool, theme: BarTheme) {
         original = state
         draft = state
         self.gridEnabled = gridEnabled
+        self.linked = linked
         self.theme = theme
         layoutID = state.defaultLayout ?? state.layouts.first?.id
     }
@@ -381,10 +411,40 @@ final class ZoneEditorSession {
     /// The gallery's click: the layout goes on the canvas and becomes the one this monitor uses (on Save).
     func select(_ id: UUID) {
         guard draft.layouts.contains(where: { $0.id == id }) else { return }
-        show(id)
         if isOff || draft.layout(forDisplay: displayKey)?.id != id {
+            record()
+            show(id)
             draft.activeByDisplay[displayKey] = id.uuidString
+        } else {
+            show(id)
         }
+    }
+
+    // MARK: Undo
+
+    /// Call before every change to the draft.
+    private func record() {
+        undoStack.append((draft, layoutID))
+        if undoStack.count > 200 { undoStack.removeFirst() }
+        redoStack.removeAll()
+    }
+
+    /// Drops the step just recorded when the change turned out to change nothing (a blocked move, a zone already centred).
+    private func dropIfUnchanged() {
+        if let last = undoStack.last, last.0 == draft { undoStack.removeLast() }
+    }
+
+    func undo() { step(from: &undoStack, to: &redoStack) }
+    func redo() { step(from: &redoStack, to: &undoStack) }
+
+    private func step(from source: inout [(ZonesState, UUID?)], to target: inout [(ZonesState, UUID?)]) {
+        guard let (state, shown) = source.popLast() else { NSSound.beep(); return }
+        target.append((draft, layoutID))
+        draft = state
+        let keep = selectedZone
+        show(draft.layouts.contains { $0.id == shown } ? shown : draft.layout(forDisplay: displayKey)?.id ?? draft.defaultLayout)
+        if layout?.zones.contains(where: { $0.id == keep }) == true { selectedZone = keep }
+        focusCanvas()
     }
 
     private func resetGesture() {
@@ -417,15 +477,17 @@ final class ZoneEditorSession {
         switch dialog {
         case .discard: discard()
         case let .deleteLayout(id, _):
+            record()
             if draft.delete(id) { show(draft.layout(forDisplay: displayKey)?.id ?? draft.defaultLayout) }
             dismissDialog()
-        case .saveError, nil: dismissDialog()
+        case .saveError, .zoneSize, nil: dismissDialog()
         }
     }
 
     // MARK: Layouts
 
     private func insert(_ layout: ZoneLayout, rename: Bool) {
+        record()
         draft.layouts.append(layout)
         select(layout.id)
         if rename { renameRequest += 1 }
@@ -444,6 +506,7 @@ final class ZoneEditorSession {
         guard let source = draft.layouts.first(where: { $0.id == (id ?? layoutID) }) else { return }
         let name = ZoneEditing.uniqueName(tx("\(Self.displayName(source)) copy", "Copia de \(Self.displayName(source))"),
                                           existing: draft.layouts.map(\.name))
+        record()
         let copy = draft.duplicate(source.id, name: name)
         select(copy)
         renameRequest += 1
@@ -456,6 +519,7 @@ final class ZoneEditorSession {
 
     func restoreOriginal(_ id: UUID) {
         guard let index = draft.layouts.firstIndex(where: { $0.id == id }) else { return }
+        record()
         draft.layouts[index] = ZoneTemplates.restored(draft.layouts[index])
         select(id)
     }
@@ -469,16 +533,42 @@ final class ZoneEditorSession {
 
     func apply(_ preview: Preview) {
         guard let layoutIndex else { return }
+        record()
         if let id = preview.zoneID {
             guard let index = draft.layouts[layoutIndex].zones.firstIndex(where: { $0.id == id }) else { return }
             draft.layouts[layoutIndex].zones[index].rect = preview.rect
         } else {
             selectedZone = draft.layouts[layoutIndex].addZone(preview.rect)
         }
+        for (id, rect) in preview.others {
+            if let index = draft.layouts[layoutIndex].zones.firstIndex(where: { $0.id == id }) {
+                draft.layouts[layoutIndex].zones[index].rect = rect
+            }
+        }
+        dropIfUnchanged()
+    }
+
+    /// Replaces zone rects by index of the current layout's zones (one undo step).
+    private func setRects(_ changes: [Int: ZoneRect]) {
+        guard let layoutIndex, !changes.isEmpty else { return }
+        record()
+        for (index, rect) in changes where draft.layouts[layoutIndex].zones.indices.contains(index) {
+            draft.layouts[layoutIndex].zones[index].rect = rect
+        }
+        dropIfUnchanged()
+        resetGesture()
+    }
+
+    private var selectedIndex: Int? { layout?.zones.firstIndex { $0.id == selectedZone } }
+
+    /// The smallest zone a gesture may leave: 5 % of the screen or 80 pt, whichever is larger.
+    var minimumSize: (w: Double, h: Double) {
+        (max(0.05, 80 / max(1, Double(usable.width))), max(0.05, 80 / max(1, Double(usable.height))))
     }
 
     func addZone() {
         guard let layoutIndex else { return }
+        record()
         let rect = ZoneEditing.newZoneRect(existing: draft.layouts[layoutIndex].zones.map(\.rect))
         selectedZone = draft.layouts[layoutIndex].addZone(rect)
         resetGesture()
@@ -487,6 +577,7 @@ final class ZoneEditorSession {
 
     func deleteZone() {
         guard let layoutIndex, let selectedZone else { return }
+        record()
         draft.layouts[layoutIndex].zones.removeAll { $0.id == selectedZone }
         self.selectedZone = nil
         resetGesture()
@@ -495,7 +586,54 @@ final class ZoneEditorSession {
 
     func duplicateZone() {
         guard let layoutIndex, let zone = layout?.zones.first(where: { $0.id == selectedZone }) else { return }
+        record()
         selectedZone = draft.layouts[layoutIndex].addZone(zone.rect)
         resetGesture()
     }
+
+    func centerZone(horizontally: Bool) {
+        guard let index = selectedIndex, let zone = layout?.zones[index] else { return }
+        setRects([index: ZoneLinking.centered(zone.rect, horizontally: horizontally)])
+    }
+
+    /// Equal widths for the selected zone's row (horizontally) or heights for its column.
+    func equalizeZones(horizontally: Bool) {
+        guard let index = selectedIndex, let zones = layout?.zones.map(\.rect) else { return }
+        setRects(ZoneLinking.equalized(zones, index: index, horizontal: horizontally))
+    }
+
+    /// Whether the selected zone has row (or column) mates to share sizes with.
+    func canEqualize(horizontally: Bool) -> Bool {
+        guard let index = selectedIndex, let zones = layout?.zones.map(\.rect) else { return false }
+        let zone = zones[index]
+        return zones.filter { other in
+            horizontally ? abs(other.y - zone.y) <= ZoneLinking.tolerance && abs(other.h - zone.h) <= ZoneLinking.tolerance
+                : abs(other.x - zone.x) <= ZoneLinking.tolerance && abs(other.w - zone.w) <= ZoneLinking.tolerance
+        }.count > 1
+    }
+
+    /// Arrow keys: 8 pt, or a twelfth of the screen with Shift. Linked mode never moves onto another zone.
+    func nudge(dx: Double, dy: Double, large: Bool) {
+        guard let index = selectedIndex, let zones = layout?.zones.map(\.rect), usable.width > 0, usable.height > 0 else { return }
+        let step = large ? (1.0 / 12, 1.0 / 12) : (8 / Double(usable.width), 8 / Double(usable.height))
+        let zone = zones[index]
+        let moved = ZoneGeometry.clamp(ZoneRect(x: zone.x + dx * step.0, y: zone.y + dy * step.1, w: zone.w, h: zone.h),
+                                       minW: 0, minH: 0)
+        let target = linked ? ZoneLinking.move(zones, index: index, to: moved) : moved
+        if target != zone { setRects([index: target]) }
+    }
+
+    func requestSize() {
+        guard let selectedZone else { return }
+        present(.zoneSize(selectedZone))
+    }
+
+    /// The size typed in the size dialog, in points.
+    func setSize(_ id: UUID, width: Double, height: Double) {
+        guard let index = layout?.zones.firstIndex(where: { $0.id == id }), let zone = layout?.zones[index] else { return }
+        setRects([index: ZoneMeasure.resized(zone.rect, to: (width, height), in: usable.size, minSize: minimumSize)])
+        dismissDialog()
+    }
+
+    func pointSize(of rect: ZoneRect) -> (w: Int, h: Int) { ZoneMeasure.size(rect, in: usable.size) }
 }
