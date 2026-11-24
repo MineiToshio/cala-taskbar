@@ -118,6 +118,7 @@ private struct ZoneEditorArtwork: View {
         let equalColor = StatusColor.color(.ok, dark: dark)
         let selection = session.selection
         let cut = session.splitPreview
+        let panel = session.hudFrame
         let cutHint = tx("Click to split · ⇧ turns the cut", "Clic para dividir · ⇧ gira el corte")
         Canvas { context, size in
             func flipped(_ rect: CGRect) -> CGRect {
@@ -186,6 +187,8 @@ private struct ZoneEditorArtwork: View {
                 let outline = Path(roundedRect: aligned.insetBy(dx: width / 2, dy: width / 2), cornerRadius: 3)
                 context.fill(outline, with: .color(theme.accent.opacity(active ? 0.24 : affected ? 0.15 : 0.07)))
                 context.stroke(outline, with: .color(theme.accent.opacity(active || affected ? 1 : 0.7)), lineWidth: width)
+                // Labels go in the part of the zone the panel does not cover.
+                let rect = Self.visiblePart(of: rect, hiddenBy: panel)
                 guard rect.width >= 30, rect.height >= 24 else { return }
                 let showSize = rect.width >= 84 && rect.height >= 64
                 let label = Text(number.formatted()).font(.system(size: active ? 28 : 20, weight: .semibold, design: .rounded))
@@ -224,10 +227,15 @@ private struct ZoneEditorArtwork: View {
                 // Beside the cut, clear of the zone's number and size in its middle.
                 let anchor = cut.vertical ? CGPoint(x: r.midX + size.width / 2 + 18, y: zoneFrame.midY + 64)
                     : CGPoint(x: zoneFrame.minX + size.width / 2 + 24, y: r.midY - 18)
-                let pill = CGRect(x: anchor.x - size.width / 2 - 8, y: anchor.y - size.height / 2 - 4,
+                var pill = CGRect(x: anchor.x - size.width / 2 - 8, y: anchor.y - size.height / 2 - 4,
                                   width: size.width + 16, height: size.height + 8)
+                // Near the screen's right edge the tip flips to the other side of the cut; it always stays inside.
+                if cut.vertical && pill.maxX > work.maxX - 8 { pill.origin.x = r.midX - 18 - pill.width }
+                pill.origin.x = min(max(pill.minX, work.minX + 8), work.maxX - 8 - pill.width)
+                pill.origin.y = min(max(pill.minY, work.minY + 8), work.maxY - 8 - pill.height)
+                let anchorPoint = CGPoint(x: pill.midX, y: pill.midY)
                 context.fill(Path(roundedRect: pill, cornerRadius: pill.height / 2), with: .color(.black.opacity(0.72)))
-                context.draw(text, at: anchor)
+                context.draw(text, at: anchorPoint)
             }
             if let activeRect {
                 let rect = frame(activeRect)
@@ -246,6 +254,23 @@ private struct ZoneEditorArtwork: View {
                 }
             }
         }
+    }
+}
+
+extension ZoneEditorArtwork {
+    /// The largest part of `rect` outside `panel` (below, above, left or right of it); `rect` itself when they do
+    /// not meet. Zone labels are centred there, so the panel never hides a zone's number.
+    static func visiblePart(of rect: CGRect, hiddenBy panel: CGRect) -> CGRect {
+        guard !panel.isEmpty, panel.intersects(rect) else { return rect }
+        // (x, y, width, height) as numbers: a CGRect would turn a negative size into a positive one.
+        let parts: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [
+            (rect.minX, max(rect.minY, panel.maxY), rect.width, rect.maxY - max(rect.minY, panel.maxY)),
+            (rect.minX, rect.minY, rect.width, min(rect.maxY, panel.minY) - rect.minY),
+            (rect.minX, rect.minY, min(rect.maxX, panel.minX) - rect.minX, rect.height),
+            (max(rect.minX, panel.maxX), rect.minY, rect.maxX - max(rect.minX, panel.maxX), rect.height)
+        ]
+        let best = parts.filter { $0.2 > 0 && $0.3 > 0 }.max { $0.2 * $0.3 < $1.2 * $1.3 }
+        return best.map { CGRect(x: $0.0, y: $0.1, width: $0.2, height: $0.3) } ?? rect
     }
 }
 

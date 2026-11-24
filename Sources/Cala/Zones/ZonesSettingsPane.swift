@@ -153,21 +153,15 @@ struct ZonesSettingsPane: View {
             if let store = layoutStore {
                 Button(tx("Change…", "Cambiar…")) { choosingFor = monitor.key }
                     .accessibilityLabel(tx("Change the layout on \(monitor.name)", "Cambiar la distribución en \(monitor.name)"))
+                    // Opens below the row, so the row's own buttons stay visible (Edit Zones… is right there).
                     .popover(isPresented: Binding(get: { choosingFor == monitor.key },
-                                                  set: { if !$0 { choosingFor = nil } }), arrowEdge: .trailing) {
+                                                  set: { if !$0 { choosingFor = nil } }), arrowEdge: .bottom) {
                         VStack(alignment: .leading, spacing: 12) {
                             Text(tx("Layout on \(monitor.name)", "Distribución en \(monitor.name)")).font(.headline)
                             layoutGrid(monitor, store: store)
-                            HStack {
-                                Spacer()
-                                Button(tx("Edit Zones…", "Editar zonas…")) {
-                                    choosingFor = nil
-                                    ZonesModule.openEditor?(monitor.key)
-                                }
-                            }
                         }
                         .padding(16)
-                        .frame(width: 470)
+                        .frame(width: 500)
                     }
             }
             Button(tx("Edit Zones…", "Editar zonas…")) { ZonesModule.openEditor?(monitor.key) }
@@ -225,11 +219,13 @@ private struct LayoutTile<Picture: View>: View {
                         RoundedRectangle(cornerRadius: 7)
                             .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(0.12), lineWidth: selected ? 2 : 1)
                     }
+                // Two lines, so names like "Principal + dos apiladas" are read whole.
                 Text(name)
                     .font(.system(size: 10.5, weight: selected ? .semibold : .regular))
                     .foregroundStyle(selected ? .primary : .secondary)
-                    .lineLimit(1).truncationMode(.tail)
-                    .frame(maxWidth: LayoutTileMetrics.box.width + 10)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2).truncationMode(.tail)
+                    .frame(width: LayoutTileMetrics.box.width + 10, height: 28, alignment: .top)
             }
             .contentShape(Rectangle())
         }

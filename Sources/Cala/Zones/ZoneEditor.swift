@@ -200,7 +200,7 @@ final class ZoneEditor: NSObject {
         }
         state.defaultLayout = layout.id
         let session = ZoneEditorSession(state: state, gridEnabled: true, theme: .named(theme))
-        session.monitors = [.init(key: "sample", name: tx("Right display", "Pantalla derecha"), size: "1280 × 800"),
+        session.monitors = [.init(key: "sample", name: tx("Right display", "Pantalla derecha"), size: "1512 × 982"),
                             .init(key: "external", name: tx("Left display", "Pantalla izquierda"), size: "3840 × 1080")]
         let bounds = CGRect(origin: .zero, size: size)
         // Include the area reserved for the menu bar in the sample.
@@ -221,6 +221,9 @@ final class ZoneEditor: NSObject {
             .environment(\.displayScale, scale)
             .environment(\.controlActiveState, .active))
         window.contentView = view
+        view.layoutSubtreeIfNeeded()
+        // A second pass once the panel has reported its frame, so zone labels move out from under it.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         view.layoutSubtreeIfNeeded()
         guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width), pixelsHigh: Int(height),
                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -321,11 +324,14 @@ final class ZoneEditorSession {
     /// Width / height of the edited monitor, so the gallery pictures have its shape.
     private(set) var aspect = 16.0 / 10
     @ObservationIgnored weak var canvas: ZoneCanvasView?
-    @ObservationIgnored var hudFrame = CGRect.zero
+    /// The panel's frame on the canvas: zone labels avoid it, the cursor ignores it.
+    var hudFrame = CGRect.zero
     var monitors: [Monitor] = []
     var selectedZone: UUID?
     var preview: Preview?
     var hudCollapsed = false
+    /// The "?" shortcuts popover.
+    var showsHelp = false
     var gridEnabled: Bool
     /// Zones besides `selectedZone` picked with ⇧-click, for Merge.
     var extraSelection: Set<UUID> = []
@@ -468,6 +474,8 @@ final class ZoneEditorSession {
     }
 
     func requestCancel() {
+        // Esc with the shortcuts popover open closes only the popover (it never takes the editor's key focus).
+        if showsHelp { showsHelp = false; return }
         if dialog != nil { dismissDialog() }
         else if hasChanges { present(.discard) }
         else { discard() }

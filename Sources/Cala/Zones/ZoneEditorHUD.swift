@@ -25,7 +25,6 @@ struct ZoneEditorHUD: View {
     let session: ZoneEditorSession
     @Environment(\.colorScheme) private var scheme
     @FocusState private var nameFocused: Bool
-    @State private var showsHelp = false
 
     var body: some View {
         if session.hudCollapsed {
@@ -64,9 +63,9 @@ struct ZoneEditorHUD: View {
     private var header: some View {
         HStack(spacing: 6) {
             nameField
-            layoutMenu
             Spacer(minLength: 12)
             if session.monitors.count > 1 { monitorPicker }
+            layoutMenu
             helpButton
             collapseButton
         }
@@ -112,9 +111,10 @@ struct ZoneEditorHUD: View {
             Toggle(tx("Snap to a 12 × 12 Grid", "Ajustar a una cuadrícula de 12 × 12"),
                    isOn: Binding(get: { session.gridEnabled }, set: session.changeGrid))
         } label: {
-            Image(systemName: "ellipsis.circle")
+            Image(systemName: "ellipsis")
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
         .menuIndicator(.hidden)
         .fixedSize()
         .help(tx("Layout: rename, duplicate, delete, undo, grid", "Distribución: renombrar, duplicar, eliminar, deshacer, cuadrícula"))
@@ -134,14 +134,16 @@ struct ZoneEditorHUD: View {
     }
 
     private var helpButton: some View {
-        Button { showsHelp.toggle() } label: {
+        Button { session.showsHelp.toggle() } label: {
             Image(systemName: "questionmark")
         }
         .buttonStyle(.bordered)
         .clipShape(Circle())
         .help(tx("Mouse and keyboard shortcuts", "Atajos de ratón y teclado"))
         .accessibilityLabel(tx("Shortcuts", "Atajos"))
-        .popover(isPresented: $showsHelp, arrowEdge: .bottom) { ZoneEditorShortcuts() }
+        .popover(isPresented: Binding(get: { session.showsHelp }, set: { session.showsHelp = $0 }), arrowEdge: .bottom) {
+            ZoneEditorShortcuts()
+        }
     }
 
     private var collapseButton: some View {
@@ -167,10 +169,11 @@ struct ZoneEditorHUD: View {
                 Label(ZoneModeText.summary(session.mode), systemImage: ZoneModeText.symbol(session.mode))
                     .font(.callout.weight(.medium))
                 Text(session.notice ?? hint)
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(session.notice == nil ? FlyoutStyle.secondary(dark: scheme == .dark)
                                      : StatusColor.color(.attention, dark: scheme == .dark))
-                    .lineLimit(2)
+                    .lineLimit(session.notice == nil ? 1 : 2)
+                    .truncationMode(.tail)
                     .animation(.easeOut(duration: 0.15), value: session.notice)
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -184,7 +187,7 @@ struct ZoneEditorHUD: View {
             }
             Spacer(minLength: 12)
             if session.isOff {
-                Label(tx("Off on this monitor", "Desactivadas en esta pantalla"), systemImage: "pause.circle")
+                Label(tx("Off on this monitor", "Desactivadas en esta pantalla"), systemImage: "nosign")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(StatusColor.color(.attention, dark: scheme == .dark))
                     .help(tx("Zones are off on this monitor: click a layout to turn them on",
@@ -202,6 +205,9 @@ struct ZoneEditorHUD: View {
             Text(tx("Save", "Guardar")).frame(minWidth: 72)
         }
         .buttonStyle(.borderedProminent)
+        // The system accent, a fifth darker: white text stays above 4.5:1 in light and dark (a theme's pale
+        // accent made it about 2:1).
+        .tint(Color(nsColor: NSColor.controlAccentColor.blended(withFraction: 0.2, of: .black) ?? .controlAccentColor))
         .controlSize(session.hudCollapsed ? .small : .large)
         .help(tx("Save and close (Return or ⌘S)", "Guardar y cerrar (Retorno o ⌘S)"))
     }
@@ -223,27 +229,28 @@ struct ZoneEditorHUD: View {
         .accessibilityLabel(tx("Layout type", "Tipo de distribución"))
     }
 
+    /// One short line; the rest is in "?".
     private var hint: String {
         if session.linked {
             return session.selectedZone == nil
-                ? tx("Click a zone to select it. Drag the line between two zones to resize them.",
-                     "Haz clic en una zona para seleccionarla. Arrastra la línea entre dos zonas para cambiar su tamaño.")
-                : tx("Click inside the selected zone to split it there. ⇧-click other zones to merge them.",
-                     "Haz clic dentro de la zona seleccionada para dividirla ahí. ⇧-clic en otras zonas para unirlas.")
+                ? tx("Click a zone to select it; drag the lines between zones to resize.",
+                     "Haz clic en una zona para elegirla; arrastra las líneas para redimensionar.")
+                : tx("Click inside the selected zone to split it there.",
+                     "Haz clic dentro de la zona elegida para dividirla ahí.")
         }
         if session.layout?.zones.isEmpty ?? true {
             return tx("Drag on the screen to draw a zone.", "Arrastra sobre la pantalla para dibujar una zona.")
         }
-        return tx("Drag on empty space to draw a zone; drag a zone or its edges to move or resize it.",
-                  "Arrastra en un espacio vacío para dibujar una zona; arrastra una zona o sus bordes para moverla o cambiar su tamaño.")
+        return tx("Drag on empty space to draw; drag a zone to move it.",
+                  "Arrastra en un hueco para dibujar; arrastra una zona para moverla.")
     }
 }
 
-/// The "?" popover: everything the mouse and keyboard can do, grouped.
+/// The "?" popover: everything the mouse and keyboard can do, in one grid so the key column lines up.
 private struct ZoneEditorShortcuts: View {
     var body: some View {
-        let rows: [(String, [(String, String)])] = [
-            (tx("Both types", "Ambos tipos"), [
+        let sections: [(String, [(String, String)])] = [
+            (tx("In both modes", "En los dos modos"), [
                 (tx("Click", "Clic"), tx("Select a zone", "Seleccionar una zona")),
                 (tx("⇧-click", "⇧-clic"), tx("Add a zone to the selection", "Añadir una zona a la selección")),
                 (tx("Right-click", "Clic derecho"), tx("The selected zone's actions", "Acciones de la zona seleccionada")),
@@ -254,33 +261,34 @@ private struct ZoneEditorShortcuts: View {
             ]),
             (ZoneModeText.name(.linked), [
                 (tx("Click the selected zone", "Clic en la zona seleccionada"), tx("Split it at the dashed line (⇧ turns it)", "Dividirla por la línea discontinua (⇧ la gira)")),
-                (tx("Drag a line between zones", "Arrastrar una línea entre zonas"), tx("Resize the zones on both sides", "Cambiar el tamaño de las zonas de ambos lados")),
+                (tx("Drag a line between zones", "Arrastrar una línea entre zonas"), tx("Resize the zones on both sides", "Redimensionar las zonas de ambos lados")),
                 (tx("Drop a zone on another", "Soltar una zona sobre otra"), tx("Swap them", "Intercambiarlas"))
             ]),
             (ZoneModeText.name(.free), [
-                (tx("Drag on empty space", "Arrastrar en un espacio vacío"), tx("Draw a zone (⇧ also over zones)", "Dibujar una zona (con ⇧ también sobre zonas)")),
-                (tx("Arrow keys", "Flechas"), tx("Move 8 pt (⇧ a twelfth of the screen)", "Mover 8 pt (⇧ una doceava parte)")),
+                (tx("Drag on empty space", "Arrastrar en un hueco"), tx("Draw a zone (with ⇧, also over others)", "Dibujar una zona (con ⇧, también encima de otras)")),
+                (tx("Arrow keys", "Flechas"), tx("Move 8 pt (⇧ 1/12 of the screen)", "Mover 8 pt (⇧ 1/12 de la pantalla)")),
                 (tx("Double-click", "Doble clic"), tx("Type an exact size", "Escribir un tamaño exacto")),
                 ("⌘D", tx("Duplicate the zone", "Duplicar la zona"))
             ])
         ]
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(rows, id: \.0) { section in
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(section.0).font(.headline)
-                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
-                        ForEach(section.1, id: \.0) { row in
-                            GridRow {
-                                Text(row.0).font(.callout.weight(.medium))
-                                Text(row.1).font(.callout).foregroundStyle(.secondary)
-                            }
-                        }
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
+            ForEach(Array(sections.enumerated()), id: \.offset) { index, section in
+                GridRow {
+                    Text(section.0).font(.headline).padding(.top, index == 0 ? 0 : 8)
+                        .gridCellColumns(2)
+                }
+                ForEach(section.1, id: \.0) { row in
+                    GridRow {
+                        Text(row.0).font(.callout.weight(.medium)).lineLimit(1)
+                            .frame(width: 230, alignment: .leading)
+                        Text(row.1).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                            .fixedSize()
                     }
                 }
             }
         }
         .padding(16)
-        .frame(width: 470, alignment: .leading)
+        .fixedSize()
     }
 }
 
@@ -290,12 +298,16 @@ private struct ZoneEditorGallery: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.themeAccent) private var accent
     private static let box = CGSize(width: 104, height: 54)
+    private static let fade: CGFloat = 20
 
     var body: some View {
         // "+" stays in view at the start; the pictures scroll when they do not fit.
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 10) {
             addTile
                 .padding(.vertical, 2)
+            Divider()
+                .frame(height: Self.box.height + 12)
+                .padding(.top, 2)
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 8) {
@@ -304,7 +316,16 @@ private struct ZoneEditorGallery: View {
                         }
                     }
                     .padding(.vertical, 2)
-                    .padding(.horizontal, 2)
+                    // As wide as the fades, so at either end the first and last pictures are whole and clear.
+                    .padding(.horizontal, Self.fade)
+                }
+                // Soft edges say "there is more" where pictures scroll out of sight.
+                .mask {
+                    HStack(spacing: 0) {
+                        LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: Self.fade)
+                        Color.black
+                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: Self.fade)
+                    }
                 }
                 .onAppear { scroll(proxy, animated: false) }
                 .onChange(of: session.layoutID) { scroll(proxy, animated: true) }
@@ -316,7 +337,9 @@ private struct ZoneEditorGallery: View {
 
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool) {
         guard let id = session.layoutID else { return }
-        if animated { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id) } } else { proxy.scrollTo(id) }
+        // Centred, so the selected picture is whole and its neighbours show on both sides (the start and end clamp).
+        if animated { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) } }
+        else { proxy.scrollTo(id, anchor: .center) }
     }
 
     private func tile(_ layout: ZoneLayout) -> some View {

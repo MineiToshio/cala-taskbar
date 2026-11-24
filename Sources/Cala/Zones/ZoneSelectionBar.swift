@@ -78,10 +78,11 @@ struct ZoneSelectionBar: View {
     }
 
     private var deleteButton: some View {
-        Button(role: .destructive) { session.deleteZone() } label: {
+        Button(role: session.canDeleteZone ? .destructive : nil) { session.deleteZone() } label: {
             Label(tx("Delete", "Eliminar"), systemImage: "trash")
         }
-        .tint(StatusColor.color(.critical, dark: scheme == .dark))
+        // Red only when it can act; disabled it is the standard grey (the tooltip says why).
+        .tint(session.canDeleteZone ? StatusColor.color(.critical, dark: scheme == .dark) : nil)
         .disabled(!session.canDeleteZone)
         .help(session.linked
               ? (session.canDeleteZone ? tx("Its space goes to a neighbour that shares a whole side", "Su espacio pasa a una vecina que comparte un lado entero")
