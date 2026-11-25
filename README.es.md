@@ -185,7 +185,7 @@ Necesitas las herramientas de línea de comandos de Xcode (`xcode-select --insta
 
 ```bash
 git clone https://github.com/MineiToshio/cala-taskbar.git && cd cala-taskbar
-./install.sh            # compila e instala en ~/Applications y la abre
+./install.sh            # compila, instala en /Applications para todas las cuentas y abre Cala
 ```
 
 `./build.sh` y `./scripts/make-dmg.sh` generan el `.app` universal y el DMG. Más en [docs/](docs/README.md) y, para publicar versiones, [docs/release.md](docs/release.md).

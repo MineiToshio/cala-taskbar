@@ -5,33 +5,35 @@ End users install from the disk image: see the [README](../README.md). Release s
 ## Build and install
 ```bash
 cd cala-taskbar          # wherever you cloned the repository
-./install.sh          # build.sh, then install into ~/Applications and launch
+./install.sh             # build, install into /Applications and launch
 ```
-`./install.sh` runs `./build.sh` (swift build -c release, bundle, ad-hoc sign), quits the running app, replaces `~/Applications/Cala.app` with `ditto`, strips group/other write (`chmod -R go-w`), checks `codesign --verify` and opens the app. Open-at-login is handled by the app itself (SMAppService).
+Run `./install.sh` from your own account. It builds and ad-hoc signs Cala with its fixed designated requirement, then requests administrator access with `sudo` to stage the bundle with `ditto` in `/Applications`. The installer sets ownership to root:admin, removes inherited access controls and group/other write access, verifies the signature and publishes the bundle atomically. Only after publication does it stop Cala and the legacy LaunchAgents in your session. It opens the shared copy before removing your per-user copy. If a later step fails before Cala reopens, the installer tries the shared copy again and falls back to your old copy if needed.
 
 `./build.sh` alone only produces `build/Cala.app`, which is the build output, not the copy you should run.
 
 Relaunch the installed app without rebuilding:
 ```bash
-pkill -x Cala; open ~/Applications/Cala.app
+pkill -u "$(id -u)" -x Cala
+while pgrep -u "$(id -u)" -x Cala >/dev/null; do sleep 0.1; done
+open /Applications/Cala.app
 ```
-After a code change, run `./install.sh` again.
+After a code change, run `./install.sh` again. The installer advances the build number above the installed version, even for rebuilds from the same commit. If you set `CALA_BUILD_NUMBER` explicitly, use a higher value for other sessions to detect the update.
 
 ## Installation security
-**SECURITY:** Run the app from `~/Applications`, which only your user can write (`install.sh` keeps it free of group/other write). `/Users/Shared` is group-writable, so another user could swap a bundle there and inherit its Accessibility / Screen Recording grants. `build.sh` strips group/other write access from the bundle with `chmod -R go-w "$APP"`, but that does not protect a bundle from replacement through a writable parent folder. The repository's `build/Cala.app` is only a build output: do not grant permissions to it or launch it at login.
+**SECURITY.** Run `/Applications/Cala.app` from the shared `/Applications` directory (root:admin, writable by administrators). The app bundle has group/other write access removed. Another user could replace a bundle through a writable parent such as `/Users/Shared` and inherit its Accessibility or Screen Recording grants. Use the installed copy for permissions and login.
 
-**Re-grant after moving to a new path:** macOS ties Accessibility / Screen Recording grants to the app's path and signature. The first time you run the copy in `~/Applications`, the Permissions pane may report missing grants; add `~/Applications/Cala.app` in System Settings > Privacy & Security (and remove the old `build/` entry). If a grant looks on but does not work, reset it with the `tccutil` commands below and grant it again.
+**Re-grant after moving.** macOS ties Accessibility and Screen Recording grants to the app’s path and signature. In each account, add `/Applications/Cala.app` in System Settings → Privacy & Security and remove the entry for the previous path. If a grant looks on but fails, reset it with the `tccutil` command below and grant it again.
 
 ## Permissions (System Settings > Privacy & Security)
 The first launch shows a welcome that first asks "What do you want to use?" (Bar, Zones or both; nothing runs until you answer), then asks only for the permissions that choice needs (Bar: Accessibility and Screen Recording; Zones alone: Accessibility), each with its reason and a button to the exact pane; status updates live (PermissionCenter, `Sources/Cala/Permissions.swift`). Nothing is requested at launch after that: every optional permission is also asked the first time its feature is used. Settings → Permissions lists what the running modules need (Accessibility and Screen Recording for the Bar or the Switcher; Accessibility alone for Zones) and, while the Tray is on, the five optional ones (Calendar, Location, Bluetooth, Finder automation, Notifications). Input Monitoring is never requested.
 
 To test the welcome from scratch:
 ```bash
-pkill -x Cala
+pkill -u "$(id -u)" -x Cala
 tccutil reset All local.cala                     # only Cala's grants
 defaults delete local.cala                       # onboardingCompleted / onboardingPending, crash bookkeeping
 mv "$HOME/Library/Application Support/Cala" "$HOME/Library/Application Support/Cala.bak"
-open ~/Applications/Cala.app
+open /Applications/Cala.app
 ```
 
 ## Recommended system settings
@@ -46,10 +48,19 @@ open ~/Applications/Cala.app
 The **Permissions** pane in the Settings window shows which grants are missing and opens the right page.
 
 ## Start at login
-Settings → General → "Open at login" (and the last step of the welcome) registers the app with `SMAppService.mainApp`, so it appears in System Settings → General → Login Items, where the user can also switch it off (Cala then shows a button to that pane). Older builds used a LaunchAgent (`~/Library/LaunchAgents/local.cala.plist`); the app deletes it once and registers the login item instead, if it was installed in Applications.
+Settings → General → **Open at login** (and the last step of the welcome) saves your preference and registers Cala with `SMAppService.mainApp`. Cala migrates the old LaunchAgent (`~/Library/LaunchAgents/local.cala.plist`) and uses your saved preference or previous registration to re-register after a move. If macOS needs approval, Cala links to System Settings → General → Login Items. If registration fails, the preference stays saved and Settings offers **Retry**. In an account whose older copy left no preference or visible registration, turn on **Open at login** if you want it.
 
 ## Other user profiles
-Each macOS user needs their own permissions and login item. The `config.json` is per user too.
+All accounts can run the same `/Applications/Cala.app`. Each account grants permissions once for that path and keeps its own login item, `config.json` and `zones.json`.
+
+In each account that previously installed Cala under its home folder, quit the old instance, then run:
+
+```bash
+rm -rf "$HOME/Applications/Cala.app"
+open /Applications/Cala.app
+```
+
+Once an account is running the shared copy with update detection, Cala checks for a newer build when the session becomes active, when the Mac wakes and about every five minutes. Cala waits for a valid bundle with a stable build number and for the session to be active and idle. It defers while dragging, using Zones, editing Zones, working in Settings or going through onboarding. It then quits normally and opens the newer build in that session.
 
 ## Crash and feedback reporting (optional)
 To let a build send reports to your Sentry project, pass its DSN when building: `CALA_SENTRY_DSN='https://<key>@<host>/<project>' ./install.sh`. The DSN goes into the bundle's Info.plist (`CalaSentryDSN`) and is not stored in the repository. Without it the report window still opens but Enviar stays disabled

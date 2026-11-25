@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let registry = ModuleRegistry.shared
     private let store = ConfigStore.shared
     private var terminationSource: DispatchSourceSignal?
+    private let updates = BundleUpdateMonitor()
     var bar: BarController? { registry.bar.controller }
     var tray: TrayModule { registry.tray }
 
@@ -34,10 +35,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ n: Notification) {
+        updates.stop()
         registry.shutdown()
         terminationSource?.cancel()
         terminationSource = nil
         Watchdog.cleanExit()
+        Relaunch.openAfterTermination()
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -67,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminationSource = source
         source.resume()
         LoginItem.migrateLegacy()
+        LoginItem.rebindAfterMove()
         Watchdog.start(store: store)
         let modules = registry.launch(onboardingCompleted: OnboardingWindowController.completed,
                                       onboardingPending: OnboardingWindowController.pending, axTrusted: AXIsProcessTrusted())
@@ -90,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tray.finishOnboarding()
         }
         if CommandLine.arguments.contains("--settings") { SettingsWindowController.shared.show() }
+        updates.start()
     }
 
 }

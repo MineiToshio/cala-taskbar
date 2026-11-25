@@ -259,7 +259,23 @@ struct SliderControl: View {
 
 struct GeneralPane: View {
     @ObservedObject var store: ConfigStore
-    @State private var login = LoginItem.enabled
+    @State private var login = LoginItem.preference
+
+    private var loginCaption: String {
+        switch login.issue {
+        case .approval:
+            return tx("Switched off in System Settings → General → Login Items. Turn Cala on there.",
+                      "Desactivado en Ajustes del Sistema → General → Ítems de inicio. Activa Cala allí.")
+        case .registration:
+            return tx("Cala could not register to open at login. Your preference is saved.",
+                      "Cala no pudo registrarse para abrir al iniciar sesión. Tu preferencia está guardada.")
+        case .removal:
+            return tx("Cala could not remove its login item. Your preference is saved.",
+                      "Cala no pudo eliminar su ítem de inicio. Tu preferencia está guardada.")
+        case nil:
+            return tx("Cala starts by itself every time you log in.", "Cala arranca sola cada vez que entras a tu usuario.")
+        }
+    }
     @State private var diskFolders = ""
     private func applyDiskFolders() {
         store.config.diskFolders = diskFolders.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -302,18 +318,22 @@ struct GeneralPane: View {
             SectionTitle(text: tx("What Cala does", "Qué hace Cala"))
             ModulesCard(store: store)
             Card {
-                SettingRow(title: tx("Open at login", "Abrir al iniciar sesión"),
-                           caption: LoginItem.needsApproval
-                            ? tx("Switched off in System Settings → General → Login Items. Turn Cala on there.", "Desactivado en Ajustes del Sistema → General → Ítems de inicio. Activa Cala allí.")
-                            : tx("Cala starts by itself every time you log in.", "Cala arranca sola cada vez que entras a tu usuario.")) {
+                SettingRow(title: tx("Open at login", "Abrir al iniciar sesión"), caption: loginCaption) {
                     HStack(spacing: 8) {
-                        if LoginItem.needsApproval { Button(tx("Open Login Items", "Abrir Ítems de inicio")) { LoginItem.openSystemSettings() }.controlSize(.small) }
-                        Toggle("", isOn: Binding(get: { login }, set: { LoginItem.set($0); login = LoginItem.enabled })).toggleStyle(.switch).labelsHidden()
+                        if login.issue == .approval {
+                            Button(tx("Open Login Items", "Abrir Ítems de inicio")) { LoginItem.openSystemSettings() }
+                                .controlSize(.small)
+                        } else if login.issue != nil {
+                            Button(tx("Retry", "Reintentar")) { LoginItem.retry(); login = LoginItem.preference }
+                                .controlSize(.small)
+                        }
+                        Toggle("", isOn: Binding(get: { login.desired }, set: { LoginItem.set($0); login = LoginItem.preference }))
+                            .toggleStyle(.switch).labelsHidden()
                             .accessibilityLabel(tx("Open at login", "Abrir al iniciar sesión"))
                             // Can change outside this view (the welcome, System Settings → Login Items): re-read it.
-                            .onAppear { login = LoginItem.enabled }
-                            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in login = LoginItem.enabled }
-                            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in login = LoginItem.enabled }
+                            .onAppear { login = LoginItem.preference }
+                            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in login = LoginItem.preference }
+                            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in login = LoginItem.preference }
                     }
                 }
             }

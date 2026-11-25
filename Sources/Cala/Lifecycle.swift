@@ -4,28 +4,87 @@ import ServiceManagement
 /// Open at login through macOS's own Login Items (System Settings → General → Login Items), so the user sees and
 /// controls it there. Replaces the LaunchAgent that older versions wrote by hand.
 enum LoginItem {
+    private static let registrationPathKey = "loginItemRegistrationPath"
+    private static let desiredKey = "loginItemDesired"
+    private static var defaults: UserDefaults { .standard }
+    static var savedPreference: Bool? { defaults.object(forKey: desiredKey) as? Bool }
+
+    private static var status: LoginItemPolicy.Status {
+        switch SMAppService.mainApp.status {
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        case .notRegistered, .notFound: return .missing
+        @unknown default: return .unknown
+        }
+    }
+
+    static var preference: LoginItemPolicy.Preference {
+        let registeredPath = defaults.string(forKey: registrationPathKey)
+        let current = status
+        let path = AppLocation.bundleURL.path
+        let rebind = LoginItemPolicy.rebind(desired: true, status: current, registeredPath: registeredPath,
+                                           bundlePath: path, firstSharedLaunch: path == "/Applications/Cala.app")
+        return LoginItemPolicy.preference(saved: savedPreference, registeredPath: registeredPath, status: current,
+                                          pointsToPreviousBundle: AppLocation.isInstalled && rebind == .replace)
+    }
+
+    static func retry() {
+        let choice = preference
+        if choice.desired, status == .enabled { rebindAfterMove() }
+        else { set(choice.desired) }
+    }
+
     private static var legacyAgents: [URL] {
         let agents = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents")
         return ["local.cala.plist", "local.mactaskbar.plist"].map { agents.appendingPathComponent($0) }
     }
 
-    static var enabled: Bool {
-        SMAppService.mainApp.status == .enabled
-    }
-    /// macOS registered the item but the user switched it off in Login Items.
-    static var needsApproval: Bool { SMAppService.mainApp.status == .requiresApproval }
-
-    /// Returns false (and logs why) when macOS refused.
+    /// Save the user's choice even if Service Management can't apply it yet.
     @discardableResult
     static func set(_ on: Bool) -> Bool {
+        defaults.set(on, forKey: desiredKey)
+        let current = status
         do {
-            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            if on {
+                if current == .requiresApproval { return true }
+                if current != .enabled { try SMAppService.mainApp.register() }
+                defaults.set(AppLocation.bundleURL.path, forKey: registrationPathKey)
+            } else {
+                if current != .missing { try SMAppService.mainApp.unregister() }
+                defaults.removeObject(forKey: registrationPathKey)
+            }
             log("login item: \(on ? "on" : "off") status=\(SMAppService.mainApp.status.rawValue)")
             return true
         } catch {
             log("login item: \(on ? "register" : "unregister") failed: \(error)")
             return false
         }
+    }
+
+    static func rebindAfterMove() {
+        guard AppLocation.isInstalled else { return }
+        let path = AppLocation.bundleURL.path
+        let registeredPath = defaults.string(forKey: registrationPathKey)
+        let current = status
+        let desired = LoginItemPolicy.preference(saved: savedPreference, registeredPath: registeredPath,
+                                                 status: current).desired
+        // An existing registration is evidence of intent for upgrades from builds that saved no preference.
+        if savedPreference == nil, desired { defaults.set(true, forKey: desiredKey) }
+        let action = LoginItemPolicy.rebind(desired: desired, status: current, registeredPath: registeredPath,
+                                           bundlePath: path, firstSharedLaunch: path == "/Applications/Cala.app")
+        guard action != .none else {
+            if current == .enabled, registeredPath == nil { defaults.set(path, forKey: registrationPathKey) }
+            return
+        }
+        log("login item: rebinding from \(registeredPath ?? "an existing preference") to \(path)")
+        if action == .replace {
+            do { try SMAppService.mainApp.unregister() }
+            catch {
+                log("login item: unregister before rebinding failed: \(error)")
+                return
+            }
+        }
+        set(true)
     }
 
     /// Older versions started at login through a LaunchAgent pointing at a fixed path. Move that choice to Login Items
@@ -36,7 +95,7 @@ enum LoginItem {
         guard !found.isEmpty else { return }
         for url in found { try? fm.removeItem(at: url) }
         log("login item: removed legacy launch agent(s) \(found.map(\.lastPathComponent))")
-        if AppLocation.isInstalled { set(true) }
+        if AppLocation.isInstalled, savedPreference == nil { defaults.set(true, forKey: desiredKey) }
     }
 
     static func openSystemSettings() {
@@ -104,15 +163,33 @@ enum AppLocation {
 }
 
 enum Relaunch {
-    /// Quits cleanly (so the watchdog does not reopen this copy) and opens `app` a moment later.
-    static func open(_ app: URL = AppLocation.bundleURL) {
+    private static var pending: (app: URL, inBackground: Bool)?
+
+    static func open(_ app: URL = AppLocation.bundleURL, inBackground: Bool = false) {
+        guard pending == nil else { return }
+        pending = (app, inBackground)
+        defer { pending = nil }
+        NSApp.terminate(nil)
+    }
+
+    /// Start the helper only after AppKit commits to quitting and module cleanup has finished.
+    static func openAfterTermination() {
+        guard let request = pending else { return }
+        pending = nil
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        // The path is passed as an argument, never spliced into the script.
-        p.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", app.path]
+        let script = """
+        for i in $(/usr/bin/seq 1 600); do
+            kill -0 "$1" 2>/dev/null || break
+            /bin/sleep 0.1
+        done
+        shift
+        exec /usr/bin/open "$@" "$0"
+        """
+        p.arguments = ["-c", script, request.app.path, String(ProcessInfo.processInfo.processIdentifier)]
+        if request.inBackground { p.arguments?.append("-g") }
         p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { log("relaunch: could not schedule: \(error)"); return }
-        NSApp.terminate(nil)
+        do { try p.run() } catch { log("relaunch: could not schedule: \(error)") }
     }
 }
 

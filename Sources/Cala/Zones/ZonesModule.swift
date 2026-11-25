@@ -58,6 +58,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
     private let strip = ZoneLayoutStrip()
     private let toast = ZoneToast()
     private var session: Session?
+    var isInZonesMode: Bool { session != nil }
     /// The layout strip of the display under the cursor while zones mode is on (setting `zonesLayoutStrip`).
     private var stripState: StripState?
     /// Runs only while the strip is expanded: the dwell must progress while the pointer rests (no mouse events).

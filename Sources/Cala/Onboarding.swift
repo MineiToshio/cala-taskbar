@@ -8,6 +8,7 @@ import SwiftUI
 final class OnboardingWindowController: NSObject, NSWindowDelegate {
     static let shared = OnboardingWindowController()
     private var window: NSWindow?
+    var isOpen: Bool { window != nil }
     private static let doneKey = "onboardingCompleted"
     private static let pendingKey = "onboardingPending"
     /// Called once when the user finishes or closes the welcome (the app then starts what waited for it).
@@ -323,7 +324,10 @@ struct OnboardingView: View {
             }
             .padding(.top, 16).padding(.leading, 4)
         }
-        .onAppear { login = LoginItem.enabled || !UserDefaults.standard.bool(forKey: "loginItemChosen") }
+        .onAppear {
+            login = LoginItem.savedPreference
+                ?? (LoginItem.preference.desired || !UserDefaults.standard.bool(forKey: "loginItemChosen"))
+        }
     }
 
     private func feature(_ symbol: String, _ title: String, _ detail: String) -> some View {
@@ -364,7 +368,7 @@ struct OnboardingView: View {
             if step == .ready {
                 Button(tx("Start using Cala", "Empezar a usar Cala")) {
                     UserDefaults.standard.set(true, forKey: "loginItemChosen")
-                    if login != LoginItem.enabled { LoginItem.set(login) }
+                    LoginItem.set(login)
                     finish()
                 }
                 .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
