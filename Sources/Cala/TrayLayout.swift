@@ -2,10 +2,7 @@ import Foundation
 
 let trayMore = "__t_more", trayDownloads = "__t_downloads", trayTrash = "__t_trash"
 
-/// Where a tray item lives: always visible in the bar, behind the "^" overflow panel, or not shown at all.
-enum TrayPlace: String, CaseIterable, Identifiable {
-    case bar, more, hidden
-    var id: String { rawValue }
+extension TrayPlace {
     var title: String {
         switch self {
         case .bar: return tx("In the bar", "En la barra")
