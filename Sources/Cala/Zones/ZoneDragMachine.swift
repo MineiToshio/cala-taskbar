@@ -107,10 +107,25 @@ struct ZoneDragMachine {
 
     /// A worker result for an older press never promotes a newer one.
     mutating func confirmDrag(generation gen: UInt64) -> Bool {
-        guard phase == .pressed, generation == gen, !ignoring else { return false }
+        guard isPending(generation: gen) else { return false }
         phase = .dragging
         confirmed = true
         return true
+    }
+
+    func isPending(generation gen: UInt64) -> Bool {
+        phase == .pressed && generation == gen
+    }
+
+    /// Ends an unfinished probe (including tab adoption or AppKit validation), even if mouse-up was missed.
+    mutating func endPending(generation gen: UInt64) -> Bool {
+        guard isPending(generation: gen) else { return false }
+        phase = .idle
+        return true
+    }
+
+    mutating func endSnapRelease(generation gen: UInt64) {
+        if snapReleaseGeneration == gen { snapReleaseGeneration = nil }
     }
 
     /// The worker could not resolve or place the confirmed window: back to idle without a snap. A swallowed
@@ -138,6 +153,12 @@ struct ZoneDragCandidate {
     struct Window {
         let key: ZoneRestore.WindowKey
         let frame: CGRect
+    }
+
+    static func windowIDArray(_ id: CGWindowID) -> CFArray {
+        // Core Graphics reads the array slots as raw CGWindowIDs, so use no object callbacks.
+        var value = UnsafeRawPointer(bitPattern: UInt(id))
+        return CFArrayCreate(nil, &value, 1, nil)
     }
 
     private static let recheckInterval: TimeInterval = 0.04

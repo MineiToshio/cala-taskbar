@@ -769,6 +769,40 @@ do {
 // MARK: Drag candidates
 
 do {
+    let id: CGWindowID = 20_529
+    let ids = ZoneDragCandidate.windowIDArray(id)
+    expect("Window bounds lookup passes the raw CGWindowID to Core Graphics",
+           CFArrayGetCount(ids) == 1 && UInt(bitPattern: CFArrayGetValueAtIndex(ids, 0)) == UInt(id))
+}
+
+do {
+    let p = CGPoint(x: 140, y: 110)
+    var machine = ZoneDragMachine()
+    let released = machine.leftDown(at: p, shift: false, command: false)!
+    _ = machine.leftDragged(to: p, shift: false, command: false)
+    expect("Mouse-up clears a pending drag and rejects late adoption or AppKit validation",
+           machine.leftUp(at: p, shift: false, command: false) == nil && machine.phase == .idle
+               && !machine.confirmDrag(generation: released) && !machine.endPending(generation: released))
+
+    let timedOut = machine.leftDown(at: p, shift: true, command: false)!
+    expect("A pending timeout affects only its own press",
+           !machine.endPending(generation: released) && machine.isPending(generation: timedOut))
+    expect("A pending drag times out even without mouse-up and leaves right-click alone",
+           machine.endPending(generation: timedOut) && machine.phase == .idle && !machine.zonesMode
+               && !machine.confirmDrag(generation: timedOut) && !machine.rightDown() && !machine.rightUp())
+
+    let next = machine.leftDown(at: p, shift: false, command: false)!
+    expect("The next drag can activate zones and a timeout cannot cancel a confirmed drag",
+           machine.confirmDrag(generation: next) && !machine.endPending(generation: next)
+               && machine.rightDown() && machine.rightUp()
+               && machine.leftUp(at: p, shift: false, command: false)?.zonesMode == true)
+    machine.endSnapRelease(generation: timedOut)
+    expect("Completion of a stale detached lookup leaves the current release alone", machine.snapReleaseGeneration == next)
+    machine.endSnapRelease(generation: next)
+    expect("Completion of the detached lookup clears its release", machine.snapReleaseGeneration == nil)
+}
+
+do {
     let frame = CGRect(x: 100, y: 100, width: 880, height: 640)
     let press = CGPoint(x: 140, y: 110)
     let point = CGPoint(x: 165, y: 130)

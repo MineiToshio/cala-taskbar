@@ -33,6 +33,7 @@ final class ZoneDragTap: @unchecked Sendable {
     /// Mouse buttons only: left down/up/dragged, right down/up (0x5E). No keyboard events.
     static let mask: CGEventMask = [CGEventType.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp]
         .reduce(0) { $0 | (1 << $1.rawValue) }
+    private static let pendingLimit: TimeInterval = 3
 
     private let state = OSAllocatedUnfairLock(uncheckedState: State())
     // Set before install, read on the tap thread. Each must only dispatch.
@@ -40,6 +41,7 @@ final class ZoneDragTap: @unchecked Sendable {
     private let onMoveCheck: (UInt64) -> Void
     private let onSync: () -> Void
     private let onRelease: (ZoneDragMachine.Release) -> Void
+    private let onPendingEnd: (UInt64) -> Void
     private let onDisabled: (CGEventType) -> Void
 
     // Only touched on the main thread.
@@ -50,11 +52,12 @@ final class ZoneDragTap: @unchecked Sendable {
 
     init(onPress: @escaping (UInt64, CGPoint) -> Void, onMoveCheck: @escaping (UInt64) -> Void,
          onSync: @escaping () -> Void, onRelease: @escaping (ZoneDragMachine.Release) -> Void,
-         onDisabled: @escaping (CGEventType) -> Void) {
+         onPendingEnd: @escaping (UInt64) -> Void, onDisabled: @escaping (CGEventType) -> Void) {
         self.onPress = onPress
         self.onMoveCheck = onMoveCheck
         self.onSync = onSync
         self.onRelease = onRelease
+        self.onPendingEnd = onPendingEnd
         self.onDisabled = onDisabled
     }
 
@@ -186,9 +189,21 @@ final class ZoneDragTap: @unchecked Sendable {
     /// Worker side of the coalesced move check: clears the pending flag and says whether the press is still current.
     func beginMoveCheck(generation: UInt64) -> (current: Bool, point: CGPoint) {
         state.withLockUnchecked { s in
+            guard s.machine.isPending(generation: generation) else { return (false, s.machine.point) }
             s.checkPending = false
-            return (s.machine.phase == .pressed && s.machine.generation == generation, s.machine.point)
+            return (true, s.machine.point)
         }
+    }
+
+    @discardableResult
+    func endPending(generation: UInt64) -> Bool {
+        let ended = state.withLockUnchecked { s in
+            guard s.machine.endPending(generation: generation) else { return false }
+            s.checkPending = false
+            return true
+        }
+        if ended { onPendingEnd(generation) }
+        return ended
     }
 
     func isDragging(generation: UInt64) -> Bool {
@@ -201,6 +216,10 @@ final class ZoneDragTap: @unchecked Sendable {
 
     func isCurrentSnapRelease(generation: UInt64) -> Bool {
         state.withLockUnchecked { $0.machine.snapReleaseGeneration == generation }
+    }
+
+    func endSnapRelease(generation: UInt64) {
+        state.withLockUnchecked { $0.machine.endSnapRelease(generation: generation) }
     }
 
     /// Main side of the coalesced overlay update.
@@ -226,10 +245,19 @@ final class ZoneDragTap: @unchecked Sendable {
             onDisabled(type)
         case .leftMouseDown:
             let flags = event.flags, p = event.location
-            let gen = state.withLockUnchecked {
-                $0.machine.leftDown(at: p, shift: flags.contains(.maskShift), command: flags.contains(.maskCommand))
+            let gen = state.withLockUnchecked { s in
+                s.checkPending = false
+                return s.machine.leftDown(at: p, shift: flags.contains(.maskShift), command: flags.contains(.maskCommand))
             }
-            if let gen { onPress(gen, p) }
+            if let gen {
+                onPress(gen, p)
+                // Expire an unfinished probe even when the worker or AppKit is still busy or mouse-up is lost.
+                DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + Self.pendingLimit) { [weak self] in
+                    if self?.endPending(generation: gen) == true {
+                        log("zones: window probe timed out before drag confirmation")
+                    }
+                }
+            }
         case .leftMouseDragged:
             let flags = event.flags, p = event.location
             let (check, sync, gen) = state.withLockUnchecked { s -> (Bool, Bool, UInt64) in
@@ -245,10 +273,13 @@ final class ZoneDragTap: @unchecked Sendable {
             if sync { onSync() }
         case .leftMouseUp:
             let flags = event.flags, p = event.location
-            let release = state.withLockUnchecked {
-                $0.machine.leftUp(at: p, shift: flags.contains(.maskShift), command: flags.contains(.maskCommand))
+            let (generation, release) = state.withLockUnchecked { s in
+                s.checkPending = false
+                let release = s.machine.leftUp(at: p, shift: flags.contains(.maskShift), command: flags.contains(.maskCommand))
+                return (s.machine.generation, release)
             }
             if let release { onRelease(release) }
+            else { onPendingEnd(generation) }
         case .rightMouseDown:
             let (swallow, sync) = state.withLockUnchecked { s -> (Bool, Bool) in
                 guard s.machine.rightDown() else { return (false, false) }

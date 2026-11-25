@@ -110,6 +110,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider, ObservableObject {
             onMoveCheck: { [weak mover] gen in mover?.checkMove(generation: gen) },
             onSync: { [weak self] in ZoneDragTap.performOnMainDuringDrag { self?.sync(run) } },
             onRelease: { [weak self] release in DispatchQueue.main.async { self?.release(release, run: run) } },
+            onPendingEnd: { [weak mover] gen in mover?.discardProbe(generation: gen) },
             onDisabled: { [weak self] type in DispatchQueue.main.async { self?.tapDisabled(type, run: run) } })
         mover.attach(tap)
         tap.setActivation(ZoneActivation(config: config.config.zonesActivation))
@@ -239,6 +240,10 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider, ObservableObject {
         guard isRunning, runID == run, let mover else { return }
         var target: CGRect?
         var usable: CGRect?
+        if session?.generation != release.generation {
+            let reason = release.zonesMode ? "mouse-up reached main before the overlay" : "activation inactive at mouse-up"
+            log("zones: drag detected, zones not shown (\(reason))")
+        }
         if release.zonesMode {
             if session?.generation != release.generation { session = makeSession(release.generation) }
             if stripSuspendsPicking(at: release.point) {
@@ -260,6 +265,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider, ObservableObject {
         let session = makeSession(generation)
         self.session = session
         showOverlay(session)
+        if !overlay.isVisible { log("zones: drag detected, zones not shown (no display with a usable layout)") }
     }
 
     private func showOverlay(_ session: Session) {
