@@ -2,7 +2,7 @@
 
 ## Quick checks
 - Is it running? `pgrep Cala`
-- Crash reports: `~/Library/Logs/DiagnosticReports/Cala-*.ips`
+- Crash reports: `~/Library/Logs/DiagnosticReports/Cala*.ips` or `Cala*.crash` in the same directory
 - Debug log: `~/Library/Application Support/Cala/debug.log` (one rotated backup, `debug.log.1`; window titles are not logged)
 
 ## Problems
@@ -10,14 +10,15 @@
 |---|---|
 | "Falta el permiso de Accesibilidad" even after granting | Stale grant after a signature change. Run the `tccutil reset` commands in [setup.md](setup.md), relaunch, grant again |
 | Previews show an icon instead of a thumbnail | Screen Recording not granted, or the window was minimized before the bar started (no thumbnail was ever taken) |
-| App crashes on launch | A privacy usage key is missing from `Info.plist` (check `build.sh`). The crash report names the key |
+| App crashes on launch | Check the crash report. If it shows a TCC violation for a missing privacy usage key, check the bundle’s `Info.plist` and `build.sh` |
 | Wi-Fi panel has no network names | Location Services not granted |
 | No badge on an icon | The Dock must be running (it can be hidden). Badge key is the Dock item title or bundle path |
 | Close (X) does nothing in a preview | The window is not visible to Accessibility (ghost). See Notes below |
-| Native Dock shows again | Dock settings were reset (e.g. after a macOS update). Toggle Settings → General → Hide the macOS Dock off/on, or quit and launch a fresh process. Reopening an already-running instance only shows Settings |
+| Native Dock shows again | Dock settings were reset (e.g. after a macOS update). Toggle Settings → Taskbar → macOS Dock → Hide the macOS Dock off/on, or quit and launch a fresh process. Reopening an already-running instance only shows Settings |
 | Show desktop leaves a window | Full-screen windows and windows on other Spaces can reject minimization; failed restores remain pending for another attempt |
 | Peek does nothing | The window is minimized, on another Space, or Accessibility is not granted |
-| Option+Tab does nothing | Accessibility not granted yet (the tap is created within 3 s of granting) or the switcher is off in Settings → General |
+| Option+Tab does nothing | Open Settings → Window switcher. Its status shows whether the module is off, needs Accessibility, or is still preparing the shortcut. Screen Recording adds thumbnails |
+| Zones does nothing | In Settings → Zones, check module status, the active layout and **Activate zones with**. For trackpad drags, use **Hold Shift** or **Either gesture**. If the overlay still does not appear, check the `zones:` log for an unconfirmed probe, missing permission or a drag without a layout or eligible target |
 | I quit the bar by accident | Open "Cala" from Spotlight or Launchpad; reopening a running app opens Settings |
 | Previews from another tool still appear | A previously started copy keeps running after deleting the app. Quit it, or log out / reboot (other user sessions need their own logout) |
 | macOS says "cala-keychain wants to access key "Cala Mail" in your keychain" | Expected once per mail account saved by an older Cala, after the update that brings the Keychain helper (`Contents/Helpers/cala-keychain`); later updates keep the same helper and do not ask. Type the Mac password and choose Always Allow; it goes to macOS only. It comes back only if a release replaces the helper, or when switching between ad-hoc and Developer ID builds |
@@ -57,14 +58,14 @@ An acknowledgement alone does not prove that the selected user's login screen ap
 - **`n/a`:** the provider may be offline, timed out, signed in with an unsupported account, or returning a changed private schema. Last good data stays visible when available. Only returned windows appear; no 5-hour row can be normal for a plan.
 - **Rate-limited:** wait for the displayed retry countdown. Refresh is disabled throughout cooldown; repeated requests are coalesced. Restarting retains the cooldown. Backoff starts at 60 seconds and grows to 30 minutes.
 - **Session expired:** open Claude Code or Codex to refresh its own session. Cala never refreshes or writes tokens. Claude credentials are reread on the next attempt; a 401 gets only one reread/retry.
-- **Custom folders:** set Claude config dir / Codex home in Settings, or export `CLAUDE_CONFIG_DIR` / `CODEX_HOME` in your login-shell setup. Shell variables are read once per launch. Settings folder overrides update live. Claude's Keychain service includes a directory hash when an explicit directory is used.
+- **Custom folders:** set the Claude config directory or Codex home in Settings → Integrations → Claude & Codex, or export `CLAUDE_CONFIG_DIR` / `CODEX_HOME` in your login-shell setup. Shell variables are read once per launch. Settings folder overrides update live. Claude's Keychain service includes a directory hash when an explicit directory is used.
 - **Old reading:** “Updated … ago” is the source reading age. Revealing the bar or opening the flyout revalidates after 120 seconds for Claude / 60 for Codex. Manual Refresh bypasses age and error-backoff limits with a 15-second floor after failures. A final Claude 401 remains blocked until its credential expiry value or token fingerprint changes. Other failures back off automatically from 120 seconds to 30 minutes. Hidden bars do not poll the APIs. Local Codex log events and optional Claude statusLine events can update readings without network calls.
-- **statusLine conflict:** Cala preserves your existing command. Follow the command shown in Settings, feeding it your script's original stdin JSON. New sessions may be needed after a settings change. The first preserved settings backup is `settings.json.mactaskbar.bak` in your Claude config folder. Existing backups are never overwritten; a backup left by an older app version may already contain that version’s edits. Claude config folders must already exist, and folder fields apply on submit/focus loss. An already-owned statusLine causes no rewrite on launch.
+- **statusLine conflict:** Cala preserves your existing command. Follow the command shown in Settings → Integrations → Claude & Codex, feeding it your script's original stdin JSON. New sessions may be needed after a settings change. The first preserved settings backup is `settings.json.mactaskbar.bak` in your Claude config folder. Existing backups are never overwritten; a backup left by an older app version may already contain that version’s edits. Claude config folders must already exist, and folder fields apply on submit/focus loss. An already-owned statusLine causes no rewrite on launch.
 
 Inspect `~/Library/Application Support/Cala/debug.log` for `usage:` lines: provider, fetch status (0 for transport/process failure), elapsed milliseconds, cooldown seconds and outcome. These lines contain no tokens, emails or account IDs. A valid response with an unknown schema shows `n/a` even if its status is 200. Do not paste credential files into bug reports.
 
 ## Calendar events
-- **Permission denied / write-only:** open Settings → Privacy & Security → Calendars (also linked from the flyout) and grant Cala full access. Write-only access cannot read upcoming events. Return to the app or reopen the calendar pane to refresh. A managed/restricted Mac may require an administrator to change the policy; Cala cannot bypass it.
+- **Permission denied / write-only:** open System Settings → Privacy & Security → Calendars (also linked from the flyout) and grant Cala full access. Write-only access cannot read upcoming events. Return to the app or reopen the calendar pane to refresh. A managed/restricted Mac may require an administrator to change the policy; Cala cannot bypass it.
 - **An added Google/iCloud/Exchange account or calendar is missing:** enable the **Calendars** toggle for that account in System Settings → Internet Accounts, and verify that its events appear in Apple Calendar. The Calendar settings section’s Add account button opens Internet Accounts directly; sign-in is manual. Allow macOS to finish synchronization, then reopen the pane. Cala only sees calendars available through EventKit on this Mac.
 - **A calendar is visible but events are missing:** ensure its checkbox is selected in Settings → Integrations → Calendar and try the 14-day range. Past/ended and canceled events are omitted. Ongoing and all-day events that overlap the range are included. Excluding every calendar intentionally gives “No upcoming events”.
 - **No Join button:** it is shown only for HTTP(S) Meet, Zoom/ZoomGov (including their subdomains), Teams (`teams.microsoft.com` / `teams.live.com`) and Webex (`*.webex.com`) meeting links in the event URL, location or notes. Other links and non-web schemes are not opened as meeting links.

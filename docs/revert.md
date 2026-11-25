@@ -1,18 +1,19 @@
 # Reverting to the normal Dock
 
-**Shortest way:** Settings → Help and diagnostics → Advanced options → **Uninstall Cala…** does all of the steps below (Dock, menu bar, login item, statusLine entry, settings, app to the Trash). Without opening the app: `scripts/uninstall.sh`.
+**Shortest way:** Settings → Help and diagnostics → Advanced options → **Uninstall Cala → Uninstall…** restores the saved Dock and menu bar, removes the current account’s login item, cleans up Cala’s Claude statusLine entry, deletes Cala’s settings and tries to move the app to the Trash. If Claude statusLine cleanup fails, the uninstaller stops and lets you retry. The shared bundle is used by all accounts. The standalone `scripts/uninstall.sh` handles local files and legacy LaunchAgents, attempts to move the installed copies to the Trash, and prints manual menu bar instructions. For the current login item and statusLine, use the controls below before running that script.
 
-Everything is reversible. By hand, do these in order.
+For manual removal, turn off **Open at login** in Settings → General and disable the Claude statusLine in Settings → Integrations → Claude & Codex before quitting. Removing the shared bundle affects every account.
 
 ## 1. Stop the taskbar
-Settings → Help and diagnostics → Advanced options → "Salir…" (there is no Quit in the bar's right-click menu; when the Bar is off or Zones is on, the Cala icon in the menu bar also has **Quit Cala**). To open it again: Spotlight or Launchpad, search "Cala", or `open ~/Applications/Cala.app`.
+Settings → Help and diagnostics → Advanced options → Quit Cala → **Quit…** (there is no Quit in the bar's right-click menu; when the Bar is off or Zones is on, the Cala icon in the menu bar also has **Quit Cala**). To open it again: Spotlight or Launchpad, search "Cala", or `open /Applications/Cala.app`.
 
 ## 2. Remove start at login
-Settings → General → switch off "Open at login", or System Settings → General → Login Items → remove Cala.
-Then remove the installed app (after step 1, with the bar quit):
+If you skipped the login setting before quitting, disable Cala under System Settings → General → Login Items. Then remove the shared app with the bar quit:
 ```bash
-rm -rf ~/Applications/Cala.app
+sudo rm -rf /Applications/Cala.app
 ```
+
+For a per-user installation, remove `~/Applications/Cala.app` instead.
 
 ## 3. Bring the Dock back
 **Easiest:** Settings → Taskbar → switch off "Hide the macOS Dock" (before quitting). It restores the exact previous values.
@@ -38,7 +39,7 @@ If you enabled the Claude Code statusLine (Settings → Integrations → Claude 
 The project folder (including `build/Cala.app`) can then be deleted.
 
 ## DockDoor
-Removed with `brew uninstall --cask dockdoor`. To get it back: `brew install --cask dockdoor`.
+If you previously removed DockDoor through Homebrew, install it again with `brew install --cask dockdoor`.
 
 ## What the Dock switch does
 Settings → Taskbar → **Hide the macOS Dock** turns on Dock auto-hide with a very long delay and restarts the Dock. Turning it off restores the exact previous values, kept in `config.json` (`dockBackup*`). If "Restore the Dock when quitting Cala" is on (default), quitting the bar also restores the Dock, and launching it again hides it again.

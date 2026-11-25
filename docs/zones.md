@@ -13,7 +13,9 @@ Contents: [Using it](#using-it) · [Overlap and several zones](#overlap-and-seve
    - **Hold Shift** (zones show while Shift is held).
 4. Move over a zone: it fills strongly and its outline shows exactly where the window will land. Release the mouse over it and the window snaps.
 
-`zonesActivation` chooses which gesture counts: `rightClick`, `shift` or `both` (default `both`, so Shift always works).
+`zonesActivation` chooses which gesture counts: `rightClick`, `shift` or `both` (default `both`).
+
+**Trackpad:** you can’t right-click while holding a drag. Hold **Shift** while dragging. In *Settings → Zones → Activate zones with*, choose **Hold Shift** or leave **Either gesture** selected. In Spanish, the labels are *Configuración → Zonas → Activar zonas con → Mantener Mayús* or *Cualquiera de los dos*.
 
 **Learning it.** The gesture is taught outside the drag, always the same: the welcome shows a **How to use Zones** card when Zones is chosen, and Settings → Zones has the same three steps near the gesture setting. They follow the configured gesture (right-click, Shift or both): (1) drag a window and right-click (or hold Shift), then drop it on a zone; (2) hold ⌘ to cover several neighbouring zones; (3) move over **Change layout** at the top of the screen to switch layouts (with the strip off, step 3 points to Settings and the menu-bar icon instead).
 
@@ -23,7 +25,7 @@ Contents: [Using it](#using-it) · [Overlap and several zones](#overlap-and-seve
 
 **Switching the layout while dragging (layout strip).** In zones mode, a pill appears at the top centre of the monitor under the pointer, just below the menu bar, above the zones. It always looks the same and says what it is: the current layout's small picture, its name, **Change layout** (*Cambiar distribución*) and a down chevron, for example `▦ Dev · Change layout ⌄` (12 pt, themed; "Off" with a no-entry sign on a monitor without zones). Nothing about it changes over time or with use. Move the pointer onto the pill and it opens into a row of that monitor's layouts, each pictured at the monitor's shape with its name, the current one ringed in the accent colour (the same list as the **Change layout…** picker in Settings → Zones, without Off; up to nine are shown, smaller on a narrow screen, centred on the current one when there are more). Rest the pointer on another layout for about 0.35 s (a small ring fills up) and it becomes that monitor's layout: it is saved like a choice in Settings, the zones crossfade to the new ones, its name shows briefly under the strip, and zones mode stays on, so you go on and drop the window into one of the new zones. Moving between pictures takes 0.1 s to count (no flicker on their edges), the current layout never fires, and a picture fires only once until the pointer leaves it. Leaving the strip or releasing the button cancels the wait. While the pointer is inside the open strip no zone is highlighted and a release there snaps nothing (the window stays). The closed pill never blocks the zones under it (picking goes on there as if it were not drawn); only the pill itself, not its surroundings, opens the strip. Everything runs on the main thread from the pointer position the drag already sends; the strip is a click-through panel that never takes the mouse. Turn it off with **Show layouts while dragging** in Settings → Zones (`zonesLayoutStrip`).
 
-**Right-click is swallowed only during a confirmed window drag.** At mouse-down, Cala finds the topmost normal window under the pointer, including its own Settings window. A window must move at least 3 pt at a stable size to count as a drag. For Cala windows, AppKit also checks eligibility on the main thread before Zones can activate. Resizing, selecting text and dragging a slider leave right-clicks with the app. A swallowed right-button-down also consumes its matching up. An ordinary right-button-down clears any pending swallow from an earlier click.
+**Right-click is swallowed only during a confirmed window drag.** At mouse-down, Cala finds the topmost normal window under the pointer, including its own Settings window. A window must move at least 3 pt at a stable size to count as a drag. For Cala windows, AppKit also checks eligibility on the main thread before Zones can activate. Resizing, selecting text and dragging a slider leave right-clicks with the app. A swallowed right-button-down also consumes its matching up. An ordinary right-button-down clears any pending swallow from an earlier click. An unconfirmed probe expires after three seconds or resets on left-button release, so a pending probe cannot hold onto the next drag. Cala passes the raw `CGWindowID` to the CoreGraphics bounds lookup. The debug log records probe timeouts and why a detected drag has no target overlay.
 
 When a Chrome or Chromium tab detaches, its source window can stay in place while a new window follows the pointer. A press in the upper 64 pt of a supported browser window can trigger an on-screen window list recheck on pointer movement, at most once every 40 ms. The same new window from the browser process must keep its upper band near the pointer in two consecutive samples and move with it at a stable size. If several windows qualify, Zones waits for an unambiguous sample and right-clicks still reach the browser. After a drop on a zone, Cala starts checking the adopted window's exact ID in Accessibility after 40 ms and retries about every 40 ms for up to half a second after the release is handled. A new left-button press or a cancelled gesture ends the search.
 
@@ -62,7 +64,7 @@ Ordinary snaps happen about 40 ms after the mouse is released, giving the app an
 
 ## Layouts
 
-A **layout** is a named set of zones. The first start with no `zones.json` creates one editable layout per template, named in the current interface language:
+A **layout** is a named set of zones. The first start with no `zones.json` creates one editable layout per template, named in the current interface language. Built-in names follow language changes until you rename the layout:
 
 | Template id | Zones (x, y, w, h as fractions) |
 |---|---|
@@ -100,22 +102,22 @@ Why fractions:
 
 ## Storage: `zones.json`
 
-`~/Library/Application Support/Cala/zones.json`. It is a separate file from `config.json` so that a damaged zones file can never cost you your bar settings, and nested arrays do not fit the flat per-field recovery `config.json` uses. Written atomically, pretty-printed with sorted keys, and only when something is committed (editor Save, a layout choice, duplicate, delete); each change is written before it goes live. The scalar preferences (`zonesEnabled`, `zonesActivation`, `zonesGap`, `zonesEditorGrid`) stay in `config.json`.
+`~/Library/Application Support/Cala/zones.json`. It is a separate file from `config.json` so that a damaged zones file can never cost you your bar settings, and nested arrays do not fit the flat per-field recovery `config.json` uses. Written atomically, pretty-printed with sorted keys, and only when something is committed (editor Save, a layout choice, duplicate, delete); each change is written before it goes live. The scalar preferences (`zonesEnabled`, `zonesActivation`, `zonesGap`, `zonesEditorGrid`, `zonesLayoutStrip`) stay in `config.json`.
 
 ```json
 {
-  "activeByDisplay": { "793B322E-9748-43CF-8A63-BA18283C7D7F": "5C0E…", "A1B2…#2": "off" },
-  "defaultLayout": "5C0E…",
+  "activeByDisplay": { "793B322E-9748-43CF-8A63-BA18283C7D7F": "5C0E3774-32DE-4E02-8708-215EFC1C0137", "A1B233B6-438D-48FA-8D83-C9E73E5BBA68#2": "off" },
+  "defaultLayout": "5C0E3774-32DE-4E02-8708-215EFC1C0137",
   "layouts": [
     {
-      "id": "5C0E…",
+      "id": "5C0E3774-32DE-4E02-8708-215EFC1C0137",
       "name": "Two columns",
       "nextSeq": 2,
       "template": "two-columns",
       "mode": "linked",
       "zones": [
-        { "id": "…", "seq": 0, "rect": { "x": 0,   "y": 0, "w": 0.5, "h": 1 } },
-        { "id": "…", "seq": 1, "rect": { "x": 0.5, "y": 0, "w": 0.5, "h": 1 } }
+        { "id": "DDC3C8D8-001C-4172-88D6-EF298BBAE8A6", "seq": 0, "rect": { "x": 0,   "y": 0, "w": 0.5, "h": 1 } },
+        { "id": "06FC8D22-8BEA-4E42-AF8C-7B8D5722B2C2", "seq": 1, "rect": { "x": 0.5, "y": 0, "w": 0.5, "h": 1 } }
       ]
     }
   ],
@@ -124,18 +126,18 @@ Why fractions:
 ```
 
 - `activeByDisplay`: monitor key → layout id, or `"off"`. A monitor with no entry uses `defaultLayout`.
-- `seq`/`nextSeq`: creation order, used only to break ties between equal-size overlapping zones. `template` is informational.
+- `seq`/`nextSeq`: creation order, used only to break ties between equal-size overlapping zones. `template` identifies the originating template used for localized names and restoring original geometry. The optional `isNameCustomized` records whether to keep the user’s name across language changes.
 - `mode`: how the editor edits the layout, `"linked"` (Tiles in the editor: the zones tile the usable area) or `"free"` (Free). A file without it (older versions) or with an unknown value gets it inferred from the zones: Tiles when they tile the screen (no overlaps, no holes), Free otherwise. A Tiles layout that no longer tiles (edited by hand) is repaired to Free.
-- **Read only when the module starts** (and when the editor opens with Zones off). With Zones off, nothing reads this file.
-- **Repair on load:** rectangles that are not finite numbers are dropped; the rest are clamped into the screen with a minimum size of 5 %; duplicate layout or zone ids are dropped; assignments pointing at a missing layout are removed; with no layouts left the templates are seeded again; a missing default becomes the first layout.
-- **Damaged file:** if it cannot be decoded it is moved to `zones.json.bad` (replacing an older `.bad`), the templates are seeded and a new file is written. If the move itself fails, saving is disabled for that run so the original is not overwritten (same policy as `config.json`). If `zones.json` cannot be loaded at all, the module logs `zones: could not load zones.json` and does not start.
+- The module loads the file at startup. With Zones off, Settings → Zones reads without saving when opened. Changing a layout there or opening the editor can open a writable store. The developer snapshot also reads without saving.
+- **Repair on load:** rectangles that are not finite numbers are dropped; the rest are clamped into the screen with a minimum size of 5 %; duplicate layout or zone IDs keep the first entry. Missing or null IDs get deterministic UUIDs that avoid collisions with explicit IDs. A malformed explicit UUID causes a decode failure. Assignments pointing at a missing layout are removed, valid assignment UUIDs are normalized, `"off"` is kept, empty layout lists are reseeded and a missing default becomes the first layout.
+- **Damaged file:** if it cannot be decoded it is moved to the first free backup path (`zones.json.bad`, then `zones.json.bad.1`, `zones.json.bad.2`, and so on). Existing entries, including dangling symlinks, are preserved. Cala then writes freshly seeded templates. If the backup move itself fails, the store keeps the original file, exposes seeded templates in memory and refuses saves. If `zones.json` cannot be loaded at all, the module logs `zones: could not load zones.json` and does not start.
 - The uninstaller deletes the whole support folder, so it needs no special case.
 
 ## Monitors
 
 - **Identity.** A monitor is keyed by its CoreGraphics display UUID (the same key `alignments` uses in `config.json`), or the numeric display id if macOS gives no UUID. **Identical monitors** that report the same UUID get a `#2`, `#3`... suffix, ordered by position left to right then top to bottom. That order is stable only while the arrangement does not change (known limitation).
 - **Names.** A monitor is shown by its own name when that name is unique. Monitors that share a name (two identical models, or several reported as "(AirPlay)", which macOS only numbers "(1)", "(2)") or have none are named by position instead: **Left / Middle / Right display**, **Top / Bottom display**, else **Display N**; the size in points is shown next to it (`ZoneMonitorNames`, checked). The same names are used in Settings, the menu-bar icon and the editor.
-- **Per-monitor choice.** Each monitor has its own active layout, or **Off** (no overlay and no snapping there). Choose it from the menu-bar icon (*monitor*: *current layout* → a menu of pictured layouts, "Off on this display" and "Edit zones on this display…"), from Settings → Zones → Layout per display (one compact row per monitor: its current layout pictured at its shape, name and size, **Change layout…** opening, below the row, a popover with every layout as a picture plus **Off** (names on up to two lines), and **Edit Zones…** for that monitor), or by clicking a layout in the editor's gallery.
+- **Per-monitor choice.** Each monitor has its own active layout, or **Off** (no overlay and no snapping there). Choose it from the menu-bar icon (*monitor*: *current layout* → a menu of pictured layouts, "Off on this display" and "Edit zones on this display…"), from Settings → Zones → Layout per display (one compact row per monitor: its current layout pictured at its shape, name and size, **Change layout…** opening, below the row, an anchored gallery with every layout as a picture plus **Off** (names on up to two lines), and **Edit Zones…** for that monitor), or by clicking a layout in the editor's gallery.
 - **Disconnect.** The assignment stays in the file, like icon alignment. If zones mode is active and its monitor goes away, zones mode is cancelled and the window stays; any other screen change rebuilds the overlay in place.
 - **Connect.** A known monitor gets its stored layout; an unknown one gets the default layout (nothing is written until you choose).
 - Mirrored displays are one screen with one key. A Space change does not cancel zones mode (it fires whenever the pointer carries a window onto another monitor, and an edge push to a neighbouring Space carries the window along): the overlay panels join every Space, are brought back to the front, and the target is recomputed from the pointer.
@@ -147,7 +149,7 @@ Open it from the menu-bar icon (**Zones editor…**, on the monitor under the po
 It is a borderless window that covers the chosen monitor, above everything including the bar. The working area (the usable rectangle) is drawn on a dimmed screen, so what is outside it (menu bar, Dock, Cala's bar strip) is visibly excluded. It takes the first click even when Cala was not active, so the click that brings it forward already draws, grabs or presses a button.
 
 There is one concept, the **layout**, and one panel at the top in three bands (collapsible to a small pill that keeps **Save**):
-- **Which layout:** its **name**, editable in place (click it; Return goes back to the canvas); on the right, the **Monitor** picker, a **…** menu with the quieter commands (Rename, Duplicate Layout, Restore Original Zones for an edited built-in, Delete Layout… with confirmation and staged until Save, Undo **⌘Z**, Redo **⇧⌘Z**, Snap to a 12 × 12 Grid), **?** (a popover with every mouse and keyboard shortcut in one grid, by mode) and the collapse chevron. The Monitor picker shows only with more than one monitor ("Left display — 3840 × 1080").
+- **Which layout:** its **name**, editable in place (click it; Return goes back to the canvas); on the right, the **Monitor** picker, a **…** menu with the quieter commands (Rename, Duplicate Layout, Restore Original Zones for an edited built-in, Delete Layout… with confirmation and staged until Save, Undo **⌘Z**, Redo **⇧⌘Z**, Snap to a 12 × 12 Grid), **?** (an anchored help panel with every mouse and keyboard shortcut in one grid, by mode) and the collapse chevron. The Monitor picker shows only with more than one monitor ("Left display — 3840 × 1080").
 - Zone numbers and sizes are centred in the part of each zone the panel does not cover, so the panel never hides them.
 - **Gallery:** every layout as a picture at this monitor's shape, the one on the canvas ringed and scrolled to the middle; soft edges show when more pictures are out of sight, and a thin line separates them from **+**. **Clicking a picture shows that layout on the canvas and makes it the one this monitor uses** (on Save); there is no separate layout picker or "use on this monitor" step. **+** (always visible at the start) adds a layout and puts the cursor in its name; while a built-in layout is missing it is a menu that can also add it back. Each picture's context menu: Rename, Duplicate, Restore original zones (edited built-ins), Delete.
 - **How to edit it, and finishing:** the layout type (**Tiles | Free**, in Spanish **Mosaico | Libre**) with a one-line summary ("Zones cover the screen without overlapping." / "Place zones anywhere; they can overlap.") and a one-line hint for what to do next (everything else is in **?**); **Add Zone** in Free; then **Cancel** (reads **Close** when nothing changed) and **Save**, the largest button at the bottom right, filled with the system accent colour (a shade darker, so its white text keeps at least 4.5:1 contrast in light and dark). Short notes (why something did not happen) replace the hint for a few seconds. If zones are off on this monitor, the ring is dashed and "Off on this monitor" (⊘) shows next to the buttons.
@@ -195,7 +197,7 @@ All in `config.json`; full reference in [configuration.md](configuration.md#modu
 | `zonesEditorGrid` | `false` | The editor's 12-division snapping |
 | `zonesLayoutStrip` | `true` | Show the layout strip during a zones drag ([above](#using-it)) |
 
-Settings → **Zones** shows the module switch and its status, followed by **Edit zones…**, one layout picker per display, the gesture picker, gap slider, layout strip switch, and macOS tiling help. Layout choices and the editor are available while Zones is off.
+Settings → **Zones** shows the module switch, its status and an **Enable Zones** action when off, followed by **Edit zones…**, one layout picker per display, the gesture picker, gap slider, layout strip switch, and macOS tiling help. Layout choices and the editor are available while Zones is off.
 
 ## Permissions
 
@@ -230,7 +232,7 @@ Consequence: **right-click is a clean primary gesture.** The default activation 
 
 ## Known limitations
 
-- **The right-click gesture is unproven** (above). Use Shift if a drag misbehaves.
+- **A trackpad drag can use Shift.** For a drag that fails to activate either gesture, inspect `zones:` entries in the debug log.
 - **macOS 15+ has its own edge tiling** ("Drag windows to screen edges to tile", System Settings → Desktop & Dock → Windows). Dropping a window near an edge can make macOS tile it as well. Zones cannot turn that off; Settings → Zones says whether it is on and has a button that opens Desktop & Dock. Cala also logs it once at start.
 - **Pausing Cala in a debugger with Zones on freezes mouse input** until macOS disables the stalled tap (an active tap blocks events while its callback is not running). Stop the module first (Settings → Zones off) when debugging.
 - **Apps with a minimum size** end up larger than the zone (placed at its top-left); **non-resizable windows** are only centred in it; some apps (terminals) round to cell sizes. Apps that fight Accessibility frame changes may need a second try.
@@ -245,17 +247,17 @@ Consequence: **right-click is a clean primary gesture.** The default activation 
 
 Do this from the **console** session (a background Fast User Switching session receives no input), with Accessibility granted to Cala.
 
-**0. The integrated feature in the real app** (do this first; it also covers the go/no-go below).
-- [ ] Build: `./build.sh` (produces `build/Cala.app`), or `./install.sh` to use `~/Applications/Cala.app` (preferred: grants are tied to the path, see [setup.md](setup.md)). Run it from the **console** session.
+**0. The integrated feature in the real app** (covers the mouse and trackpad workflows).
+- [ ] Build: `./build.sh` (produces `build/Cala.app`), or `./install.sh` to use the shared `/Applications/Cala.app` (preferred: grants are tied to the path, see [setup.md](setup.md)). Run it from the **console** session.
 - [ ] System Settings → Privacy & Security → **Accessibility** → add and enable that Cala (no Screen Recording or Input Monitoring needed for Zones alone). Cala notices without a restart; the debug log shows `zones: event tap active (mouse only, mask 0x5e)`.
 - [ ] Settings → General → What Cala does → turn **Zones** on. Settings → Zones shows one layout picker per monitor (default: Two columns).
 - [ ] Gestures: drag a window, right-click (zones appear, no context menu, window keeps following), right-click again (hide), hold Shift (show while held), **⌘** over two adjacent zones (combined rectangle), release over a zone (snap with the gap), release outside (window stays), second right-click then release (window stays).
-- [ ] Drag the snapped window out: its old size returns. Change *Activate zones with* to Right-click only and to Shift only and check that the other gesture stops working.
+- [ ] Drag the snapped window out: its old size returns. Change *Activate zones with* to **Right-click** and to **Hold Shift** and check that the other gesture stops working.
 - [ ] Editor: menu-bar icon → **Zones editor…** or Settings → Zones → Edit zones…; draw, move, resize, guides, grid, Save; the new layout works immediately without restarting.
 - [ ] Welcome and migration **without touching your real settings**. Cala's data folder does not depend on the bundle id, so a separate id alone is not enough; also redirect the home folder:
   ```bash
   CALA_BUNDLE_ID=local.cala.dev ./build.sh            # own defaults domain and own Accessibility identity
-  # Quit your real Cala first (Settings → Help and diagnostics → Advanced options → Quit Cala). Never run both at once.
+  # Quit your real Cala first (Settings → Help and diagnostics → Advanced options → Quit Cala → Quit…). Never run both at once.
   DEVHOME=$(mktemp -d); mkdir -p "$DEVHOME/Library/Application Support/Cala"
   echo '{ "relaunchOnCrash": false, "hideNativeDock": false, "hideMenuBar": false }' > "$DEVHOME/Library/Application Support/Cala/config.json"
   defaults delete local.cala.dev 2>/dev/null            # new-user scenario (omit for an existing user: defaults write local.cala.dev onboardingCompleted -bool true)
@@ -310,7 +312,7 @@ Do this from the **console** session (a background Fast User Switching session r
 **6. Editor**
 - [ ] Click each picture in the gallery: the canvas shows it at once and, after Save, the monitor uses it.
 - [ ] Draw on empty space, ⇧-draw over a zone, Add zone; move, resize from all eight handles; zones cannot leave the screen; ⌥ disables snapping; dashed guides show; the grid toggle works and is remembered.
-- [ ] Tiles (a built-in): click a zone, click it again to split at the dashed line (⇧ turns it); Split button; drag a divider, the neighbour shrinks; ⇧-click two zones and Merge (disabled when they do not make a rectangle); Delete gives the space to a neighbour; drop a zone on another, they swap; dragging a zone onto nothing shows the note once. Free: Add zone lands in the largest gap; zones overlap; Free → Linked refuses with a message while zones overlap.
+- [ ] Tiles (a built-in): click a zone, click it again to split at the dashed line (⇧ turns it); Split button; drag a divider, the neighbour shrinks; ⇧-click two zones and Merge (disabled when they do not make a rectangle); Delete gives the space to a neighbour; drop a zone on another, they swap; dragging a zone onto nothing shows the note once. Free: Add zone lands in the largest gap; zones overlap; Free → Tiles refuses with a message while zones overlap.
 - [ ] Sizes show under the numbers and equal ones turn green; centre snap, Size… (double-click), Equal Widths, arrows and ⌘Z / ⇧⌘Z work.
 - [ ] + (blank layout, name ready to type), duplicate, rename in place, delete with confirmation (the last one cannot be deleted); delete a built-in and add it back from +; edit a built-in and restore its original zones.
 - [ ] Settings → Zones and the menu-bar icon show the layouts as pictures per monitor, and two monitors with the same name read as Left / Right display.
