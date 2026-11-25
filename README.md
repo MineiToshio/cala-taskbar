@@ -146,7 +146,7 @@ Only the permissions of the modules you use are requested: **Zones alone needs j
 
 ### The Keychain prompt (Mail)
 
-After each Cala update, macOS shows *"Cala wants to access key "Cala Mail" in your keychain"*, once per mail account, and asks for your **Mac login password**. Type it and choose **Always Allow**. That password goes to macOS only: Cala never sees it. It happens because Cala is free and not signed with a paid Apple Developer ID, so macOS re-checks each new version before handing it the saved app password.
+Once, after the update that brings Cala's Keychain helper, macOS shows *"cala-keychain wants to access key "Cala Mail" in your keychain."*, once for each mail account saved by an earlier version, and asks *"To allow this, enter the "login" keychain password."*, which is your **Mac password**. Type it and choose **Always Allow** (the other buttons are *Deny* and *Allow*). That password goes to macOS only: Cala never sees it. Cala is free and not signed with a paid Apple Developer ID, so macOS trusts a program by its exact fingerprint; only the small helper `cala-keychain` inside Cala.app touches the Keychain, and it stays identical across updates, so later updates do not ask again. Accounts you add afterwards are saved by the helper itself and normally do not ask. Only an update that has to replace the helper (rare) asks once more.
 
 ---
 
@@ -179,7 +179,8 @@ Nothing leaves your Mac unless you send it. *Report a problem* shows you exactly
 - **No thumbnails**: turn on Screen Recording in *Settings → Permissions*.
 - **Zones does nothing**: it needs Accessibility (*Settings → Permissions*); it starts by itself once you allow it. Check that Zones is on in *Settings → General → What Cala does*.
 - **The Dock disappeared**: Cala only hides it if you asked. Turn off **Hide the macOS Dock** in *Settings → Taskbar*.
-- **macOS asks for my Mac password for "Cala Mail"**: it is expected after each update; see [The Keychain prompt](#the-keychain-prompt-mail). Type your Mac password and choose **Always Allow**; it goes to macOS, not to Cala.
+- **macOS says "cala-keychain wants to access key "Cala Mail" in your keychain."**: it is expected once; see [The Keychain prompt](#the-keychain-prompt-mail). Type your Mac password (the login keychain one) and choose **Always Allow**; it goes to macOS, not to Cala.
+- **Mail says "Restart Cala to refresh its Keychain access."**: Cala was updated or replaced while it kept running. Quit Cala and open it again. **"macOS couldn't confirm that the Keychain request came from Cala"** (Developer ID builds only): restart your Mac; if it keeps happening, reinstall Cala.
 - **Something is wrong**: right-click the bar → *Report a problem…*, or open an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
 ## Build from source

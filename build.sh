@@ -10,7 +10,9 @@
 #   CALA_SENTRY_DSN     where "Report a problem" sends to      (optional; without it reporting is off)
 #   CALA_QA_REGULAR     1 = testing only: a normal (Dock) app, so UI-automation tools can drive it. Never for a release.
 #
-# A Developer ID identity turns on the hardened runtime, a secure timestamp and packaging/Cala.entitlements.
+# Both kinds of build use the hardened runtime and packaging/Cala.entitlements; a Developer ID identity adds a secure
+# timestamp. Contents/Helpers/cala-keychain is the prebuilt packaging/Helpers/cala-keychain, copied byte for byte and,
+# for ad-hoc builds, never re-signed: its fixed cdhash is what lets the Keychain trust it across Cala updates.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -35,6 +37,8 @@ APP=build/Cala.app
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 lipo -create "${bins[@]}" -output "$APP/Contents/MacOS/Cala"
 cp branding/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+mkdir -p "$APP/Contents/Helpers"
+cp -X packaging/Helpers/cala-keychain "$APP/Contents/Helpers/cala-keychain"
 for lang in en es; do
   mkdir -p "$APP/Contents/Resources/$lang.lproj"
   cp "packaging/$lang.lproj/InfoPlist.strings" "$APP/Contents/Resources/$lang.lproj/"
@@ -72,12 +76,35 @@ ${DSN:+<key>CalaSentryDSN</key><string>$(xml "$DSN")</string>}
 PL
 plutil -lint -s "$APP/Contents/Info.plist"
 
+HELPER="$APP/Contents/Helpers/cala-keychain"
+scripts/verify-keychain-helper.sh "$HELPER"   # the committed bytes, before anything signs around it
 if [[ "$IDENTITY" == "-" ]]; then
-  # Ad-hoc: a fixed designated requirement keeps macOS permission grants across local rebuilds.
-  codesign --force --sign - -r="designated => identifier \"$BUNDLE_ID\"" "$APP"
+  # Ad-hoc: a fixed designated requirement keeps macOS permission grants across local rebuilds. No --deep: the helper
+  # keeps its own (committed) signature.
+  codesign --force --sign - --options runtime --entitlements packaging/Cala.entitlements \
+    -r="designated => identifier \"$BUNDLE_ID\"" "$APP"
+  scripts/verify-keychain-helper.sh "$HELPER" --cdhash
 else
+  # Developer ID: every nested binary must carry the identity for notarization. The Keychain then trusts the team id,
+  # which is just as stable across updates.
+  codesign --force --sign "$IDENTITY" --options runtime --timestamp --identifier local.cala.keychain "$HELPER"
   codesign --force --sign "$IDENTITY" --options runtime --timestamp --entitlements packaging/Cala.entitlements "$APP"
 fi
 codesign --verify --strict "$APP"
+codesign --verify --strict "$HELPER"
+
+# The helper serves the app whose CFBundleIdentifier its bundle declares, signed with that identifier, and (when the
+# helper has a Team ID) only that team. Anything inconsistent here would leave Mail without its passwords: fail.
+sig() { codesign -dvvv "$1" 2>&1 | sed -n "s/^$2=//p"; }
+plist_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist")
+[[ "$plist_id" == "$BUNDLE_ID" ]] || { echo "Info.plist id $plist_id != $BUNDLE_ID" >&2; exit 1; }
+[[ "$(sig "$APP" Identifier)" == "$BUNDLE_ID" ]] || { echo "app signing identifier $(sig "$APP" Identifier) != $BUNDLE_ID" >&2; exit 1; }
+[[ "$(sig "$HELPER" Identifier)" == local.cala.keychain ]] || { echo "helper identifier is $(sig "$HELPER" Identifier)" >&2; exit 1; }
+app_team=$(sig "$APP" TeamIdentifier); helper_team=$(sig "$HELPER" TeamIdentifier)
+if [[ "$IDENTITY" == "-" ]]; then
+  [[ "$app_team" == "not set" && "$helper_team" == "not set" ]] || { echo "ad-hoc build with a Team ID (app $app_team, helper $helper_team)" >&2; exit 1; }
+else
+  [[ -n "$app_team" && "$app_team" != "not set" && "$helper_team" == "$app_team" ]] || { echo "Team ID mismatch: app ${app_team:-none}, helper ${helper_team:-none}" >&2; exit 1; }
+fi
 chmod -R go-w "$APP"
 echo "Listo: $APP ($VERSION build $BUILD_NUMBER, ${ARCHS[*]}, firma: $([[ $IDENTITY == - ]] && echo ad-hoc || echo "$IDENTITY"))"

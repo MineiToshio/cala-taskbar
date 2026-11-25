@@ -24,7 +24,17 @@ Luego abre el borrador (`gh release view v1.0.0 --web`), revísalo y pulsa **Pub
 
 ### Sobre la firma ad-hoc
 
-Las versiones gratuitas se firman "ad-hoc" con un requisito fijo al bundle id. Así macOS **conserva los permisos al actualizar**: el usuario no tiene que volver a dar Accesibilidad ni Grabación de pantalla con cada versión. A cambio, otra app firmada ad-hoc con el mismo bundle id podría heredar esos permisos. Para eso tendría que estar ya ejecutándose en la Mac del usuario, así que es un riesgo bajo; la firma Developer ID lo elimina.
+Las versiones gratuitas se firman "ad-hoc" con un requisito fijo al bundle id. Así macOS **conserva los permisos al actualizar**: el usuario no tiene que volver a dar Accesibilidad ni Grabación de pantalla con cada versión. A cambio, otra app firmada ad-hoc con el mismo bundle id podría heredar esos permisos. Para eso tendría que estar ya ejecutándose en la Mac del usuario, así que es un riesgo bajo; la firma Developer ID lo elimina. Los builds ad-hoc también llevan el hardened runtime con `packaging/Cala.entitlements`, igual que los firmados.
+
+### Ayudante del Llavero (`cala-keychain`)
+
+Las contraseñas de Correo solo las toca `Cala.app/Contents/Helpers/cala-keychain` (fuente: `Helpers/cala-keychain/main.c`). Es un binario precompilado y firmado ad-hoc **una sola vez**, guardado en el repo como `packaging/Helpers/cala-keychain` junto a `packaging/Helpers/cala-keychain.cdhash` (SHA-256 y cdhash por arquitectura). `build.sh` lo copia byte a byte y, en ad-hoc, sin volver a firmarlo; falla si `scripts/verify-keychain-helper.sh` no cuadra o si el bundle id, el identificador de firma (`local.cala.keychain`) o el Team ID no coinciden. Detalles en [architecture.md](architecture.md#code-signing-and-permissions).
+
+- **No lo recompiles a la ligera.** El Llavero confía en el ayudante por su cdhash: un binario nuevo significa que **cada usuario** verá otra vez el aviso «cala-keychain quiere acceder…» una vez por cuenta. Solo por un bug del ayudante o un cambio de macOS mínimo (`MIN_MACOS` en el script, igual que en `build.sh` y `Package.swift`).
+- **Cómo:** primero `scripts/build-keychain-helper.sh --test DIR` (variantes de prueba que nunca se publican), luego `scripts/build-keychain-helper.sh --yes` (sin `--yes` se niega). Regenera el binario y el `.cdhash`; compruébalo con `scripts/verify-keychain-helper.sh packaging/Helpers/cala-keychain --cdhash`.
+- **Commit:** `Helpers/` y `packaging/Helpers/` van juntos en el mismo commit, y el binario con permiso de ejecución (`git ls-files -s packaging/Helpers/cala-keychain` debe mostrar `100755`). El binario publicado tiene que salir de ese `main.c`.
+- **`CALA_BUNDLE_ID`:** solo letras, dígitos, puntos y guiones. El ayudante sirve a la app cuyo `CFBundleIdentifier` declara el bundle que lo contiene, así que cambiar el id no exige recompilarlo; `build.sh` exige que el Info.plist y la firma de la app usen ese mismo id.
+- **Developer ID:** `build.sh` vuelve a firmar la copia del ayudante con la identidad (hardened runtime, timestamp, identificador `local.cala.keychain`; la notarización lo exige) y exige el mismo Team ID que la app. El Llavero pasa a confiar en la firma del equipo, estable entre versiones; pasar de ad-hoc a Developer ID (o al revés) pide el aviso una vez más por cuenta. En este modo, si el sistema no da una comprobación anti-carrera, el ayudante falla cerrado (código 78, «Reinicia tu Mac…»); en ad-hoc la omite. Lo que protege: en ad-hoc solo frena llamadas accidentales u ocasionales (un atacante local puede firmar cualquier programa con cualquier identificador); con Developer ID solo atiende código firmado por ese equipo con el bundle id de Cala.
 
 ## Opcional: firma Developer ID y notarización (de pago)
 
@@ -61,7 +71,7 @@ Comprobado en la máquina de desarrollo: `spctl` rechaza el build ad-hoc y su DM
    xcrun notarytool store-credentials cala-notary --apple-id TU_APPLE_ID --team-id TEAMID
    ```
    Te pide una **contraseña específica de app**, que se crea en https://account.apple.com → Inicio de sesión y seguridad → Contraseñas de apps. Para CI también puedes usar una API key de App Store Connect (ver `scripts/notarize.sh`).
-4. **Decide el bundle id definitivo antes del primer release público**, por ejemplo `com.tudominio.cala`. Cambiarlo después hace que macOS trate la app como otra: cada usuario tendría que volver a dar todos los permisos. El valor por defecto `local.cala` funciona, pero no es un identificador propio.
+4. **Decide el bundle id definitivo antes del primer release público**, por ejemplo `com.tudominio.cala`. Cambiarlo después hace que macOS trate la app como otra: cada usuario tendría que volver a dar todos los permisos. El valor por defecto `local.cala` funciona, pero no es un identificador propio. El ayudante del Llavero (`Contents/Helpers/cala-keychain`) lee el bundle id de la app que lo contiene, así que no hay que recompilarlo al cambiarlo; `build.sh` falla si el id, la firma o el Team ID no cuadran.
 5. **(Opcional) DSN de Sentry** para *Reportar un problema* y los informes de fallo. Sin él, la ventana de reporte dice que el envío no está activado en esa versión. El DSN no se guarda en el repo.
 
 ### Cada release firmado
@@ -90,6 +100,7 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 #### Qué comprueba `release.sh`
 
 - Que pasen `scripts/check-rules.sh`, `scripts/check-mail.sh`, `scripts/check-modules.sh` y `scripts/check-zones.sh`.
+- Vía `build.sh`: que el ayudante del Llavero sea el del repo (SHA-256 y, en ad-hoc, cdhash) y que bundle id, identificadores de firma y Team ID cuadren.
 - Que la firma sea válida y que las entitlements estén puestas (`packaging/Cala.entitlements`: Apple Events para Finder, Calendario y Ubicación; nada más).
 - Que notarytool devuelva *Accepted*. Si no, imprime el `id` para pedir el log con `xcrun notarytool log <id> --keychain-profile cala-notary`.
 - `spctl` sobre la app y el DMG, es decir, lo mismo que mira Gatekeeper.
@@ -116,4 +127,4 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 
 ## Desarrollo local
 
-`./install.sh` compila (ad-hoc), reemplaza `~/Applications/Cala.app` y la abre. El build ad-hoc fija el *designated requirement* al bundle id, así macOS conserva los permisos entre recompilaciones. Un build firmado con Developer ID tiene otro requisito, así que la primera vez que pases de uno a otro macOS vuelve a pedir los permisos.
+`./install.sh` compila (ad-hoc), reemplaza `~/Applications/Cala.app` y la abre. El build ad-hoc fija el *designated requirement* al bundle id, así macOS conserva los permisos entre recompilaciones. Un build firmado con Developer ID tiene otro requisito, así que la primera vez que pases de uno a otro macOS vuelve a pedir los permisos (y el aviso del Llavero de Correo, una vez por cuenta).

@@ -53,15 +53,17 @@ struct MailMessage: Identifiable, Equatable {
     var uidValidity: UInt32? = nil
 }
 
-/// Cala is ad-hoc signed, so after every update macOS asks again (once per stored app password) before Cala can read
-/// the Keychain. This remembers the last build that read every enabled account's password, which is how the app knows
-/// an update happened and the explanation should come before those prompts.
+/// macOS asks again (once per stored app password) whenever the program reading the Keychain changes. That program is
+/// the bundled helper (see MailKeychain), so `build` is its cdhash, which changes only when the helper is rebuilt (or
+/// the first time a build with the helper runs). This remembers the last one that read every enabled account's
+/// password, which is how the app knows the explanation should come before those prompts.
 struct MailKeychainGate {
     static let defaultsKey = "mailKeychainBuild"
     let build: String
     let defaults: UserDefaults
 
-    init(build: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0",
+    init(build: String = MailKeychain.helperIdentity
+             ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0",
          defaults: UserDefaults = .standard) {
         self.build = build
         self.defaults = defaults
@@ -664,55 +666,96 @@ final class MailService: ObservableObject {
     private static func clampedColor(_ index: Int) -> Int { min(5, max(0, index)) }
 }
 
-private enum MailKeychain {
-    private static func query(for id: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Cala Mail",
-            kSecAttrAccount as String: id
-        ]
+/// Mail passwords live in the Keychain (service "Cala Mail"), but Cala never touches them itself: every read and write
+/// goes through Contents/Helpers/cala-keychain (source in Helpers/cala-keychain). That helper is signed once and shipped
+/// unchanged, so the Keychain keeps trusting it across Cala updates, while Cala's own ad-hoc signature changes with
+/// every build. The request travels on stdin and the password on stdin/stdout, never in argv or the environment.
+enum MailKeychain {
+    private enum Exit: Int32 { case ok = 0, notFound = 1, denied = 2, refused = 77, unverified = 78 }
+
+    static var helperURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cala-keychain") }
+
+    /// The helper's cdhash: the Keychain prompts again only when this changes (see MailKeychainGate).
+    static var helperIdentity: String? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(helperURL as CFURL, [], &code) == errSecSuccess, let code else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, [], &info) == errSecSuccess,
+              let unique = (info as? [String: Any])?[kSecCodeInfoUnique as String] as? Data else { return nil }
+        return "helper-" + unique.map { String(format: "%02x", $0) }.joined()
     }
 
     static func password(for id: String) throws -> String? {
-        var attributes = query(for: id)
-        attributes[kSecReturnData as String] = true
-        attributes[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let result = SecItemCopyMatching(attributes as CFDictionary, &item)
-        if result == errSecItemNotFound { return nil }
+        let (status, output) = try run("get", id)
+        if status == Exit.notFound.rawValue { return nil }
         // Deny / Cancel on the macOS prompt, or no way to show it: retrying would only ask again every few seconds.
-        if [errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed].contains(result) {
-            throw MailFailure.keychainDenied
-        }
-        guard result == errSecSuccess, let data = item as? Data,
-              let password = String(data: data, encoding: .utf8) else { throw MailFailure.keychain }
+        if status == Exit.denied.rawValue { throw MailFailure.keychainDenied }
+        try refusal(status)
+        guard status == Exit.ok.rawValue, let password = String(data: output, encoding: .utf8) else { throw MailFailure.keychain }
         return password
     }
 
     static func set(_ password: String?, for id: String) throws {
-        let query = query(for: id)
         guard let password else {
-            let status = SecItemDelete(query as CFDictionary)
-            guard status == errSecSuccess || status == errSecItemNotFound else { throw MailFailure.keychain }
+            let (status, _) = try run("delete", id)
+            try refusal(status)
+            guard status == Exit.ok.rawValue || status == Exit.notFound.rawValue else { throw MailFailure.keychain }
             return
         }
-        let data = Data(password.utf8)
-        var item = query
-        item[kSecValueData as String] = data
-        let status = SecItemAdd(item as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            let value = [kSecValueData as String: data]
-            guard SecItemUpdate(query as CFDictionary, value as CFDictionary) == errSecSuccess else {
-                throw MailFailure.keychain
-            }
-        } else if status != errSecSuccess {
+        let (status, _) = try run("set", id, secret: Data(password.utf8))
+        try refusal(status)
+        guard status == Exit.ok.rawValue else { throw MailFailure.keychain }
+    }
+
+    private static func refusal(_ status: Int32) throws {
+        if status == Exit.refused.rawValue { throw MailFailure.keychainRestart }
+        if status == Exit.unverified.rawValue { throw MailFailure.keychainUnverified }
+    }
+
+    /// Blocks the calling thread while macOS may show its prompt, as SecItem calls did. It does not spin the run loop
+    /// (unlike `waitUntilExit`), so nothing else runs re-entrantly on the main thread meanwhile.
+    private static func run(_ command: String, _ id: String, secret: Data? = nil) throws -> (Int32, Data) {
+        guard !id.contains("\n"), !id.contains("\r") else { throw MailFailure.keychain }
+        let process = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
+        process.executableURL = helperURL
+        process.arguments = []
+        process.environment = [:]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = errors
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch {
+            log("mail: Keychain helper did not start: \(error.localizedDescription)")
             throw MailFailure.keychain
         }
+        _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        var request = Data("\(command)\n\(id)\n".utf8)
+        if let secret { request.append(secret) }
+        // A helper that exits early (it refused the caller) closes the pipe; the exit status says why.
+        try? input.fileHandleForWriting.write(contentsOf: request)
+        request.resetBytes(in: 0..<request.count)
+        try? input.fileHandleForWriting.close()
+        let result = output.fileHandleForReading.readDataToEndOfFile()
+        let message = errors.fileHandleForReading.readDataToEndOfFile()
+        exited.wait()
+        try? output.fileHandleForReading.close()
+        try? errors.fileHandleForReading.close()
+        let status = process.terminationStatus
+        if status > Exit.denied.rawValue || process.terminationReason != .exit {
+            let text = String(decoding: message.prefix(300), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            log("mail: Keychain helper \(command) failed (\(status)): \(text)")
+        }
+        return (process.terminationReason == .exit ? status : -1, result)
     }
 }
 
 enum MailFailure: LocalizedError {
     case invalidEmail, invalidAppPassword, authenticationFailed, appPasswordRequired, blocked, offline, timedOut
+    /// The Keychain helper refused this process, typically because Cala.app was replaced while this copy kept running.
+    case keychainRestart
+    /// The Keychain helper could not confirm who called it (an OS check failed; Developer ID builds only).
+    case keychainUnverified
     case accountsFile, keychain, keychainDenied, unavailable, staleMessage, missingMailbox, moveUnsupported, rejected, responseTooLarge, messageTooLarge, cancelled
 
     static func from(_ error: Error) -> Self {
@@ -735,7 +778,7 @@ enum MailFailure: LocalizedError {
 
     var requiresUserAction: Bool {
         switch self {
-        case .authenticationFailed, .appPasswordRequired, .blocked, .keychainDenied: return true
+        case .authenticationFailed, .appPasswordRequired, .blocked, .keychainDenied, .keychainRestart, .keychainUnverified: return true
         default: return false
         }
     }
@@ -744,7 +787,7 @@ enum MailFailure: LocalizedError {
         let message = localizedDescription
         switch self {
         case .authenticationFailed, .appPasswordRequired, .keychainDenied: return .authFailed(message)
-        case .blocked: return .blocked(message)
+        case .blocked, .keychainRestart, .keychainUnverified: return .blocked(message)
         default: return .offline(message)
         }
     }
@@ -779,6 +822,11 @@ enum MailFailure: LocalizedError {
         case .keychainDenied:
             return tx("macOS didn’t let Cala read the app password from the Keychain. Press Refresh and choose “Always Allow”.",
                       "macOS no dejó que Cala leyera la contraseña de aplicación del Llavero. Pulsa Actualizar y elige «Permitir siempre».")
+        case .keychainRestart:
+            return tx("Restart Cala to refresh its Keychain access.", "Reinicia Cala para actualizar el acceso al llavero.")
+        case .keychainUnverified:
+            return tx("macOS couldn’t confirm that the Keychain request came from Cala. Restart your Mac; if it keeps happening, reinstall Cala.",
+                      "macOS no pudo confirmar que la petición al Llavero venía de Cala. Reinicia tu Mac; si se repite, reinstala Cala.")
         case .unavailable:
             return tx("This mail account is paused or unavailable.", "Esta cuenta de correo está en pausa o no está disponible.")
         case .staleMessage:

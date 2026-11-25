@@ -922,6 +922,14 @@ private func checkKeychainNoticeGate() async throws {
                              awaitingKeychainNotice: false) == .problem)
     expect("Keychain denial stops retrying (no prompt loop) and is shown as a sign-in problem",
            MailFailure.keychainDenied.requiresUserAction && MailFailure.keychainDenied.status.problem != nil)
+    expect("Keychain helper refusal (Cala.app replaced while running) asks for a restart and stops retrying",
+           MailFailure.keychainRestart.requiresUserAction
+           && MailFailure.keychainRestart.status.problem == MailFailure.keychainRestart.localizedDescription
+           && MailFailure.keychainRestart.localizedDescription != MailFailure.keychain.localizedDescription)
+    expect("Keychain helper unable to verify its caller asks for action, stops retrying and says something distinct",
+           MailFailure.keychainUnverified.requiresUserAction
+           && MailFailure.keychainUnverified.status.problem == MailFailure.keychainUnverified.localizedDescription
+           && Set([MailFailure.keychainUnverified, .keychainRestart, .keychain].map(\.localizedDescription)).count == 3)
 }
 do { try await checkKeychainNoticeGate() } catch { expect("Keychain notice gate transcript", false) }
 

@@ -166,7 +166,7 @@ Providers: Gmail (and Google Workspace when the admin allows IMAP and app passwo
 - **Actions:** Archive, Delete, Open in Gmail / iCloud Mail / Yahoo Mail.
 - **Sync:** one IMAP connection per account; it uses IDLE for real-time arrivals when the server supports it, otherwise it polls.
 - **Images:** remote images load by default; Settings → Integrations → Mail turns it off (`mailLoadsRemoteImages`).
-- **Keychain prompt:** after each update macOS asks for the Mac password once per account. A small notice window explains it first and mail sync waits for "Got it".
+- **Keychain prompt:** macOS asks for the Mac password once per account saved by an earlier Cala, the first time the bundled helper `cala-keychain` reads it (not after every update: the helper is prebuilt and keeps its cdhash; accounts it saves itself normally do not ask). A small notice window explains it first and mail sync waits for "Got it". If the helper refuses the caller, the account shows "Restart Cala to refresh its Keychain access." (or, Developer ID builds only, "macOS couldn't confirm…"); see [troubleshooting.md](troubleshooting.md).
 - **Tray panels and the auto-hide bar:** a panel opened with a click stays open until a click outside, Esc or the same tray icon again; the pointer leaving never closes it, and the bar that owns an open panel stays visible (`PanelPolicy`).
 
 ## Tray layout and the "^" panel

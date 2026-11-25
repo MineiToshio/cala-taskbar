@@ -20,7 +20,9 @@
 | Option+Tab does nothing | Accessibility not granted yet (the tap is created within 3 s of granting) or the switcher is off in Settings → General |
 | I quit the bar by accident | Open "Cala" from Spotlight or Launchpad; reopening a running app opens Settings |
 | Previews from another tool still appear | A previously started copy keeps running after deleting the app. Quit it, or log out / reboot (other user sessions need their own logout) |
-| macOS asks for the Mac password for "Cala Mail" | Expected once per mail account after each update (Cala is not signed with a paid Developer ID). Type it and choose Always Allow; it goes to macOS only |
+| macOS says "cala-keychain wants to access key "Cala Mail" in your keychain" | Expected once per mail account saved by an older Cala, after the update that brings the Keychain helper (`Contents/Helpers/cala-keychain`); later updates keep the same helper and do not ask. Type the Mac password and choose Always Allow; it goes to macOS only. It comes back only if a release replaces the helper, or when switching between ad-hoc and Developer ID builds |
+| Mail: "Restart Cala to refresh its Keychain access." | The helper refused the caller (exit 77): usually Cala.app was replaced while the old copy kept running. Quit and reopen Cala. If it persists, the bundle is inconsistent (e.g. re-signed with another identifier): reinstall. `debug.log` has `mail: Keychain helper … failed (77)` with the reason |
+| Mail: "macOS couldn't confirm that the Keychain request came from Cala." | Developer ID builds only (exit 78): the OS did not provide an anti-race check, so the helper fails closed. Restart the Mac; if it keeps happening, reinstall Cala (check `debug.log` for the reason) |
 | Mail account shows an error | Check that IMAP is on and that you used an app password, not the normal password (Gmail needs 2-Step Verification). Outlook and Hotmail are not supported |
 | Two bars overlap or one is missing after plugging a screen | Bars are rebuilt 0.4 s after a screen change. Quit and reopen if it does not settle |
 

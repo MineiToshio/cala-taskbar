@@ -145,7 +145,7 @@ Solo se piden los permisos de los módulos que usas: **Zonas sola necesita únic
 
 ### El aviso del Llavero (Correo)
 
-Después de cada actualización de Cala, macOS muestra *«Cala quiere acceder a la llave "Cala Mail" de tu llavero.»*, una vez por cuenta de correo, y pide *«Para permitir esto, introduce la contraseña del llavero Inicio de sesión»*, que es la **contraseña de tu Mac**. Escríbela y pulsa **Permitir siempre** (los otros botones son *Denegar* y *Permitir*). Esa contraseña va solo a macOS: Cala nunca la ve. Pasa porque Cala es gratis y no está firmada con un Apple Developer ID de pago, así que macOS revisa cada versión nueva antes de entregarle la contraseña de aplicación guardada.
+Una vez, tras la actualización que trae el ayudante de Llavero de Cala, macOS muestra *«cala-keychain quiere acceder a la llave "Cala Mail" de tu llavero.»*, una vez por cada cuenta de correo guardada con una versión anterior, y pide *«Para permitir esto, introduce la contraseña del llavero Inicio de sesión»*, que es la **contraseña de tu Mac**. Escríbela y pulsa **Permitir siempre** (los otros botones son *Denegar* y *Permitir*). Esa contraseña va solo a macOS: Cala nunca la ve. Cala es gratis y no está firmada con un Apple Developer ID de pago, así que macOS confía en un programa por su huella exacta; solo el pequeño ayudante `cala-keychain` dentro de Cala.app toca el Llavero, y no cambia entre actualizaciones, así que las siguientes no vuelven a preguntar. Las cuentas que añadas después las guarda el propio ayudante y normalmente no preguntan. Solo una actualización que tenga que reemplazar el ayudante (algo raro) pregunta una vez más.
 
 ---
 
@@ -178,7 +178,8 @@ Nada sale de tu Mac salvo que tú lo envíes. *Reportar un problema* te muestra 
 - **No veo miniaturas**: activa Grabación de pantalla en *Configuración → Permisos*.
 - **Zonas no hace nada**: necesita Accesibilidad (*Configuración → Permisos*); arranca sola cuando la permites. Comprueba que Zonas esté activa en *Configuración → General → Qué hace Cala*.
 - **El Dock desapareció**: Cala lo oculta solo si lo pediste. Desactiva **Ocultar el Dock de macOS** en *Configuración → Barra de tareas*.
-- **macOS dice «Cala quiere acceder a la llave "Cala Mail" de tu llavero.»**: es lo esperado tras cada actualización; mira [El aviso del Llavero](#el-aviso-del-llavero-correo). Escribe la contraseña de tu Mac (la del llavero Inicio de sesión) y pulsa **Permitir siempre**; va a macOS, no a Cala.
+- **macOS dice «cala-keychain quiere acceder a la llave "Cala Mail" de tu llavero.»**: es lo esperado una vez; mira [El aviso del Llavero](#el-aviso-del-llavero-correo). Escribe la contraseña de tu Mac (la del llavero Inicio de sesión) y pulsa **Permitir siempre**; va a macOS, no a Cala.
+- **Correo dice «Reinicia Cala para actualizar el acceso al llavero.»**: Cala se actualizó o se reemplazó mientras seguía abierta. Sal de Cala y vuelve a abrirla. **«macOS no pudo confirmar que la petición al Llavero venía de Cala»** (solo builds con Developer ID): reinicia tu Mac; si se repite, reinstala Cala.
 - **Algo falla**: clic derecho en la barra → *Reportar un problema…*, o abre un [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
 ## Compilar desde el código
