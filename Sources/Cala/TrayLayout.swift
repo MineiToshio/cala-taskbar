@@ -25,6 +25,9 @@ struct TrayItemInfo {
 }
 
 enum TrayItems {
+    static let usage = TrayItemInfo(id: trayUsage, englishTitle: "Claude & Codex", spanishTitle: "Claude y Codex",
+                                    symbol: "chart.bar.fill", defaultPlace: .bar)
+
     /// Default left-to-right order.
     static let all: [TrayItemInfo] = [
         TrayItemInfo(id: trayKB, englishTitle: "Keyboard", spanishTitle: "Teclado", symbol: "keyboard", defaultPlace: .more),
@@ -32,7 +35,7 @@ enum TrayItems {
         TrayItemInfo(id: trayBT, englishTitle: "Bluetooth", symbol: "dot.radiowaves.right", defaultPlace: .more),
         TrayItemInfo(id: trayBright, englishTitle: "Brightness", spanishTitle: "Brillo", symbol: "sun.max.fill", defaultPlace: .more),
         TrayItemInfo(id: trayVol, englishTitle: "Volume", spanishTitle: "Volumen", symbol: "speaker.wave.2.fill", defaultPlace: .bar),
-        TrayItemInfo(id: trayUsage, englishTitle: "Claude and Codex", spanishTitle: "Claude y Codex", symbol: "chart.bar.fill", defaultPlace: .bar),
+        usage,
         TrayItemInfo(id: traySystem, englishTitle: "CPU and memory", spanishTitle: "CPU y memoria", symbol: "cpu", defaultPlace: .bar),
         TrayItemInfo(id: trayDisk, englishTitle: "Disk", spanishTitle: "Disco", symbol: "internaldrive", defaultPlace: .bar),
         TrayItemInfo(id: trayMail, englishTitle: "Mail", spanishTitle: "Correo", symbol: "envelope", defaultPlace: .bar),

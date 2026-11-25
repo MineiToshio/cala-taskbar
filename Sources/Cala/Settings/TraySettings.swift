@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 struct TrayPane: View {
     @ObservedObject var store: ConfigStore
@@ -8,41 +7,38 @@ struct TrayPane: View {
     let open: (SettingsPane) -> Void
     @Environment(\.settingsSnapshot) private var snapshot
     @State private var confirmReset = false
+    @State private var presentedOptions: TrayItemOptions.Kind?
+
+    private let rowHeight: CGFloat = 44
+    private let headingHeight: CGFloat = 26
+
+    private enum Row: Hashable {
+        case heading(TrayPlace)
+        case item(String)
+        case empty(TrayPlace)
+
+        var itemID: String? {
+            if case let .item(id) = self { return id }
+            return nil
+        }
+    }
 
     var body: some View {
-        let ids = itemIDs
+        let rows = itemRows
         VStack(alignment: .leading, spacing: 22) {
             Card {
                 ForEach(SettingsPane.trayDetails) { pane in
                     if pane != .mail { RowDivider() }
-                    SettingRow(title: pane.title,
-                               caption: pane == .calendar ? tx("Upcoming events in the taskbar clock.", "Próximos eventos en el reloj de la barra de tareas.") : nil) {
-                        Button(tx("Open", "Abrir")) { open(pane) }
-                            .accessibilityLabel(tx("Open settings for \(pane.title)", "Abrir ajustes de \(pane.title)"))
+                    itemContent(icon: pane.icon, title: pane.title, caption: pane == .calendar ? pane.subtitle : nil) {
+                        optionsButton(for: pane.title) { open(pane) }
                     }
+                    .padding(.horizontal, 16)
                 }
             }
-            SectionTitle(text: tx("Item order and placement", "Orden y ubicación de los elementos"))
-            Text(tx("Drag an item by its handle or use its reorder menu. Order applies within each location.",
-                    "Arrastra un elemento por su tirador o usa su menú para cambiar el orden dentro de cada ubicación."))
-                .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            ForEach(TrayPlace.allCases) { place in
-                let group = ids.filter { store.config.place($0) == place }
-                SectionTitle(text: placementHeading(place))
-                Card {
-                    if group.isEmpty {
-                        SettingRow(title: tx("No items", "Sin elementos")) { EmptyView() }
-                    }
-                    ForEach(Array(group.enumerated()), id: \.element) { index, id in
-                        if let info = TrayItems.info(id) {
-                            if index > 0 { RowDivider() }
-                            itemRow(info, index: index, ids: group)
-                            if id == traySystem { monitorSettings }
-                            if id == trayDisk { DiskFolderSettings(store: store) }
-                        }
-                    }
-                }
-            }
+            SectionTitle(text: tx("Item order and placement", "Orden y ubicación"))
+            Text(tx("Drag rows to reorder them or move them between groups.", "Arrastra las filas para ordenarlas o moverlas entre grupos."))
+                .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            itemList(rows)
             Button(tx("Reset order and placement…", "Restablecer orden y ubicación…")) { confirmReset = true }
                 .alert(tx("Reset tray order and placement?", "¿Restablecer orden y ubicación de la Bandeja?"), isPresented: $confirmReset) {
                     Button(tx("Reset", "Restablecer"), role: .destructive) {
@@ -59,60 +55,121 @@ struct TrayPane: View {
         }
     }
 
-    private func itemRow(_ info: TrayItemInfo, index: Int, ids: [String]) -> some View {
+    private var itemRows: [Row] {
+        var seen = Set<String>()
+        let ids = store.config.orderedTrayIDs.filter { seen.insert($0).inserted }
+        return TrayPlace.allCases.flatMap { place -> [Row] in
+            let items = ids.filter { store.config.place($0) == place }
+            return [.heading(place)] + (items.isEmpty ? [.empty(place)] : items.map(Row.item))
+        }
+    }
+
+    private func itemList(_ rows: [Row]) -> some View {
+        let height = rows.reduce(CGFloat.zero) { height, row in
+            if case .heading = row { return height + headingHeight }
+            return height + rowHeight
+        }
+        // A single movable List supplies the full-row drag preview and insertion indicator. The
+        // headings mark the placement boundaries, and empty rows keep those destinations reachable.
+        return List {
+            ForEach(rows, id: \.self) { row in
+                Group {
+                    switch row {
+                    case let .heading(place):
+                        Text(placementHeading(place))
+                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                            .accessibilityAddTraits(.isHeader)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(height: headingHeight)
+                    case .empty:
+                        Text(tx("Drop items here", "Suelta elementos aquí"))
+                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(height: rowHeight)
+                    case let .item(id):
+                        if let info = TrayItems.info(id) { itemRow(info, rows: rows) }
+                    }
+                }
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                .moveDisabled(row.itemID == nil)
+            }
+            .onMove { from, to in move(rows, from: from, to: to) }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden).scrollDisabled(true)
+        .frame(height: height + 12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func itemRow(_ info: TrayItemInfo, rows: [Row]) -> some View {
         let id = info.id
-        let caption = itemCaption(id)
-        let title = id == trayUsage ? SettingsPane.usage.title : info.title
-        return HStack(spacing: 10) {
-            Image(systemName: "line.3.horizontal").font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary).frame(width: 20, height: 28)
-                .contentShape(Rectangle()).draggable(id).accessibilityHidden(true)
-            Image(systemName: info.symbol).frame(width: 22).foregroundStyle(.secondary).accessibilityHidden(true)
+        let place = store.config.place(id)
+        let index = rows.firstIndex(of: .item(id))
+        let canMoveUp = index.map { $0 > 0 && rows[$0 - 1].itemID != nil } ?? false
+        let canMoveDown = index.map { $0 + 1 < rows.count && rows[$0 + 1].itemID != nil } ?? false
+        return itemContent(icon: info.symbol, title: info.title, caption: itemCaption(id)) {
+            if id == trayMail || id == trayUsage {
+                optionsButton(for: info.title) { open(id == trayMail ? .mail : .usage) }
+            } else if let options = TrayItemOptions.Kind(itemID: id) {
+                optionsButton(for: info.title) { presentedOptions = options }
+                    .popover(isPresented: Binding(get: { presentedOptions == options },
+                                                  set: { if !$0, presentedOptions == options { presentedOptions = nil } }),
+                             arrowEdge: .trailing) {
+                        TrayItemOptions(store: store, kind: options)
+                    }
+            }
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            ForEach(TrayPlace.allCases.filter { $0 != place }) { target in
+                Button(moveTitle(target)) { move(id, to: target, in: rows) }
+            }
+            Divider()
+            Button(tx("Move up", "Subir")) { moveStep(index, up: true, in: rows) }.disabled(!canMoveUp)
+            Button(tx("Move down", "Bajar")) { moveStep(index, up: false, in: rows) }.disabled(!canMoveDown)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityActions {
+            ForEach(TrayPlace.allCases.filter { $0 != place }) { target in
+                Button(moveTitle(target)) { move(id, to: target, in: rows) }
+            }
+            if canMoveUp { Button(tx("Move up", "Subir")) { moveStep(index, up: true, in: rows) } }
+            if canMoveDown { Button(tx("Move down", "Bajar")) { moveStep(index, up: false, in: rows) } }
+        }
+    }
+
+    private func itemContent<Options: View>(icon: String, title: String, caption: String?,
+                                           @ViewBuilder options: () -> Options) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).frame(width: 22).foregroundStyle(.secondary).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13, weight: .medium))
+                Text(title).font(.system(size: 13, weight: .medium)).lineLimit(1)
                 if let caption {
-                    Text(caption).font(.system(size: 11.5)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(caption).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
             Spacer(minLength: 4)
-            if id == trayMail || id == trayUsage {
-                let pane: SettingsPane = id == trayMail ? .mail : .usage
-                Button { open(pane) } label: { Image(systemName: "gearshape") }
-                    .accessibilityLabel(tx("Open settings for \(pane.title)", "Abrir ajustes de \(pane.title)"))
-            }
-            Menu(tx("Move", "Mover")) {
-                Button(tx("Move up", "Subir")) { move(ids, from: index, to: index - 1) }.disabled(index == 0)
-                Button(tx("Move down", "Bajar")) { move(ids, from: index, to: index + 1) }.disabled(index == ids.count - 1)
-                Divider()
-                Picker(tx("Placement", "Ubicación"), selection: place(id)) {
-                    ForEach(TrayPlace.allCases) { Text(placementHeading($0)).tag($0) }
-                }.pickerStyle(.inline)
-            }
-            .fixedSize()
-            .accessibilityLabel(tx("Move \(title)", "Mover \(title)"))
+            options()
         }
-        .padding(.horizontal, 16).padding(.vertical, 8)
-        .frame(minHeight: 44)
-        .contentShape(Rectangle())
-        .dropDestination(for: String.self) { items, _ in
-            guard let source = items.first, let from = ids.firstIndex(of: source), from != index else { return false }
-            move(ids, from: from, to: index)
-            return true
-        }
-        .accessibilityAction(named: Text(tx("Move up", "Subir"))) { move(ids, from: index, to: index - 1) }
-        .accessibilityAction(named: Text(tx("Move down", "Bajar"))) { move(ids, from: index, to: index + 1) }
+        .frame(height: rowHeight)
     }
 
-    private var itemIDs: [String] {
-        var seen = Set<String>()
-        return store.config.orderedTrayIDs.filter { seen.insert($0).inserted }
+    private func optionsButton(for title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "gearshape").font(.system(size: 14)).frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help(tx("Options…", "Opciones…"))
+        .accessibilityLabel(tx("Options for \(title)…", "Opciones de \(title)…"))
     }
 
     private func itemCaption(_ id: String) -> String? {
         if id == trayMail && !mail.accountsLoadFailed && mail.accounts.isEmpty { return tx("No accounts", "Sin cuentas") }
         if id == trayMail && store.config.place(id) == .hidden {
-            return tx("Enabled accounts still sync when the tray is on.", "Las cuentas activadas se siguen sincronizando cuando la Bandeja está activa.")
+            return tx("Enabled accounts still sync when the tray is on.", "Las cuentas siguen sincronizándose con la bandeja activa")
         }
         if id == trayUsage {
             let config = store.config
@@ -139,18 +196,81 @@ struct TrayPane: View {
         }
     }
 
-    private func place(_ id: String) -> Binding<TrayPlace> {
-        Binding(get: { store.config.place(id) }, set: { store.config.trayLayout[id] = $0.rawValue })
+    private func moveTitle(_ place: TrayPlace) -> String {
+        switch place {
+        case .bar: tx("Move to the bar", "Mover a la barra")
+        case .more: tx("Move to More", "Mover a Más")
+        case .hidden: tx("Move to Hidden", "Mover a Ocultos")
+        }
     }
 
-    private func move(_ ids: [String], from: Int, to: Int) {
-        guard ids.indices.contains(to), from != to else { return }
-        var order = ids
-        let item = order.remove(at: from)
-        order.insert(item, at: to)
-        let members = Set(ids)
-        var reordered = order.makeIterator()
-        store.config.trayOrder = itemIDs.map { id in members.contains(id) ? (reordered.next() ?? id) : id }
+    private func move(_ id: String, to place: TrayPlace, in rows: [Row]) {
+        guard let from = rows.firstIndex(of: .item(id)),
+              let heading = rows.firstIndex(of: .heading(place)) else { return }
+        // Append to the destination group, before the next heading.
+        let end = rows.indices.dropFirst(heading + 1).first { index in
+            if case .heading = rows[index] { return true }
+            return false
+        } ?? rows.endIndex
+        move(rows, from: IndexSet(integer: from), to: end)
+    }
+
+    private func moveStep(_ index: Int?, up: Bool, in rows: [Row]) {
+        guard let index else { return }
+        let neighbor = index + (up ? -1 : 1)
+        guard rows.indices.contains(neighbor), rows[neighbor].itemID != nil else { return }
+        move(rows, from: IndexSet(integer: index), to: up ? neighbor : neighbor + 1)
+    }
+
+    private func move(_ rows: [Row], from: IndexSet, to: Int) {
+        let moved = Set(from.compactMap { rows[$0].itemID })
+        guard !moved.isEmpty, moved.count == from.count else { return }
+        var reordered = rows
+        reordered.move(fromOffsets: from, toOffset: to)
+        guard reordered != rows else { return }
+
+        var config = store.config
+        var place = TrayPlace.bar
+        for row in reordered {
+            if case let .heading(next) = row { place = next }
+            if let id = row.itemID, moved.contains(id), config.place(id) != place {
+                config.trayLayout[id] = place.rawValue
+            }
+        }
+        config.trayOrder = mergingTrayOrder(config.trayOrder, with: reordered.compactMap(\.itemID))
+        store.config = config
+    }
+}
+
+struct TrayItemOptions: View {
+    enum Kind {
+        case monitor, disk
+
+        init?(itemID: String) {
+            switch itemID {
+            case traySystem: self = .monitor
+            case trayDisk: self = .disk
+            default: return nil
+            }
+        }
+
+        var itemID: String { self == .monitor ? traySystem : trayDisk }
+    }
+
+    @ObservedObject var store: ConfigStore
+    let kind: Kind
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let item = TrayItems.info(kind.itemID) { Text(item.title).font(.headline) }
+            switch kind {
+            case .monitor:
+                Card { monitorSettings }
+            case .disk:
+                DiskFolderSettings(store: store)
+            }
+        }
+        .padding(16).frame(width: 385)
     }
 
     private var monitorSettings: some View {
@@ -163,12 +283,13 @@ struct TrayPane: View {
                     Text(tx("Memory", "Memoria")).tag("memory")
                 }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 142)
-            }.padding(.leading, 32)
+            }
+            RowDivider()
             SettingRow(title: tx("Suggest restarting the Mac", "Recomendar reiniciar el Mac"),
                        caption: tx("Shows reasons to restart in the CPU and memory panel.", "Muestra los motivos para reiniciar en el panel de CPU y memoria.")) {
                 Toggle(tx("Suggest restarting the Mac", "Recomendar reiniciar el Mac"), isOn: $store.config.restartAdvice)
                     .toggleStyle(.switch).labelsHidden()
-            }.padding(.leading, 32)
+            }
         }
     }
 }
@@ -190,7 +311,6 @@ private struct DiskFolderSettings: View {
                     .disabled(folders == store.config.diskFolders.joined(separator: ", "))
             }
         }
-        .padding(.leading, 48).padding(.trailing, 16).padding(.bottom, 12)
         .onAppear { folders = store.config.diskFolders.joined(separator: ", ") }
     }
 

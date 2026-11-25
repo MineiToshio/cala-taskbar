@@ -92,7 +92,7 @@ enum SettingsPane: String, Identifiable {
         case .tray: tx("Tray", "Bandeja")
         case .mail: tx("Mail", "Correo")
         case .calendar: tx("Calendar", "Calendario")
-        case .usage: tx("Usage (Claude and Codex)", "Uso (Claude y Codex)")
+        case .usage: TrayItems.usage.title
         case .permissions: tx("Permissions", "Permisos")
         case .help: tx("Help and diagnostics", "Ayuda y diagnóstico")
         case .appearance, .screens, .about, .barStyle: ""
@@ -164,7 +164,7 @@ struct VisualEffect: NSViewRepresentable {
 struct SettingsView: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var navigation: SettingsNavigation
-    private let sidebarWidth: CGFloat = 200
+    private let sidebarWidth: CGFloat = 228
 
     var body: some View {
         HStack(spacing: 0) {
@@ -206,27 +206,14 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.horizontal, 5).padding(.bottom, 9)
-                sidebarItem(.general)
-                sidebarHeading(tx("Modules", "Módulos"))
-                ForEach(SettingsPane.modules) { sidebarItem($0) }
-                ForEach(SettingsPane.trayDetails) { sidebarItem($0, indented: true) }
-                sidebarHeading("Cala")
-                ForEach(SettingsPane.appPages) { sidebarItem($0) }
+                ForEach(SettingsPane.pages) { pane in
+                    SidebarItem(pane: pane, selected: navigation.selection.page == pane) { select(pane) }
+                }
             }
             .padding(.horizontal, 9).padding(.top, 36).padding(.bottom, 12)
         }
         .background(VisualEffect(material: .sidebar))
         .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.08)).frame(width: 0.5) }
-    }
-
-    private func sidebarItem(_ pane: SettingsPane, indented: Bool = false) -> some View {
-        SidebarItem(pane: pane, selected: navigation.selection.page == pane, indented: indented) { select(pane) }
-    }
-
-    private func sidebarHeading(_ title: String) -> some View {
-        Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-            .padding(.leading, 8).padding(.top, 8).padding(.bottom, 2)
-            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -291,20 +278,19 @@ struct SettingsPage: View {
 private struct SidebarItem: View {
     let pane: SettingsPane
     let selected: Bool
-    let indented: Bool
     let action: () -> Void
     @State private var hover = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                SettingsIcon(pane: pane, size: indented ? 20 : 24)
-                Text(pane.title).font(.system(size: indented ? 12 : 13, weight: selected ? .semibold : .regular))
-                    .fixedSize(horizontal: false, vertical: true)
+                SettingsIcon(pane: pane, size: 24)
+                Text(pane.title).font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 0)
             }
-            .padding(.leading, indented ? 23 : 8).padding(.trailing, 5)
-            .frame(minHeight: indented ? 28 : 34)
+            .padding(.horizontal, 8)
+            .frame(height: 34)
             .background(RoundedRectangle(cornerRadius: 8).fill(selected ? Color.accentColor.opacity(0.16) : (hover ? Color.primary.opacity(0.05) : .clear)))
             .contentShape(Rectangle())
         }

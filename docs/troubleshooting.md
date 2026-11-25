@@ -51,7 +51,7 @@ log show --predicate 'process == "SecurityAgent"' | grep -E "Loaded user|focusin
 An acknowledgement alone does not prove that the selected user's login screen appeared; the console check verifies that the original session left the console, and SecurityAgent's log identifies the selected user.
 
 ## AI usage indicator
-- **No glyph:** check Settings → Usage, the master/provider toggles and detection status. Install Claude Code (CLI or app) and sign in there (`claude`, then `/login`); for Codex, install the CLI or app and sign in with ChatGPT. The tray stays empty for unavailable providers.
+- **No glyph:** check Settings → Claude & Codex, the master/provider toggles and detection status. Install Claude Code (CLI or app) and sign in there (`claude`, then `/login`); for Codex, install the CLI or app and sign in with ChatGPT. The tray stays empty for unavailable providers.
 - **`n/a`:** the provider may be offline, timed out, signed in with an unsupported account, or returning a changed private schema. Last good data stays visible when available. Only returned windows appear; no 5-hour row can be normal for a plan.
 - **Rate-limited:** wait for the displayed retry countdown. Refresh is disabled throughout cooldown; repeated requests are coalesced. Restarting retains the cooldown. Backoff starts at 60 seconds and grows to 30 minutes.
 - **Session expired:** open Claude Code or Codex to refresh its own session. Cala never refreshes or writes tokens. Claude credentials are reread on the next attempt; a 401 gets only one reread/retry.

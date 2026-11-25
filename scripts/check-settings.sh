@@ -80,3 +80,9 @@ for file in settings:
 
 print("PASS settings audit: 56/56 keys (41 Settings, 3 other UI, 12 internal)")
 PY
+
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+swiftc -O -module-cache-path "$out/modules" -o "$out/cala-settings-tray" \
+    Sources/Cala/TrayOrder.swift Checks/SettingsTray/main.swift
+"$out/cala-settings-tray"

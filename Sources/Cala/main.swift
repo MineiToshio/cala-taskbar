@@ -151,13 +151,18 @@ enum Snapshots {
         write(pane(.switcher, modules: ModuleSet.none), "switcher-off", width: 640)
         write(pane(.tray, modules: ModuleSet(bar: true, switcher: true, tray: false, zones: true)), "tray-off", width: 640)
         write(pane(.tray, modules: ModuleSet(bar: false, switcher: true, tray: true, zones: true)), "tray-bar-off", width: 640)
+        write(TrayItemOptions(store: store, kind: .monitor), "tray-options-popover", width: 385)
 
         let window = SettingsView(store: store, navigation: SettingsNavigation())
             .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts))
         let defaultSize = SettingsWindowController.defaultSize
         let minimumSize = SettingsWindowController.minimumSize
         write(window, "settings-window", width: defaultSize.width, height: defaultSize.height)
-        write(window, "settings-window-min", width: minimumSize.width, height: minimumSize.height)
+        let minimumNavigation = SettingsNavigation()
+        minimumNavigation.select(.switcher)
+        let minimumWindow = SettingsView(store: store, navigation: minimumNavigation)
+            .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts))
+        write(minimumWindow, "settings-window-min", width: minimumSize.width, height: minimumSize.height)
         let language = appLanguageOverride
         for code in ["en", "es"] {
             appLanguageOverride = code

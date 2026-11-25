@@ -34,7 +34,7 @@ System Settings > Desktop & Dock > Menu Bar > "Automatically hide and show" = Ne
 rm -rf "$HOME/Library/Application Support/Cala"      # config and debug log
 tccutil reset All local.cala                            # every permission Cala was given
 ```
-If you enabled the Claude Code statusLine (Settings → Usage), switch it off first: that removes only Cala's entry. The first backup of your Claude `settings.json` stays next to it as `settings.json.mactaskbar.bak`; delete it and `claude-statusline.sh` / `claude-usage.json` (inside the Application Support folder above) if you no longer want them.
+If you enabled the Claude Code statusLine (Settings → Claude & Codex), switch it off first: that removes only Cala's entry. The first backup of your Claude `settings.json` stays next to it as `settings.json.mactaskbar.bak`; delete it and `claude-statusline.sh` / `claude-usage.json` (inside the Application Support folder above) if you no longer want them.
 The project folder (including `build/Cala.app`) can then be deleted.
 
 ## DockDoor
