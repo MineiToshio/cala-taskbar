@@ -139,6 +139,8 @@ struct InactiveSettingsNote: View {
 enum SettingsDetailRowLayout {
     static let height: CGFloat = 44
     static let trailingInset: CGFloat = 25
+    // A plain macOS List adds padding outside its explicit row insets.
+    static let listTrailingInset = trailingInset - 9
 }
 
 struct SettingsDetailChevron: View {

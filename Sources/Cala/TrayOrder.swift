@@ -4,10 +4,43 @@ enum TrayPlace: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-struct TrayItemGroup: Identifiable {
+struct TrayItemGroup {
     let place: TrayPlace
     var items: [String]
-    var id: TrayPlace { place }
+    var rows: [TrayListRow] {
+        [.heading(place)] + (items.isEmpty ? [.empty(place)] : items.map(TrayListRow.item))
+    }
+}
+
+enum TrayListRow: Hashable {
+    case heading(TrayPlace)
+    case item(String)
+    case empty(TrayPlace)
+
+    var itemID: String? {
+        if case let .item(id) = self { return id }
+        return nil
+    }
+}
+
+/// Translate SwiftUI's destination gap in the original list to a gap in one group.
+func trayMoveTarget(in rows: [TrayListRow], source: Int, destination: Int) -> (place: TrayPlace, index: Int)? {
+    guard rows.indices.contains(source), rows[source].itemID != nil,
+          (0...rows.count).contains(destination), case let .heading(firstPlace) = rows.first else { return nil }
+    var place = firstPlace
+    var index = 0
+    for row in rows.prefix(destination) {
+        switch row {
+        case let .heading(nextPlace):
+            place = nextPlace
+            index = 0
+        case .item:
+            index += 1
+        case .empty:
+            break
+        }
+    }
+    return (place, index)
 }
 
 /// The insertion index is a gap in the destination group, measured before removing the source.
