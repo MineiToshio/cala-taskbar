@@ -195,6 +195,14 @@ final class ZoneDragTap: @unchecked Sendable {
         state.withLockUnchecked { $0.machine.generation == generation && $0.machine.phase == .dragging }
     }
 
+    func isInZonesMode(generation: UInt64) -> Bool {
+        state.withLockUnchecked { $0.machine.generation == generation && $0.machine.zonesMode }
+    }
+
+    func isCurrentSnapRelease(generation: UInt64) -> Bool {
+        state.withLockUnchecked { $0.machine.snapReleaseGeneration == generation }
+    }
+
     /// Main side of the coalesced overlay update.
     func takeSnapshot() -> Snapshot {
         state.withLockUnchecked { s in
@@ -260,7 +268,7 @@ final class ZoneDragTap: @unchecked Sendable {
 
     /// A fresh state that keeps the configuration (activation, editor gate).
     private static func fresh(from old: ZoneDragMachine) -> ZoneDragMachine {
-        var machine = ZoneDragMachine()
+        var machine = ZoneDragMachine(generation: old.generation)
         machine.activation = old.activation
         machine.ignoring = old.ignoring
         return machine

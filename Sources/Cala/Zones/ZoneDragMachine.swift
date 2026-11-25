@@ -39,6 +39,8 @@ struct ZoneDragMachine {
     private(set) var swallowRightUp = false
     /// The current press was confirmed as a window drag (survives cancel, cleared by reject and the next press).
     private(set) var confirmed = false
+    /// A detached window can still snap while this release is current.
+    private(set) var snapReleaseGeneration: UInt64?
     var activation: ZoneActivation = .both
     /// True while drags must be ignored (the zones editor is open).
     var ignoring = false {
@@ -49,11 +51,14 @@ struct ZoneDragMachine {
         phase == .dragging && ((activation.allowsRightClick && rightToggle) || (activation.allowsShift && shift))
     }
 
+    init(generation: UInt64 = 0) { self.generation = generation }
+
     /// Returns the generation the worker must probe, or nil when the press is ignored.
     mutating func leftDown(at p: CGPoint, shift: Bool, command: Bool) -> UInt64? {
         generation &+= 1
         rightToggle = false
         confirmed = false
+        snapReleaseGeneration = nil
         self.shift = shift
         self.command = command
         point = p
@@ -77,7 +82,9 @@ struct ZoneDragMachine {
         self.command = command
         defer { phase = .idle; rightToggle = false; confirmed = false }
         guard confirmed else { return nil }
-        return Release(generation: generation, point: p, zonesMode: zonesMode, command: command)
+        let snap = zonesMode
+        snapReleaseGeneration = snap ? generation : nil
+        return Release(generation: generation, point: p, zonesMode: snap, command: command)
     }
 
     /// Returns true when the event must be swallowed during a confirmed window drag.
@@ -121,6 +128,7 @@ struct ZoneDragMachine {
     mutating func cancel(resetButtons: Bool) {
         phase = .idle
         rightToggle = false
+        snapReleaseGeneration = nil
         if resetButtons { swallowRightUp = false }
     }
 }
@@ -134,17 +142,31 @@ struct ZoneDragCandidate {
 
     private static let recheckInterval: TimeInterval = 0.04
     private static let cursorSlack: CGFloat = 20
+    private static let tabBandHeight: CGFloat = 64
+    private static let tabDetachBundles: Set<String> = [
+        "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary",
+        "org.chromium.Chromium",
+    ]
 
     let original: Window
-    private let initialIDs: Set<CGWindowID>
+    private let initialTabWindowIDs: Set<CGWindowID>?
     private var lastPoint: CGPoint
     private var nextCheck: TimeInterval = 0
     private var previous: [CGWindowID: CGRect] = [:]
 
-    init(original: Window, initialIDs: Set<CGWindowID>, point: CGPoint) {
+    init(original: Window, point: CGPoint, initialTabWindowIDs: Set<CGWindowID>? = nil) {
         self.original = original
-        self.initialIDs = initialIDs
+        self.initialTabWindowIDs = initialTabWindowIDs
         self.lastPoint = point
+    }
+
+    /// Estimate the tab strip without querying AX during a drag. Look up the app only inside this band.
+    static func mayDetachTab(at point: CGPoint, in frame: CGRect, bundleID: @autoclosure () -> String) -> Bool {
+        tabBand(of: frame).contains(point) && tabDetachBundles.contains(bundleID())
+    }
+
+    private static func tabBand(of frame: CGRect) -> CGRect {
+        CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: min(tabBandHeight, frame.height))
     }
 
     func originalMoved(to frame: CGRect?) -> Bool {
@@ -153,33 +175,35 @@ struct ZoneDragCandidate {
 
     /// Take at most one full window-list sample every 40 ms, and only on cursor movement.
     func shouldRecheck(at point: CGPoint, time: TimeInterval) -> Bool {
-        time >= nextCheck && hypot(point.x - lastPoint.x, point.y - lastPoint.y) >= 3
+        initialTabWindowIDs != nil && time >= nextCheck && hypot(point.x - lastPoint.x, point.y - lastPoint.y) >= 3
     }
 
-    /// A tab dragged out of a browser can leave the original window in place. A new window must
-    /// be near the cursor in two successive samples and translate with it, at a stable size.
+    /// Adopt only a unique new window whose tab band follows the cursor at a stable size.
     mutating func recheck(windows: [Window], at point: CGPoint, time: TimeInterval) -> Window? {
+        guard let initialTabWindowIDs else { return nil }
         let dx = point.x - lastPoint.x
         let dy = point.y - lastPoint.y
         let tolerance = min(Self.cursorSlack, max(4, hypot(dx, dy) / 2))
         lastPoint = point
         nextCheck = time + Self.recheckInterval
         var observed: [CGWindowID: CGRect] = [:]
-        defer { previous = observed }
+        var matches: [Window] = []
         for window in windows {
             let id = window.key.windowID
             let frame = window.frame
-            guard window.key.pid == original.key.pid, id != original.key.windowID, !initialIDs.contains(id),
-                  frame.insetBy(dx: -Self.cursorSlack, dy: -Self.cursorSlack).contains(point) else { continue }
+            guard window.key.pid == original.key.pid, id != original.key.windowID, !initialTabWindowIDs.contains(id),
+                  Self.tabBand(of: frame).insetBy(dx: -Self.cursorSlack, dy: -Self.cursorSlack).contains(point)
+            else { continue }
             observed[id] = frame
             guard let before = previous[id], ZoneWindowFit.isMove(from: before, to: frame) else { continue }
             let moveX = frame.minX - before.minX
             let moveY = frame.minY - before.minY
             if moveX * dx + moveY * dy > 0, hypot(moveX - dx, moveY - dy) <= tolerance {
-                return window
+                matches.append(window)
             }
         }
-        return nil
+        previous = observed
+        return matches.count == 1 ? matches.first : nil
     }
 }
 

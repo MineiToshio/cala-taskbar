@@ -27,6 +27,13 @@ final class ZoneWindowMover: @unchecked Sendable {
         case detached(ZoneDragCandidate.Window)
     }
 
+    private enum Resolution {
+        case missing, ineligible, resolved(Drag)
+    }
+
+    private static let settleDelay: TimeInterval = 0.04
+    private static let detachedLookupLimit: TimeInterval = 0.5
+
     /// Apps whose windows are never zones targets (system UI, Stage Manager, security prompts).
     private static let deniedBundles: Set<String> = [
         "com.apple.dock", "com.apple.SystemUIServer", "com.apple.controlcenter", "com.apple.notificationcenterui",
@@ -62,11 +69,16 @@ final class ZoneWindowMover: @unchecked Sendable {
             candidate = nil
             let windows = Self.onScreenWindows()
             guard let window = Self.windowUnder(point, in: windows) else { return }
-            let ids = windows.compactMap { info -> CGWindowID? in
-                guard (info[kCGWindowOwnerPID as String] as? pid_t) == window.key.pid else { return nil }
-                return info[kCGWindowNumber as String] as? CGWindowID
+            var initialTabWindowIDs: Set<CGWindowID>?
+            if window.key.pid != ownPID,
+               ZoneDragCandidate.mayDetachTab(at: point, in: window.frame, bundleID: Self.bundleID(for: window.key.pid)) {
+                initialTabWindowIDs = Set(windows.compactMap { info -> CGWindowID? in
+                    guard (info[kCGWindowOwnerPID as String] as? pid_t) == window.key.pid else { return nil }
+                    return info[kCGWindowNumber as String] as? CGWindowID
+                })
             }
-            candidate = (generation, ZoneDragCandidate(original: window, initialIDs: Set(ids), point: point))
+            candidate = (generation, ZoneDragCandidate(original: window, point: point,
+                                                       initialTabWindowIDs: initialTabWindowIDs))
         }
     }
 
@@ -78,20 +90,25 @@ final class ZoneWindowMover: @unchecked Sendable {
             let window = c.probe.original
             let now = Self.bounds(of: window.key.windowID)
             let detached: ZoneDragCandidate.Window?
-            if c.probe.originalMoved(to: now) {
+            if let now, c.probe.originalMoved(to: now) {
+                if window.key.pid == ownPID {
+                    candidate = nil
+                    confirmAppKitDrag(window, generation: generation, current: now, cursorX: point.x, tap: tap)
+                    return
+                }
                 detached = nil
             } else {
                 let time = ProcessInfo.processInfo.systemUptime
-                guard window.key.pid != ownPID, c.probe.shouldRecheck(at: point, time: time) else { return }
+                guard c.probe.shouldRecheck(at: point, time: time) else { return }
                 let windows = Self.onScreenWindows().compactMap { info -> ZoneDragCandidate.Window? in
                     guard (info[kCGWindowOwnerPID as String] as? pid_t) == window.key.pid else { return nil }
                     return Self.normalWindow(info)
                 }
                 detached = c.probe.recheck(windows: windows, at: point, time: time)
                 candidate = c
-                guard detached != nil, !Self.deniedBundles.contains(Self.bundleID(for: window.key.pid)) else { return }
+                guard detached != nil else { return }
             }
-            // Confirm on the CG move alone, before any AX call: until the tap knows about the drag, a
+            // Confirm external drags on the CG move, before any AX call: until the tap knows about the drag, a
             // right-click would reach the app (a context menu mid-drag).
             candidate = nil
             guard tap.confirmDrag(generation: generation) else { return }
@@ -102,21 +119,7 @@ final class ZoneWindowMover: @unchecked Sendable {
                 return
             }
             guard let now else { return }
-            if window.key.pid == ownPID {
-                let restored = records.restoreOnDrag(window.key, current: now, cursorX: point.x,
-                                                     initialFrameAX: window.frame)
-                drags[generation] = .appKit(AppKitDrag(key: window.key, original: restored ?? window.frame,
-                                                      restoredSize: restored?.size))
-                if let restored {
-                    ZoneDragTap.performOnMainDuringDrag { [self] in
-                        guard tap.isDragging(generation: generation),
-                              let (local, height) = appKitWindow(window.key.windowID) else { return }
-                        local.setFrame(ZoneGeometry.appKitRect(fromAX: restored, primaryHeight: height), display: true)
-                    }
-                }
-                return
-            }
-            guard let drag = resolve(window, frame: now) else {
+            guard case .resolved(let drag) = resolve(window, frame: now) else {
                 // Not a window zones may place: end the gesture without a snap. A swallowed right down
                 // keeps its pending up swallowed (the machine only drops the drag).
                 tap.rejectDrag(generation: generation)
@@ -132,7 +135,8 @@ final class ZoneWindowMover: @unchecked Sendable {
             guard !cancellation.isCancelled, let moving = drags.removeValue(forKey: generation) else { return }
             if let target, let usable {
                 // Let the app and the window server finish their own drag first.
-                queue.asyncAfter(deadline: .now() + 0.04) { [self] in
+                let released = DispatchTime.now()
+                queue.asyncAfter(deadline: released + Self.settleDelay) { [self] in
                     guard !cancellation.isCancelled else { return }
                     switch moving {
                     case .accessibility(let drag):
@@ -140,8 +144,8 @@ final class ZoneWindowMover: @unchecked Sendable {
                     case .appKit(let drag):
                         DispatchQueue.main.async { [self] in snapAppKit(drag, into: target, usable: usable) }
                     case .detached(let window):
-                        // Match only the adopted ID. The source browser window can still overlap its frame.
-                        if let drag = resolve(window, frame: nil) { snap(drag, into: target, usable: usable) }
+                        snapDetached(window, generation: generation, into: target, usable: usable,
+                                     deadline: released + Self.detachedLookupLimit)
                     }
                 }
             } else {
@@ -189,21 +193,21 @@ final class ZoneWindowMover: @unchecked Sendable {
     }
 
     private static func bounds(of id: CGWindowID) -> CGRect? {
-        guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]],
+        guard let list = CGWindowListCreateDescriptionFromArray([NSNumber(value: id)] as CFArray) as? [[String: Any]],
               let bounds = list.first?[kCGWindowBounds as String] as? NSDictionary else { return nil }
         return CGRect(dictionaryRepresentation: bounds)
     }
 
     /// The AX window behind a moving CG window, if zones may place it.
-    private func resolve(_ candidate: ZoneDragCandidate.Window, frame: CGRect?) -> Drag? {
+    private func resolve(_ candidate: ZoneDragCandidate.Window, frame: CGRect?, reportMissing: Bool = true) -> Resolution {
         let key = candidate.key
         let bundle = Self.bundleID(for: key.pid)
-        if Self.deniedBundles.contains(bundle) { return nil }
+        if Self.deniedBundles.contains(bundle) { return .ineligible }
         let app = AXUIElementCreateApplication(key.pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
         guard let windows = WindowService.attr(app, kAXWindowsAttribute) as? [AXUIElement] else {
-            log("zones: ignoring drag, no AX windows for \(bundle.isEmpty ? "pid \(key.pid)" : bundle)")
-            return nil
+            if reportMissing { log("zones: ignoring drag, no AX windows for \(bundle.isEmpty ? "pid \(key.pid)" : bundle)") }
+            return .missing
         }
         var match = windows.first { element in
             var id: CGWindowID = 0
@@ -215,8 +219,8 @@ final class ZoneWindowMover: @unchecked Sendable {
             match = scored.filter { $0.1 < 40 }.min { $0.1 < $1.1 }?.0
         }
         guard let window = match else {
-            log("zones: ignoring drag, window \(key.windowID) of \(bundle) not found via AX")
-            return nil
+            if reportMissing { log("zones: ignoring drag, window \(key.windowID) of \(bundle) not found via AX") }
+            return .missing
         }
         let role = WindowService.attr(window, kAXRoleAttribute) as? String
         let subrole = WindowService.attr(window, kAXSubroleAttribute) as? String
@@ -224,23 +228,47 @@ final class ZoneWindowMover: @unchecked Sendable {
         guard role == kAXWindowRole as String,
               ![kAXSystemDialogSubrole as String, "AXSheet", kAXUnknownSubrole as String].contains(subrole ?? "") else {
             log("zones: ignoring drag of \(bundle) (role \(role ?? "-"), subrole \(subrole ?? "-"))")
-            return nil
+            return .ineligible
         }
-        if WindowService.isFullScreen(window) { return nil }
+        if WindowService.isFullScreen(window) { return .ineligible }
         guard Self.settable(window, kAXPositionAttribute) else {
             log("zones: ignoring drag of \(bundle), position not settable")
-            return nil
+            return .ineligible
         }
         let resizable = Self.settable(window, kAXSizeAttribute)
-        return Drag(key: key, window: window, app: app, resizable: resizable, original: candidate.frame, restoredSize: nil)
+        return .resolved(Drag(key: key, window: window, app: app, resizable: resizable,
+                              original: candidate.frame, restoredSize: nil))
     }
 
     private static func bundleID(for pid: pid_t) -> String {
         NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
     }
 
-    // MARK: Cala windows (main)
+    // MARK: Cala windows
 
+    private func confirmAppKitDrag(_ window: ZoneDragCandidate.Window, generation: UInt64, current: CGRect,
+                                   cursorX: CGFloat, tap: ZoneDragTap) {
+        ZoneDragTap.performOnMainDuringDrag { [self] in
+            guard appKitWindow(window.key.windowID) != nil else { return }
+            queue.async { [self] in
+                guard !cancellation.isCancelled, tap.confirmDrag(generation: generation) else { return }
+                drags = drags.filter { $0.key + 8 > generation }
+                let restored = records.restoreOnDrag(window.key, current: current, cursorX: cursorX,
+                                                     initialFrameAX: window.frame)
+                drags[generation] = .appKit(AppKitDrag(key: window.key, original: restored ?? window.frame,
+                                                      restoredSize: restored?.size))
+                if let restored {
+                    ZoneDragTap.performOnMainDuringDrag { [self] in
+                        guard tap.isDragging(generation: generation),
+                              let (local, height) = appKitWindow(window.key.windowID) else { return }
+                        local.setFrame(ZoneGeometry.appKitRect(fromAX: restored, primaryHeight: height), display: true)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Eligibility and frame changes must run on main.
     private func appKitWindow(_ id: CGWindowID) -> (NSWindow, CGFloat)? {
         guard !cancellation.isCancelled, !ZonesModule.editorOpen, let height = NSScreen.screens.first?.frame.height,
               let window = NSApp.window(withWindowNumber: Int(id)), window.isVisible, window.level == .normal,
@@ -308,7 +336,31 @@ final class ZoneWindowMover: @unchecked Sendable {
 
     // MARK: Snapping (worker)
 
-    private func snap(_ drag: Drag, into target: CGRect, usable: CGRect) {
+    private func snapDetached(_ window: ZoneDragCandidate.Window, generation: UInt64, into target: CGRect,
+                              usable: CGRect, deadline: DispatchTime) {
+        guard !cancellation.isCancelled, let tap, tap.isCurrentSnapRelease(generation: generation) else { return }
+        guard DispatchTime.now() < deadline else {
+            log("zones: detached window \(window.key.windowID) not found via AX before lookup expired")
+            return
+        }
+        // Match only the adopted ID. The source browser window can still overlap its frame.
+        switch resolve(window, frame: nil, reportMissing: false) {
+        case .resolved(let drag):
+            guard !cancellation.isCancelled, tap.isCurrentSnapRelease(generation: generation),
+                  DispatchTime.now() < deadline else { return }
+            snap(drag, into: target, usable: usable) {
+                !self.cancellation.isCancelled && tap.isCurrentSnapRelease(generation: generation)
+            }
+        case .missing:
+            queue.asyncAfter(deadline: min(deadline, .now() + Self.settleDelay)) { [self] in
+                snapDetached(window, generation: generation, into: target, usable: usable, deadline: deadline)
+            }
+        case .ineligible:
+            break
+        }
+    }
+
+    private func snap(_ drag: Drag, into target: CGRect, usable: CGRect, canPlace: () -> Bool = { true }) {
         let window = drag.window
         // Chromium/Electron animate and fight AX frame changes while enhanced UI is on; switch it off around the move.
         let enhanced = WindowService.attr(drag.app, "AXEnhancedUserInterface") as? Bool == true
@@ -320,6 +372,7 @@ final class ZoneWindowMover: @unchecked Sendable {
             log("zones: snap skipped, the window is gone")
             return
         }
+        guard canPlace() else { return }
         if drag.resizable {
             // Size, position, size: an app may clamp the size to the display the window is on before the move.
             let sized = Self.setSize(window, target.size)

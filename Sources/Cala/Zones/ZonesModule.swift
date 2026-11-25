@@ -357,7 +357,10 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider, ObservableObject {
         if state.expanded {
             stripTick()
             if stripTimer == nil {
-                stripTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.stripTick() }
+                let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.stripTick() }
+                RunLoop.main.add(timer, forMode: .default)
+                RunLoop.main.add(timer, forMode: .eventTracking)
+                stripTimer = timer
             }
         } else {
             stripTimer?.invalidate()
@@ -396,8 +399,9 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider, ObservableObject {
 
     /// Dwell progress for the item under the (possibly resting) pointer; switches the layout when it completes.
     private func stripTick() {
-        guard isRunning, var state = stripState, state.expanded,
-              let screen = session?.screens.first(where: { $0.index == state.screenIndex }) else { return }
+        guard isRunning, var state = stripState, state.expanded, let session,
+              tap?.isInZonesMode(generation: session.generation) == true,
+              let screen = session.screens.first(where: { $0.index == state.screenIndex }) else { return }
         let geometry = ZoneStripGeometry.expanded(usable: screen.usable, count: state.layouts.count, current: state.current)
         let item = ZoneStripGeometry.item(at: state.point, in: geometry)
         let output = state.dwell.update(item: item, now: CACurrentMediaTime(), current: state.current)

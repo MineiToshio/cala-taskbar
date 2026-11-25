@@ -773,17 +773,25 @@ do {
     let press = CGPoint(x: 140, y: 110)
     let point = CGPoint(x: 165, y: 130)
     let settings = ZoneDragCandidate.Window(key: .init(pid: getpid(), windowID: 10), frame: frame)
-    let candidate = ZoneDragCandidate(original: settings, initialIDs: [10], point: press)
+    let candidate = ZoneDragCandidate(original: settings, point: press)
     var machine = ZoneDragMachine()
     let generation = machine.leftDown(at: press, shift: false, command: false)!
     let check = machine.leftDragged(to: point, shift: false, command: false)
     expect("Cala Settings: a stationary window leaves the right click alone",
            check && !candidate.originalMoved(to: frame) && !machine.rightDown())
-    expect("Cala Settings: its own window confirms on the same CG movement as an external window",
-           candidate.originalMoved(to: frame.offsetBy(dx: 25, dy: 20)) && machine.confirmDrag(generation: generation))
+    expect("Cala Settings: CG movement leaves the press pending until AppKit validation confirms it",
+           candidate.originalMoved(to: frame.offsetBy(dx: 25, dy: 20)) && !machine.zonesMode && !machine.rightDown()
+               && machine.confirmDrag(generation: generation))
     expect("Cala Settings: right-click activates zones and the release requests a snap",
            machine.rightDown() && machine.rightUp()
                && machine.leftUp(at: point, shift: false, command: false)?.zonesMode == true)
+
+    let stale = machine.leftDown(at: press, shift: false, command: false)!
+    _ = machine.leftUp(at: point, shift: false, command: false)
+    let current = machine.leftDown(at: press, shift: true, command: false)!
+    expect("Cala Settings: delayed AppKit validation cannot confirm a newer press",
+           !machine.confirmDrag(generation: stale) && !machine.zonesMode && !machine.rightDown()
+               && machine.confirmDrag(generation: current) && machine.zonesMode)
 }
 
 do {
@@ -798,12 +806,22 @@ do {
         ZoneDragCandidate.Window(key: .init(pid: pid, windowID: id), frame: frame)
     }
 
+    expect("Tab detach: scans require a supported browser and a press near the top edge",
+           ZoneDragCandidate.mayDetachTab(at: press, in: original.frame, bundleID: "com.google.Chrome")
+               && !ZoneDragCandidate.mayDetachTab(at: press, in: original.frame, bundleID: "com.apple.TextEdit")
+               && !ZoneDragCandidate.mayDetachTab(at: CGPoint(x: 160, y: 220), in: original.frame,
+                                                  bundleID: "com.google.Chrome"))
+    let ordinary = ZoneDragCandidate(original: original, point: press)
+    expect("Tab detach: an ordinary content drag never requests a full scan",
+           !ordinary.shouldRecheck(at: first, time: 10))
+
     var machine = ZoneDragMachine()
     let generation = machine.leftDown(at: press, shift: false, command: false)!
-    var candidate = ZoneDragCandidate(original: original, initialIDs: [10, 11], point: press)
+    var candidate = ZoneDragCandidate(original: original, point: press, initialTabWindowIDs: [10, 11])
     let check = machine.leftDragged(to: first, shift: false, command: false)
+    let popup = frame.offsetBy(dx: 0, dy: -120)
     let visible = [original, window(11, frame), window(12, frame, pid: 80), window(13, frame),
-                   window(14, frame), window(15, frame), window(16, frame)]
+                   window(14, frame), window(15, frame), window(16, frame), window(17, popup)]
     expect("Tab detach: the original stays put and a new ID alone does not confirm a drag",
            check && !candidate.originalMoved(to: original.frame)
                && candidate.shouldRecheck(at: first, time: 10)
@@ -816,16 +834,44 @@ do {
     let moved = frame.offsetBy(dx: 40, dy: 30)
     let resized = CGRect(x: moved.minX, y: moved.minY, width: moved.width + 50, height: moved.height)
     let next = [original, window(11, moved), window(12, moved, pid: 80), window(13, frame),
-                window(14, resized), window(15, frame.offsetBy(dx: -40, dy: 30)), window(16, moved)]
+                window(14, resized), window(15, frame.offsetBy(dx: -40, dy: 30)), window(16, moved),
+                window(17, popup.offsetBy(dx: 40, dy: 30))]
     _ = machine.leftDragged(to: second, shift: false, command: false)
     let adopted = candidate.recheck(windows: next, at: second, time: 10.05)
-    expect("Tab detach: only a new, same-process window tracking the cursor at a stable size is adopted",
+    expect("Tab detach: a unique tab-like window is adopted over a popup tracking the pointer outside its tab band",
            adopted?.key == window(16, moved).key && adopted?.frame == moved)
     expect("Tab detach: adoption confirms the same press and the right-click snap survives to release",
            adopted != nil && machine.confirmDrag(generation: generation)
                && machine.rightDown() && machine.rightUp()
                && machine.leftUp(at: second, shift: false, command: false)
                    == ZoneDragMachine.Release(generation: generation, point: second, zonesMode: true, command: false))
+    expect("Tab detach: AX lookup stays current after release and a new press cancels it",
+           machine.snapReleaseGeneration == generation
+               && machine.leftDown(at: second, shift: false, command: false) != generation
+               && machine.snapReleaseGeneration == nil)
+
+    let third = CGPoint(x: 280, y: 220)
+    let last = moved.offsetBy(dx: 40, dy: 30)
+    for reversed in [false, true] {
+        var ambiguous = ZoneDragCandidate(original: original, point: press, initialTabWindowIDs: [10])
+        let generation = machine.leftDown(at: press, shift: true, command: false)!
+        let pair = [window(18, frame), window(19, frame.offsetBy(dx: 10, dy: 4))]
+        let moving = [window(18, moved), window(19, moved.offsetBy(dx: 10, dy: 4))]
+        _ = ambiguous.recheck(windows: pair, at: first, time: 20)
+        _ = machine.leftDragged(to: second, shift: true, command: false)
+        let matches = reversed ? Array(moving.reversed()) : moving
+        let unresolved = ambiguous.recheck(windows: matches, at: second, time: 20.05)
+        expect("Tab detach: two tab-like candidates stay pending (reversed: \(reversed))",
+               unresolved == nil && machine.phase == .pressed && !machine.zonesMode && !machine.rightDown())
+        let remaining = ambiguous.recheck(windows: [window(19, last.offsetBy(dx: 10, dy: 4))],
+                                          at: third, time: 20.10)
+        expect("Tab detach: the remaining candidate keeps its history (reversed: \(reversed))",
+               remaining?.key == window(19, last).key && machine.confirmDrag(generation: generation))
+        _ = machine.leftUp(at: third, shift: true, command: false)
+        machine.cancel(resetButtons: true)
+        expect("Tab detach: cancelling clears the released gesture (reversed: \(reversed))",
+               machine.snapReleaseGeneration == nil)
+    }
 }
 
 // MARK: Layout strip
