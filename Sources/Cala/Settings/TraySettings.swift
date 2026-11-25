@@ -74,7 +74,8 @@ struct TrayPane: View {
                 }
                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0,
                                           trailing: SettingsDetailRowLayout.listTrailingInset))
-                .moveDisabled(row.itemID == nil)
+                // No .moveDisabled on headers/placeholder: on macOS it also refuses drops next to those rows,
+                // which blocked the first slot of a group and empty groups. Dragging a header is ignored in onMove.
             }
             .onMove { from, to in
                 guard from.count == 1, let source = from.first,
