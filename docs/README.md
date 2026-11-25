@@ -29,8 +29,8 @@ The original goal was a Windows-like experience on a Mac. The Dock plus DockDoor
 
 ```bash
 cd cala-taskbar          # wherever you cloned the repository
-./install.sh                     # builds, installs to ~/Applications, launches
-# restart only: pkill -x Cala; open ~/Applications/Cala.app
+./install.sh                     # builds, installs to /Applications, launches
+# restart only: quit Cala normally, then open /Applications/Cala.app
 ```
 
-The welcome asks what you want to use (Bar, Zones or both). Afterwards, open **Settings…** from the bar's right-click menu, or from the Cala icon in the menu bar when the Bar is off: General turns each module on or off and can hide the macOS Dock and start Cala at login, and the Permissions pane shows what to grant (see [setup.md](setup.md)).
+The welcome asks what you want to use (Bar, Zones or both). Afterwards, open **Settings…** from the bar's right-click menu, or from the Cala icon in the menu bar when the Bar is off or Zones is on. General controls the modules and login, Taskbar controls Dock hiding, and Permissions shows what to grant (see [setup.md](setup.md)).

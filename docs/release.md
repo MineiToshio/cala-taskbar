@@ -18,7 +18,7 @@ Luego abre el borrador (`gh release view v1.0.0 --web`), revísalo y pulsa **Pub
 - La licencia es PolyForm Noncommercial 1.0.0 (`LICENSE`): uso y modificación gratis sin fines comerciales; vender o usar el código comercialmente requiere tu permiso. Como autor puedes vender Cala o cambiar la licencia de versiones futuras.
 - Opcional: `CALA_SENTRY_DSN` para que *Reportar un problema* envíe informes. Sin él, los usuarios usan *Copiar informe* y lo pegan en un issue.
 
-**Instalador de una línea:** `scripts/get-cala.sh` toma siempre la última release publicada (API de GitHub), verifica el `.sha256` que sube `publish-github.sh`, instala y abre Cala sin el bloqueo de Gatekeeper (curl no marca la descarga). Necesita que el repo sea público y que la release tenga el `.dmg` y el `.dmg.sha256`. Para probarlo con un build local: `CALA_DMG_URL=file://$PWD/build/Cala-X.dmg CALA_SHA_URL=file://$PWD/build/Cala-X.dmg.sha256 bash scripts/get-cala.sh`.
+**Instalador de una línea:** `scripts/get-cala.sh` toma siempre la última release publicada (API de GitHub), verifica el `.sha256` que sube `publish-github.sh`, instala en `/Applications` si es escribible o en `~/Applications` si no lo es, y abre Cala sin el bloqueo de Gatekeeper (curl no marca la descarga). Necesita que el repo sea público y que la release tenga el `.dmg` y el `.dmg.sha256`. Para probarlo con un build local: `CALA_DMG_URL=file://$PWD/build/Cala-X.dmg CALA_SHA_URL=file://$PWD/build/Cala-X.dmg.sha256 bash scripts/get-cala.sh`.
 
 **Cómo probar una versión antes de publicarla:** en otra Mac u otra cuenta de usuario, descarga el DMG del borrador y sigue el README tal cual. En la Mac donde se compiló no aparece el bloqueo de macOS (macOS recuerda que los archivos se crearon ahí), así que ahí no sirve como prueba.
 
@@ -89,10 +89,10 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 
 #### Qué comprueba `release.sh`
 
-- Que pasen `scripts/check-rules.sh`, `scripts/check-mail.sh`, `scripts/check-modules.sh` y `scripts/check-zones.sh`.
-- Que la firma sea válida y que las entitlements estén puestas (`packaging/Cala.entitlements`: Apple Events para Finder, Calendario y Ubicación; nada más).
+- Ejecuta todos los `scripts/check-*.sh` antes del build y se detiene si falla alguno. El [inventario de checks](architecture.md#automated-checks) incluye `scripts/check-settings.sh` y `scripts/check-statusline.sh`. Con cambios rastreados sin commit, el release usa una copia limpia de HEAD.
+- Que la firma sea válida. En builds con Developer ID, verifica el entitlement de Apple Events. `packaging/Cala.entitlements` también declara Calendario y Ubicación.
 - Que notarytool devuelva *Accepted*. Si no, imprime el `id` para pedir el log con `xcrun notarytool log <id> --keychain-profile cala-notary`.
-- `spctl` sobre la app y el DMG, es decir, lo mismo que mira Gatekeeper.
+- `spctl` sobre la app y el DMG cuando se ejecuta la notarización.
 
 #### Después de publicar
 
@@ -116,4 +116,4 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 
 ## Desarrollo local
 
-`./install.sh` compila (ad-hoc), reemplaza `~/Applications/Cala.app` y la abre. El build ad-hoc fija el *designated requirement* al bundle id, así macOS conserva los permisos entre recompilaciones. Un build firmado con Developer ID tiene otro requisito, así que la primera vez que pases de uno a otro macOS vuelve a pedir los permisos.
+`./install.sh` compila (ad-hoc), publica `/Applications/Cala.app` para todas las cuentas y la abre en la sesión que ejecuta el instalador. Las sesiones que ya usan la copia compartida detectan una compilación más nueva y se reinician cuando pueden hacerlo. Véase [setup.md](setup.md#other-user-profiles). El build ad-hoc fija el *designated requirement* al bundle id, así macOS conserva los permisos entre recompilaciones. Un build firmado con Developer ID tiene otro requisito, así que la primera vez que pases de uno a otro macOS vuelve a pedir los permisos.

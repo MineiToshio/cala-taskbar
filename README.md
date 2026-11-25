@@ -4,11 +4,11 @@
 
 # Cala
 
-**A taskbar for your Mac.** Your apps at the bottom with a thumbnail of every window, and on the right Wi‑Fi, sound, battery, disk, calendar and a panel that tells you why your Mac is slow.
+**A taskbar for your Mac.** Your apps at the bottom with up to six window previews per app, and on the right Wi‑Fi, sound, battery, disk, calendar and a panel that tells you why your Mac is slow.
 
-**Cala is a set of modules you switch on separately:** the bar (with its tray and Option+Tab) and **Zones**, which snaps the windows you drag into layouts. Only want Zones? Turn the bar off.
+**Cala is a set of modules you switch on separately:** the bar and its tray, the Option+Tab window switcher, and **Zones**, which snaps the windows you drag into layouts. Zones and the switcher can run without the bar. The tray requires the bar.
 
-Free · Source available · No accounts · Nothing leaves your Mac · macOS 14 or later · Apple silicon and Intel
+Free · Source available · No Cala account required · macOS 14 or later · Apple silicon and Intel
 
 ### [⬇︎ Download the latest version](https://github.com/MineiToshio/cala-taskbar/releases/latest)
 
@@ -26,9 +26,9 @@ Free · Source available · No accounts · Nothing leaves your Mac · macOS 14 o
 <tr>
 <td width="50%" valign="top">
 
-**Your apps, at the bottom.** Click to switch apps, hover to see each window, right-click to pin, open a new window or quit.
+**Your apps, at the bottom.** Click to switch apps, hover to see window previews, right-click to pin, open a new window or quit.
 
-**Option + Tab** shows all your windows, not just your apps. Type to search them, press W to close one, Q to quit its app, M to minimize or restore it.
+**Option + Tab** shows up to 20 windows, including minimized ones. Type to search them. Outside search, press W to close one, Q to quit its app, or M to minimize or restore it.
 
 **The tray on the right** has Wi‑Fi, Bluetooth, sound, brightness, battery, disk, keyboard, Downloads, Trash, and a clock with your upcoming events and a button to join the video call.
 
@@ -57,7 +57,7 @@ Open **Terminal** (find it with Spotlight: ⌘ + Space, "Terminal"), paste this 
 curl -fsSL https://raw.githubusercontent.com/MineiToshio/cala-taskbar/main/scripts/get-cala.sh | bash
 ```
 
-It downloads the latest version, checks that the file is the one published here (SHA-256), installs Cala in Applications and opens it. Because it does not go through the browser, macOS does not block it. It also **updates** Cala, and your settings are kept. You can [read the script](scripts/get-cala.sh) before running it. Then follow Cala's welcome window.
+It downloads the latest version, checks that the file is the one published here (SHA-256), installs Cala in `/Applications` when writable (otherwise in `~/Applications`) and opens it. Because it does not go through the browser, macOS does not block it. It also **updates** Cala, and your settings are kept. You can [read the script](scripts/get-cala.sh) before running it. Then follow Cala's welcome window.
 
 ### Option 2: download the file
 
@@ -111,12 +111,12 @@ Zones lets you place windows without resizing them by hand. Turn it on in the we
 
 To use another layout, move over the **Change layout** pill at the top of the screen while the zones show and rest on the one you want. Hold **⌘** to cover several neighbouring zones at once. Right-click again, release Shift, or release outside every zone to cancel: the window stays where you dropped it. Drag a snapped window out and it gets its old size back.
 
-- **Layouts:** eight ready-made ones (two and three columns, a 2 × 2 grid, main + side, two rows...) and as many of your own as you like. Draw them in the editor (*Settings → Zones → Edit zones…*, or the Cala icon in the menu bar): drag to draw, move and resize with guides that snap to the other zones, an optional 12-division grid and one layout per monitor (or none).
+- **Layouts:** eight templates and as many custom layouts as you like. Open *Settings → Zones → Edit zones…* or the Cala menu-bar icon. In **Tiles**, split and merge zones or drag their shared edges. In **Free**, draw, move and resize zones with snap guides and an optional 12-division grid. Choose a layout or **Off** for each display.
 - **Without the bar:** turn the bar off in *Settings → General* and Cala lives in the menu bar, with no taskbar and no reserved space. The Dock and menu bar stay as macOS has them.
 - **With the bar:** zones never go under the bar when it is always visible.
 - **Permission:** only **Accessibility**. Zones never records the screen or reads the keyboard.
 - **macOS 15 and later** can also tile a window dropped near a screen edge. If that gets in the way, turn off *Drag windows to screen edges to tile* in *System Settings → Desktop & Dock → Windows* (*Settings → Zones* has a button).
-- If a right-click ever misbehaves while dragging, choose **Hold Shift** in *Settings → Zones → Activate zones with*.
+- On a trackpad you can’t right-click while holding a drag. Hold **Shift** while dragging. In *Settings → Zones → Activate zones with*, choose **Hold Shift** or leave **Either gesture** selected (the default).
 
 More in [docs/zones.md](docs/zones.md).
 
@@ -126,7 +126,7 @@ More in [docs/zones.md](docs/zones.md).
 
 <img src="docs/images/permissions.jpg" alt="Permissions in the welcome window" width="380" align="right">
 
-Cala asks for each permission with a sentence on what it is for and a button that opens the exact pane of **System Settings**. Once you allow it, Cala notices by itself, with no restart.
+Cala asks for each permission with a sentence on what it is for and a button that opens the exact pane of **System Settings**. Cala detects Accessibility changes live. For Screen Recording, follow any macOS prompt to quit and reopen.
 
 | Permission | What for | If you skip it |
 |---|---|---|
@@ -153,25 +153,25 @@ After each Cala update, macOS shows *"Cala wants to access key "Cala Mail" in yo
 ## Everyday use
 
 - **Settings**: right-click an empty part of the bar → *Settings…*, or click the Cala icon in the menu bar (shown when the bar is off or Zones is on), or open Cala again from Applications.
-- **Modules**: *Settings → General → What Cala does* shows switches, status and direct links for Zones, Taskbar, Window switcher and Tray. The same pages stay available when modules are off. Open **Integrations** for Mail, Calendar and Claude & Codex.
-- **Tray:** drag a handle within or between **In the bar**, **In More** and **Hidden** to set order and placement. Use the row’s chevron to open its settings.
+- **Modules**: *Settings → General → What Cala does* shows switches, status and direct links for Zones, Taskbar, Window switcher and Tray. The same pages stay available when modules are off and offer an **Enable** action. Open **Integrations** for Mail, Calendar and Claude & Codex.
+- **Tray:** drag a handle within or between **In the bar**, **In More** and **Hidden** to set order and placement. Drop at the top of a group or into an empty one. The rows for CPU and memory, Disk, Mail and Claude & Codex open a detail with a back button when you click their chevron or anywhere outside the handle.
 - **Open at login**: chosen in the welcome or in *Settings → General*. It shows up in *System Settings → General → Login Items*.
 - **Language**: English or Spanish, following your Mac by default. Change it in *Settings → General → Language*.
 - **Taskbar**: *Settings → Taskbar* holds Dock and menu bar hiding, icon size, transparency, previews and alignment per display. To change the shared theme, open *General → Cala theme*.
-- **Window switcher**: *Settings → Window switcher* shows the Option + Tab status, the Command + Tab option and search instructions.
-- **Update**: run the Option 1 command again, or download the new DMG and replace Cala in Applications. Your settings and permissions are kept.
+- **Window switcher**: *Settings → Window switcher* shows whether Option + Tab is ready, including when thumbnails are unavailable, plus the Command + Tab option and search instructions.
+- **Update**: run the Option 1 command again, or download the new DMG and replace Cala in Applications. Each account keeps its own settings. Accounts using `/Applications/Cala.app` share the installed copy. Other sessions already running that copy relaunch into a newer build when active and free of blockers such as an open Settings window or an ongoing drag.
 
 ## Uninstall
 
-*Settings → Help and diagnostics → Advanced options → **Uninstall Cala…*** puts the Dock and menu bar back as they were, removes the login item, deletes Cala's settings and moves the app to the Trash.
+*Settings → Help and diagnostics → Advanced options → **Uninstall Cala → Uninstall…*** puts the Dock and menu bar back as they were, removes the login item, deletes Cala's settings and tries to move the app to the Trash. Removing the shared copy affects all accounts.
 
 Permissions stay listed in *System Settings → Privacy & Security*; you can remove them there. Without opening the app: [`scripts/uninstall.sh`](scripts/uninstall.sh).
 
 ## Privacy
 
-Nothing leaves your Mac unless you send it. *Report a problem* shows you exactly what is included before sending, and removes your home folder, user name, Mac name and email addresses. If the version you downloaded has no reporting destination set up, you can **copy the report** and paste it in an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
+Cala’s window and layout features run locally. Connected integrations use your existing accounts. Claude and Codex usage can query their providers, and Mail connects to the provider’s IMAP server and can load remote images. *Report a problem* previews the message, optional contact email and any text attachments. Cala redacts your home folder, user name, Mac name and email addresses from technical text. When sending through Cala, the report also includes structured context such as macOS version, Mac model and permission status. If the version you downloaded has no reporting destination set up, you can **copy the report** and paste it in an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
-**Mail:** app passwords are stored in the macOS Keychain (service "Cala Mail"), and the content of your emails stays on your Mac. Cala only talks to your provider's IMAP server. You can revoke access at any time by deleting the app password in your Google, Apple or Yahoo account.
+**Mail:** app passwords are stored in the macOS Keychain (service "Cala Mail"), and the content of your emails stays on your Mac. You can revoke access at any time by deleting the app password in your Google, Apple or Yahoo account.
 
 ## Troubleshooting
 
@@ -180,7 +180,7 @@ Nothing leaves your Mac unless you send it. *Report a problem* shows you exactly
 - **Zones does nothing**: it needs Accessibility (*Settings → Permissions*); it starts by itself once you allow it. Check that Zones is on in *Settings → General → What Cala does*.
 - **The Dock disappeared**: Cala only hides it if you asked. Turn off **Hide the macOS Dock** in *Settings → Taskbar*.
 - **macOS asks for my Mac password for "Cala Mail"**: it is expected after each update; see [The Keychain prompt](#the-keychain-prompt-mail). Type your Mac password and choose **Always Allow**; it goes to macOS, not to Cala.
-- **Something is wrong**: right-click the bar → *Report a problem…*, or open an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
+- **Something is wrong**: open *Settings → Help and diagnostics → Report a problem → Report…*, use **Report a Problem…** in the bar’s right-click menu, or open an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 
 ## Build from source
 

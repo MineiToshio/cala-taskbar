@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Removes Cala from this Mac without opening it (the app also has Settings → Advanced → Uninstall Cala).
+# Removes Cala from this Mac without opening it (the app also has Settings → Help and diagnostics → Advanced options → Uninstall Cala).
 # Puts the Dock back if Cala had hidden it. Leaves permission entries in System Settings (listed at the end).
 set -uo pipefail
 ID=${CALA_BUNDLE_ID:-local.cala}

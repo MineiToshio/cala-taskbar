@@ -2,7 +2,7 @@
 
 A throwaway prototype, **not part of the app target and not shipped**. It answers one question for the Zones module: can Cala watch a window drag and swallow a right-click in the middle of it, with which permission, and what does detection cost?
 
-The real implementation is in `Sources/Cala/Zones/` (see [docs/zones.md](../../../docs/zones.md)). This folder is kept as the evidence behind its design and as the tool for the one test that could not be automated.
+The real implementation is in `Sources/Cala/Zones/` (see [docs/zones.md](../../../docs/zones.md)). This folder is kept as the evidence behind its design and as an isolated tool for repeating the manual gesture test.
 
 ## What it does
 
@@ -45,7 +45,7 @@ Options: `--log <path>` (default `/tmp/drag-tap-probe.log`), `--seconds <n>` (ma
 
 **Documented, not measured:** Accessibility is what allows an active tap in practice (Rectangle, Hammerspoon and Cala's own window switcher rely on it); Input Monitoring alone does not.
 
-**Not measured — the single open go/no-go item:** whether the window server keeps a left-button window drag alive, and still delivers the left-button-up normally, when a right-click is swallowed in the middle of it. It could not be tested because the automated environment was a background login session, which receives no mouse input (synthetic events never reached any window). Theory and other tools say it works, because the swallowed event never reaches the window server's routing or the app, but it is unproven. Until the manual test below passes, the Zones default is `both` (Shift always works). If it fails, Shift becomes the only gesture.
+**Prototype limit:** its background login session received no mouse input, so the spike could not test whether swallowing a right-click leaves the drag and left-button-up intact. The owner verified both in the integrated app on 2026-11-24. Cala defaults to `both` (right-click or hold Shift), as described in [the Zones verification](../../../docs/zones.md#drag-gesture-prototype-and-the-right-click-verification).
 
 ## Manual test (needs someone at the Mac's own screen)
 

@@ -1,8 +1,8 @@
 # Configuration
 
-In Settings, use **General** for the four module switches, language, login and the shared theme. **Zones**, **Taskbar**, **Window switcher** and **Tray** hold their own settings. **Integrations** contains **Mail**, **Calendar** and **Claude & Codex**. **Permissions** and **Help and diagnostics** have their own sidebar rows. These destinations stay available when modules are off. In **Tray**, drag item handles within or between **In the bar**, **In More** and **Hidden**. The chevrons open the details for items with settings, including CPU and memory and Disk.
+In Settings, use **General** for the four module switches, language, login and the shared theme. **Zones**, **Taskbar**, **Window switcher** and **Tray** hold their own settings. **Integrations** contains **Mail**, **Calendar** and **Claude & Codex**. **Permissions** and **Help and diagnostics** have their own sidebar rows. These destinations stay available when modules are off. In **Tray**, drag item handles within or between **In the bar**, **In More** and **Hidden**. Drops work in the first slot and in empty groups. The four rows with chevrons open details for CPU and memory, Disk, Mail and Claude & Codex, with a back button to the originating page.
 
-File: `~/Library/Application Support/Cala/config.json`. Created on first run and saved automatically whenever something changes in the Settings window or the quick menu. Saves use atomic replacement. Missing or mistyped keys fall back individually to defaults, so valid settings survive a bad field. The bar's numeric settings are clamped to the ranges below; the Dock backup values are never clamped. A file that cannot be decoded is preserved as `config.json.bad` when possible and defaults are used; if preservation fails, saving is disabled for that run to protect the original. Normally you never edit it by hand (Settings → Help and diagnostics → Advanced options → Configuration file); if you do, restart the bar afterwards.
+File: `~/Library/Application Support/Cala/config.json`. Created on first run and saved automatically whenever something changes in the Settings window or the quick menu. Saves use atomic replacement. Missing or mistyped keys fall back individually to defaults, so valid settings survive a bad field. The bar's numeric settings are clamped to the ranges below; the Dock backup values are never clamped. A file that cannot be decoded is preserved as `config.json.bad` when possible and defaults are used; if preservation fails, saving is disabled for that run to protect the original. Normally you never edit it by hand (Settings → Help and diagnostics → Advanced options → Configuration file); if you do, quit Cala normally before editing and reopen it afterward.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -15,26 +15,26 @@ File: `~/Library/Application Support/Cala/config.json`. Created on first run and
 | `alignments` | object | `{}` | Display UUID → `"left"` or `"center"`. Screens not listed use left |
 | `theme` | string | `"system"` | `system`, `graphite`, `midnight`, `ocean`, `sunset`, `forest`, `lavender`, `candy`, `snow` |
 | `menuBarHiddenIcons` | array of ids | `[]` | macOS menu bar icons to hide: `wifi`, `battery`, `user`, `input` |
-| `menuBarIconBackupV2` | object | `{}` | Original per-host value of each hidden icon (a number, or `"nil"` when the key did not exist), restored verbatim |
-| `restartAdvice` | bool | `true` | Show "Recomendamos reiniciar" with its reasons in the system panel |
+| `menuBarIconBackupV2` | object | `{}` | Original per-host value of each hidden icon (a string representation of the preference value, or `"nil"` when the key did not exist), restored verbatim |
+| `restartAdvice` | bool | `true` | Show restart recommendations in the system panel’s Maintenance row |
 | `relaunchOnCrash` | bool | `true` | Open Cala again by itself if it crashes or is force-quit (gives up after 3 relaunches in 2 minutes) |
 | `crashReports` | string | `"ask"` | What to do when Cala crashed last time: `ask`, `auto` (send without asking) or `never` |
 | `hideMenuBar` | bool | `false` | Auto-hide the macOS menu bar everywhere while Cala runs |
 | `restoreMenuBarOnQuit` | bool | `true` | Give the menu bar back when Cala quits |
-| `menuBarBackup*` | various | — | Original menu bar auto-hide values, restored verbatim (like the Dock backup) |
+| `menuBarBackupSaved`, `menuBarBackupOption`, `menuBarBackupHide`, `menuBarBackupFullscreen` | internal | `false`, unset, unset, unset | Saved menu bar auto-hide preferences and whether the backup was taken |
 | `trayLayout` | object | `{}` | Tray item id → `"bar"`, `"more"` (behind ^) or `"hidden"`; missing ids use their default |
-| `trayOrder` | array of ids | `[]` | Left-to-right order of the tray items (ids not listed keep their default place) |
-| `monitorEnabled` | bool | `true` | Show the CPU gauge and system panel in the tray |
+| `trayOrder` | array of ids | `[]` | Saved left-to-right order of known tray items. An omitted item is inserted after its default predecessor when present, and appended otherwise |
+| `monitorEnabled` | bool | `true` | Legacy visibility fallback for CPU and memory when no explicit placement is saved |
 | `monitorBarMetric` | string | `"cpu"` | What the CPU and memory tray item shows while all is well: `"cpu"` or `"memory"` (a problem always wins) |
 | `mailLoadsRemoteImages` | bool | `true` | Load remote images in emails (the sender can tell the message was opened) |
-| `diskEnabled` | bool | `true` | Show free disk space in the tray |
+| `diskEnabled` | bool | `true` | Legacy visibility fallback for Disk when no explicit placement is saved |
 | `diskFolders` | array of paths | `[]` | Extra folders measured in the storage panel (`~` allowed) |
 | `barOpacity` | number | `1` | Bar background opacity (1 = solid, 0.2 = very transparent) |
 | `hideNativeDock` | bool | `false` | Keep the macOS Dock hidden while the bar runs |
 | `switcherEnabled` | bool | `true` | The Switcher module (Option+Tab). Off: no event tap at all, and Cmd+M interception goes with it |
 | `switcherReplaceCmdTab` | bool | `false` | Also take over Cmd+Tab |
 | `restoreDockOnQuit` | bool | `true` | Give the Dock back when the bar quits |
-| `dockBackupSaved`, `dockBackupAutohide`, `dockBackupDelay` | internal | | Original Dock values, used to restore it exactly. Do not edit |
+| `dockBackupSaved`, `dockOverridePending`, `dockBackupAutohide`, `dockBackupDelay` | internal | `false`, unset, unset, unset | Dock backup state and ownership of the override. A missing `dockOverridePending` represents older data. |
 
 Example:
 ```json
@@ -52,7 +52,7 @@ Example:
 
 Find an app's bundle ID: `osascript -e 'id of app "Notes"'`.
 
-Not in `config.json`: the login item lives in System Settings → General → Login Items (SMAppService), and the welcome state in the app's UserDefaults (domain `local.cala`): `onboardingCompleted` (written when the "What do you want to use?" answer is saved, or for an upgrade) and `onboardingPending` (a first-run welcome was shown and not answered yet; cleared when it is).
+Not in `config.json`: the login item is registered with SMAppService and managed in System Settings → General → Login Items. Its saved intent (`loginItemDesired`), registration path (`loginItemRegistrationPath`) and the welcome state live in the app's UserDefaults (domain `local.cala`): `onboardingCompleted` (written when the "What do you want to use?" answer is saved, or for an upgrade) and `onboardingPending` (a first-run welcome was shown and not answered yet; cleared when it is).
 
 The module keys and the Zones keys are in [Modules and Zones](#modules-and-zones) below.
 
@@ -64,7 +64,7 @@ The module keys and the Zones keys are in [Modules and Zones](#modules-and-zones
 | `barEnabled` | bool | `true` | Bar module. Off: no bar, no reserved space, the macOS Dock and menu bar left alone, status item in the menu bar |
 | `trayEnabled` | bool | `true` | Tray module. Only effective while the Bar is on (the stored value is kept) |
 | `switcherEnabled` | bool | `true` | Switcher module (see the main table) |
-| `zonesEnabled` | bool | `false` | Zones module. Off: no event tap, no zones, `zones.json` is not read |
+| `zonesEnabled` | bool | `false` | Zones module. Off: no event tap or snapping. Settings → Zones and the editor can still load layouts |
 | `zonesActivation` | string | `"both"` | How zones mode starts during a window drag: `rightClick`, `shift` or `both`. Any other value becomes `both` |
 | `zonesGap` | number | `8` | Space in points left around each snapped window, 0–40 (clamped; a non-number becomes 8) |
 | `zonesEditorGrid` | bool | `false` | The zones editor snaps to a 12-division grid as well |
@@ -73,9 +73,9 @@ The module keys and the Zones keys are in [Modules and Zones](#modules-and-zones
 
 The effective set is computed from these: the tray runs only if the bar does. The welcome's answer writes `modulesChosen` and the four module keys; the migration of an existing user writes them too. No existing key was renamed.
 
-The zones themselves (layouts, per-monitor assignment) are not in `config.json`: they live in `~/Library/Application Support/Cala/zones.json`, described in [zones.md](zones.md#storage-zonesjson). A zones file that cannot be decoded is kept as `zones.json.bad` and the templates are seeded again.
+The zones themselves (layouts, per-monitor assignment) are not in `config.json`: they live in `~/Library/Application Support/Cala/zones.json`, described in [zones.md](zones.md#storage-zonesjson). A zones file that cannot be decoded is moved to the first unused `zones.json.bad`, `zones.json.bad.1`, etc. before templates are written. If the backup fails, the original is retained and layout saves are disabled for that store.
 
-## Usage settings
+## Claude & Codex settings
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -86,18 +86,18 @@ The zones themselves (layouts, per-monitor assignment) are not in `config.json`:
 | `usageCodexHome` | string | `""` | Optional Codex home folder |
 | `usageAlertsEnabled` | bool | `true` | Notify when a quota is low or projected to run out before it resets |
 | `usageAlertThreshold` | number | `20` | Remaining percentage that triggers the low-quota notification (10, 15, 20 or 30) |
-| `usageClaudeStatusLine` | bool | `false` | Opt in to Claude Code local statusLine updates |
+| `usageClaudeStatusLine` | optional bool | unset (UI shows off) | `true` opts in, `false` authorizes cleanup, and a missing or invalid choice leaves the existing Claude setting alone |
 
 Missing/mistyped fields independently use their defaults. Folder drafts apply on submit, focus loss or leaving the pane, rather than on each keystroke. Empty folder fields use the login shell's `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, then standard home folders. Credentials remain owned by the CLI/app; sign in there. Settings reports detection and expired-session status without displaying secrets.
 
-The statusLine option creates `~/Library/Application Support/Cala/claude-statusline.sh` and `claude-usage.json`. The Claude config folder must already exist. Before the first edit of an existing `settings.json`, Cala creates `settings.json.mactaskbar.bak` only if absent; an existing backup is never overwritten, including one created by an older app version. Unrelated keys are preserved; key order can change on an actual edit, while slashes remain unescaped. An already-owned statusLine causes no settings or backup write on launch. An existing statusLine is never overwritten. Settings instead shows a command to integrate into the existing script, with its original stdin JSON stored in `input`. Disable removes only the Cala-owned entry. `usage-cache.json` contains readings and rate-limit cooldowns, never tokens.
+Cala creates `~/Library/Application Support/Cala/claude-statusline.sh` for the statusLine integration and tracks the installed directory in `claude-statusline-directory`. When Claude runs the command, the script writes readings to `claude-usage.json`. The Claude config folder must already exist. Before the first edit of an existing `settings.json`, Cala creates `settings.json.mactaskbar.bak` only if absent; an existing backup is never overwritten, including one created by an older app version. Unrelated keys are preserved; key order can change on an actual edit, while slashes remain unescaped. An already-owned statusLine causes no settings or backup write on launch. An existing statusLine is never overwritten. Settings instead shows a command to integrate into the existing script, with its original stdin JSON stored in `input`. Disable removes only the Cala-owned entry, including an exact legacy Cala command. Cala follows symlinks to the settings file, preserves its POSIX permissions and stages edits beside it. Invalid JSON is left in place. If the bytes change before replacement, Cala rereads the file and checks ownership again, with up to three attempts. `usage-cache.json` contains readings and rate-limit cooldowns, never tokens.
 
 ## Calendar settings
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `calendarJoinEnabled` | bool | `true` | Show the Join button in the bar for meetings with a video link, from 5 minutes before the start |
-| `calendarEnabled` | bool | `true` | Show upcoming events in the clock flyout; permission is requested only when opening that flyout or Calendar settings while enabled |
+| `calendarEnabled` | bool | `true` | Show upcoming events in the clock flyout; while enabled, opening the flyout can request access. In Calendar settings, use **Allow calendar access** |
 | `calendarDays` | integer | `7` | Upcoming rolling range in local calendar days: 1, 3, 7 or 14; other values recover to 7 |
 | `calendarExcludedIDs` | array of strings | `[]` | EventKit calendar identifiers to exclude; new calendars are included automatically |
 
