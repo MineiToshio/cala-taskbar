@@ -8,7 +8,7 @@ import os
 /// Callback rules (an active tap sits in the path of every click on the Mac):
 /// - O(1): it runs `ZoneDragMachine` under an unfair lock and hands work off with `async`. No AX, no
 ///   CGWindowList, no logging, no file I/O.
-/// - Only a right click during a confirmed drag of another app's window (and its matching up) is swallowed.
+/// - Only a right click during a confirmed window drag (and its matching up) is swallowed.
 ///   Every other event is returned unmodified; unknown types pass through.
 /// - Disabled by timeout or user input: re-enabled at once and the gesture is cancelled, so a missed
 ///   leftMouseUp can never leave zones mode stuck.
@@ -59,6 +59,14 @@ final class ZoneDragTap: @unchecked Sendable {
     }
 
     var isInstalled: Bool { port != nil }
+
+    /// AppKit can track Cala's own window drags in a nested event-tracking run loop.
+    static func performOnMainDuringDrag(_ block: @escaping () -> Void) {
+        let loop = CFRunLoopGetMain()
+        let modes = [RunLoop.Mode.common.rawValue, RunLoop.Mode.eventTracking.rawValue] as CFArray
+        CFRunLoopPerformBlock(loop, modes, block)
+        CFRunLoopWakeUp(loop)
+    }
 
     // MARK: Main thread
 
@@ -181,6 +189,10 @@ final class ZoneDragTap: @unchecked Sendable {
             s.checkPending = false
             return (s.machine.phase == .pressed && s.machine.generation == generation, s.machine.point)
         }
+    }
+
+    func isDragging(generation: UInt64) -> Bool {
+        state.withLockUnchecked { $0.machine.generation == generation && $0.machine.phase == .dragging }
     }
 
     /// Main side of the coalesced overlay update.

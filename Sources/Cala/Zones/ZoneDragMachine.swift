@@ -12,7 +12,7 @@ extension ZoneActivation {
 /// Points are CG global coordinates (top-left origin), exactly as the mouse events carry them.
 ///
 ///     idle --leftDown--> pressed(gen)                     [worker: window under the point]
-///     pressed --confirmDrag(gen)--> dragging              [worker saw another app's window move]
+///     pressed --confirmDrag(gen)--> dragging              [worker saw an eligible window move]
 ///     dragging --rightDown--> SWALLOW, toggle right-click mode (its rightUp is swallowed too)
 ///     dragging --Shift in the event flags--> Shift mode while held
 ///     dragging --reject(gen)--> idle                     [worker: the moving window cannot be placed]
@@ -62,7 +62,7 @@ struct ZoneDragMachine {
         return generation
     }
 
-    /// Returns true when the worker should check whether the pressed window moved.
+    /// Returns true when the worker should look for a moving window.
     mutating func leftDragged(to p: CGPoint, shift: Bool, command: Bool) -> Bool {
         point = p
         self.shift = shift
@@ -80,7 +80,7 @@ struct ZoneDragMachine {
         return Release(generation: generation, point: p, zonesMode: zonesMode, command: command)
     }
 
-    /// Returns true when the event must be swallowed. Only during a confirmed drag of another app's window.
+    /// Returns true when the event must be swallowed during a confirmed window drag.
     mutating func rightDown() -> Bool {
         guard phase == .dragging, activation.allowsRightClick else {
             // This down reaches the app, so its up must too. A pending flag here is stale: its up was lost
@@ -122,6 +122,64 @@ struct ZoneDragMachine {
         phase = .idle
         rightToggle = false
         if resetButtons { swallowRightUp = false }
+    }
+}
+
+/// Window observations used by the worker while the tap is still in the pressed phase.
+struct ZoneDragCandidate {
+    struct Window {
+        let key: ZoneRestore.WindowKey
+        let frame: CGRect
+    }
+
+    private static let recheckInterval: TimeInterval = 0.04
+    private static let cursorSlack: CGFloat = 20
+
+    let original: Window
+    private let initialIDs: Set<CGWindowID>
+    private var lastPoint: CGPoint
+    private var nextCheck: TimeInterval = 0
+    private var previous: [CGWindowID: CGRect] = [:]
+
+    init(original: Window, initialIDs: Set<CGWindowID>, point: CGPoint) {
+        self.original = original
+        self.initialIDs = initialIDs
+        self.lastPoint = point
+    }
+
+    func originalMoved(to frame: CGRect?) -> Bool {
+        frame.map { ZoneWindowFit.isMove(from: original.frame, to: $0) } ?? false
+    }
+
+    /// Take at most one full window-list sample every 40 ms, and only on cursor movement.
+    func shouldRecheck(at point: CGPoint, time: TimeInterval) -> Bool {
+        time >= nextCheck && hypot(point.x - lastPoint.x, point.y - lastPoint.y) >= 3
+    }
+
+    /// A tab dragged out of a browser can leave the original window in place. A new window must
+    /// be near the cursor in two successive samples and translate with it, at a stable size.
+    mutating func recheck(windows: [Window], at point: CGPoint, time: TimeInterval) -> Window? {
+        let dx = point.x - lastPoint.x
+        let dy = point.y - lastPoint.y
+        let tolerance = min(Self.cursorSlack, max(4, hypot(dx, dy) / 2))
+        lastPoint = point
+        nextCheck = time + Self.recheckInterval
+        var observed: [CGWindowID: CGRect] = [:]
+        defer { previous = observed }
+        for window in windows {
+            let id = window.key.windowID
+            let frame = window.frame
+            guard window.key.pid == original.key.pid, id != original.key.windowID, !initialIDs.contains(id),
+                  frame.insetBy(dx: -Self.cursorSlack, dy: -Self.cursorSlack).contains(point) else { continue }
+            observed[id] = frame
+            guard let before = previous[id], ZoneWindowFit.isMove(from: before, to: frame) else { continue }
+            let moveX = frame.minX - before.minX
+            let moveY = frame.minY - before.minY
+            if moveX * dx + moveY * dy > 0, hypot(moveX - dx, moveY - dy) <= tolerance {
+                return window
+            }
+        }
+        return nil
     }
 }
 
