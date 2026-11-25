@@ -1,6 +1,6 @@
 # Configuration
 
-In Settings, use **General** for the four module switches, language, login and the shared theme. **Zones**, **Taskbar**, **Window switcher** and **Tray** hold their own settings. **Mail**, **Calendar**, **Claude & Codex**, **Permissions** and **Help and diagnostics** sit in the same sidebar. These destinations stay available when modules are off. In **Tray**, drag items within or between **In the bar**, **In More** and **Hidden**. Use the gear for item settings, including CPU and memory and Disk.
+In Settings, use **General** for the four module switches, language, login and the shared theme. **Zones**, **Taskbar**, **Window switcher** and **Tray** hold their own settings. **Integrations** contains **Mail**, **Calendar** and **Claude & Codex**. **Permissions** and **Help and diagnostics** have their own sidebar rows. These destinations stay available when modules are off. In **Tray**, drag item handles within or between **In the bar**, **In More** and **Hidden**. The chevrons open the details for items with settings, including CPU and memory and Disk.
 
 File: `~/Library/Application Support/Cala/config.json`. Created on first run and saved automatically whenever something changes in the Settings window or the quick menu. Saves use atomic replacement. Missing or mistyped keys fall back individually to defaults, so valid settings survive a bad field. The bar's numeric settings are clamped to the ranges below; the Dock backup values are never clamped. A file that cannot be decoded is preserved as `config.json.bad` when possible and defaults are used; if preservation fails, saving is disabled for that run to protect the original. Normally you never edit it by hand (Settings → Help and diagnostics → Advanced options → Configuration file); if you do, restart the bar afterwards.
 
@@ -101,7 +101,7 @@ The statusLine option creates `~/Library/Application Support/Cala/claude-statusl
 | `calendarDays` | integer | `7` | Upcoming rolling range in local calendar days: 1, 3, 7 or 14; other values recover to 7 |
 | `calendarExcludedIDs` | array of strings | `[]` | EventKit calendar identifiers to exclude; new calendars are included automatically |
 
-Fields decode independently: malformed calendar settings do not reset other valid settings. The configuration stores only calendar exclusions and display preferences, not events or account credentials. Use Settings → Calendar to select accounts’ calendars. Add or sign in to accounts manually in System Settings → Internet Accounts, and enable Calendars for each account.
+Fields decode independently: malformed calendar settings do not reset other valid settings. The configuration stores only calendar exclusions and display preferences, not events or account credentials. Use Settings → Integrations → Calendar to select accounts’ calendars. Add or sign in to accounts manually in System Settings → Internet Accounts, and enable Calendars for each account.
 
 
 ### `language`

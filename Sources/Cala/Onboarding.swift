@@ -4,7 +4,7 @@ import SwiftUI
 /// First run: a short welcome that offers to move Cala to Applications, asks what to use (the Bar, Zones or both), asks
 /// only for the permissions that choice needs, lists the optional ones when the Bar (and its tray) is chosen (each is
 /// also asked for the first time its feature is used) and sets open-at-login.
-/// It can be skipped at any step and reopened from Settings → Permissions.
+/// It can be skipped at any step and reopened from Settings → Help and diagnostics.
 final class OnboardingWindowController: NSObject, NSWindowDelegate {
     static let shared = OnboardingWindowController()
     private var window: NSWindow?

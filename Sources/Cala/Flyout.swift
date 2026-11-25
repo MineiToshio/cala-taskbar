@@ -117,7 +117,7 @@ struct FlyoutView: View {
             case trayTrash: TrashPane()
             case trayUser: UserPane()
             case trayKB: KeyboardPane(model: model)
-            case trayClock: CalendarPane(maxAgendaHeight: min(400, max(60, fm.availableHeight - 480)))
+            case trayClock: CalendarPane(maxAgendaHeight: min(400, max(60, fm.availableHeight - 506)))
             case trayUsage, UsageProvider.claude.trayID, UsageProvider.codex.trayID: UsagePane(model: model, maxHeight: max(300, fm.availableHeight - 40))
             default: EmptyView()
             }
@@ -569,6 +569,10 @@ struct CalendarPane: View {
                 Divider().padding(.vertical, 2)
             }
             Row(icon: "calendar", title: calendarText("Open Calendar", "Abrir Calendario")) { NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Calendar.app")) }
+            Row(icon: "slider.horizontal.3", title: calendarText("Configure Calendar…", "Configurar calendario…")) {
+                NotificationCenter.default.post(name: .flyoutHide, object: nil)
+                SettingsWindowController.shared.show(detail: .calendar)
+            }
             if offset != 0 { Row(icon: "arrow.uturn.backward", title: calendarText("Back to today", "Volver a hoy")) { offset = 0 } }
             LinkRow(title: calendarText("Notification settings", "Ajustes de notificaciones"), pane: "com.apple.Notifications-Settings.extension")
         }

@@ -8,13 +8,17 @@ final class SettingsWindowController {
     static let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
     private(set) var window: NSWindow?
     private let navigation = SettingsNavigation()
-    private var pendingPane: SettingsPane?
+    private var pendingRoute: SettingsRoute?
     private var sheetObserver: NSObjectProtocol?
 
-    func show(pane: SettingsPane? = nil) {
-        if let pane {
-            if window?.attachedSheet == nil { navigation.select(pane) }
-            else { pendingPane = pane }
+    func show(pane: SettingsPane? = nil) { show(route: pane.map(SettingsRoute.pane)) }
+
+    func show(detail: SettingsDetail) { show(route: .detail(detail)) }
+
+    private func show(route: SettingsRoute?) {
+        if let route {
+            if window?.attachedSheet == nil { navigation.select(route) }
+            else { pendingRoute = route }
         }
         if window == nil {
             let w = NSWindow(contentRect: NSRect(origin: .zero, size: Self.defaultSize),
@@ -31,9 +35,9 @@ final class SettingsWindowController {
             window = w
             sheetObserver = NotificationCenter.default.addObserver(forName: NSWindow.didEndSheetNotification,
                                                                    object: w, queue: .main) { [weak self] _ in
-                guard let self, let pane = self.pendingPane else { return }
-                self.pendingPane = nil
-                self.navigation.select(pane)
+                guard let self, let route = self.pendingRoute else { return }
+                self.pendingRoute = nil
+                self.navigation.select(route)
             }
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -42,27 +46,43 @@ final class SettingsWindowController {
     }
 }
 
+enum SettingsRoute {
+    case pane(SettingsPane)
+    case detail(SettingsDetail)
+}
+
 final class SettingsNavigation: ObservableObject {
     struct Request: Equatable {
         var pane: SettingsPane
         var sequence: UInt64 = 0
     }
     @Published private(set) var request = Request(pane: .general)
+    @Published var path: [SettingsDetail] = []
     var selection: SettingsPane { request.pane }
 
+    func select(_ route: SettingsRoute) {
+        switch route {
+        case let .pane(pane): select(pane)
+        case let .detail(detail): select(detail.home); path = [detail]
+        }
+    }
+
     func select(_ pane: SettingsPane) {
+        if let detail = pane.legacyDetail {
+            select(.detail(detail))
+            return
+        }
         request = Request(pane: pane, sequence: request.sequence &+ 1)
+        path = []
     }
 }
 
 enum SettingsPane: String, Identifiable {
-    case general, zones, bar, switcher, tray, mail, calendar, usage, permissions, help
-    case appearance, screens, about, barStyle
+    case general, zones, bar, switcher, tray, integrations, permissions, help
+    case appearance, screens, about, barStyle, mail, calendar, usage
 
     static let modules: [Self] = [.zones, .bar, .switcher, .tray]
-    static let trayDetails: [Self] = [.mail, .calendar, .usage]
-    static let appPages: [Self] = [.permissions, .help]
-    static let pages = [.general] + modules + trayDetails + appPages
+    static let pages = [.general] + modules + [.integrations, .permissions, .help]
     var id: String { rawValue }
 
     var page: Self {
@@ -70,7 +90,17 @@ enum SettingsPane: String, Identifiable {
         case .appearance: .general
         case .screens, .barStyle: .bar
         case .about: .help
+        case .mail, .calendar, .usage: .integrations
         default: self
+        }
+    }
+
+    var legacyDetail: SettingsDetail? {
+        switch self {
+        case .mail: .mail
+        case .calendar: .calendar
+        case .usage: .usage
+        default: nil
         }
     }
 
@@ -90,12 +120,10 @@ enum SettingsPane: String, Identifiable {
         case .bar: tx("Taskbar", "Barra de tareas")
         case .switcher: tx("Window switcher", "Selector de ventanas")
         case .tray: tx("Tray", "Bandeja")
-        case .mail: tx("Mail", "Correo")
-        case .calendar: tx("Calendar", "Calendario")
-        case .usage: TrayItems.usage.title
+        case .integrations: tx("Integrations", "Integraciones")
         case .permissions: tx("Permissions", "Permisos")
         case .help: tx("Help and diagnostics", "Ayuda y diagnóstico")
-        case .appearance, .screens, .about, .barStyle: ""
+        case .appearance, .screens, .about, .barStyle, .mail, .calendar, .usage: ""
         }
     }
 
@@ -105,9 +133,6 @@ enum SettingsPane: String, Identifiable {
         case .bar: tx("See and manage open apps at the bottom of each display.", "Ve y gestiona tus apps abiertas al pie de cada pantalla.")
         case .switcher: tx("Switch between open windows with Option + Tab.", "Cambia entre ventanas abiertas con Opción + Tab.")
         case .tray: tx("Controls and widgets on the right of the taskbar.", "Controles y widgets a la derecha de la barra de tareas.")
-        case .calendar: tx("Upcoming events from the calendars in the taskbar clock.", "Próximos eventos de los calendarios del reloj de la barra de tareas.")
-        case .mail: tx("Connect Gmail, iCloud Mail, or Yahoo Mail with an app password stored in the Keychain. Google Workspace works if your administrator allows IMAP and app passwords. Cala doesn’t support Outlook or Hotmail.", "Conecta Gmail, Mail de iCloud o Yahoo Mail con una contraseña de aplicación guardada en el Llavero. Google Workspace funciona si tu administrador permite IMAP y las contraseñas de aplicación. Cala no admite Outlook ni Hotmail.")
-        case .usage: tx("Claude and Codex plan usage in one tray control.", "El uso de tus planes de Claude y Codex en un solo control de la bandeja.")
         default: nil
         }
     }
@@ -128,9 +153,7 @@ enum SettingsPane: String, Identifiable {
         case .bar: "rectangle.bottomthird.inset.filled"
         case .switcher: "macwindow.on.rectangle"
         case .tray: "square.grid.2x2"
-        case .mail: "envelope.fill"
-        case .calendar: "calendar"
-        case .usage: "chart.bar.fill"
+        case .integrations: "puzzlepiece.extension"
         case .permissions: "lock.shield.fill"
         case .help: "wrench.and.screwdriver.fill"
         default: "gearshape.fill"
@@ -143,9 +166,7 @@ enum SettingsPane: String, Identifiable {
         case .bar: .blue
         case .switcher: .pink
         case .tray: .teal
-        case .mail: .blue
-        case .calendar: .red
-        case .usage: .purple
+        case .integrations: .purple
         case .permissions: .green
         case .help: .orange
         default: .gray
@@ -164,20 +185,36 @@ struct VisualEffect: NSViewRepresentable {
 struct SettingsView: View {
     @ObservedObject var store: ConfigStore
     @ObservedObject var navigation: SettingsNavigation
+    @FocusState private var focusedDetail: SettingsDetail?
+    @State private var returnFocus: (detail: SettingsDetail, sequence: UInt64)?
     private let sidebarWidth: CGFloat = 228
 
     var body: some View {
         HStack(spacing: 0) {
             sidebar.frame(width: sidebarWidth)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    SettingsPage(pane: navigation.selection.page, store: store, open: select)
-                        .padding(.horizontal, 28).padding(.top, 44).padding(.bottom, 28)
-                        .id("pageTop")
+            NavigationStack(path: $navigation.path) {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        SettingsPage(pane: navigation.selection.page, store: store, open: navigation.select,
+                                     openDetail: openDetail)
+                            .padding(.horizontal, 28).padding(.top, 44).padding(.bottom, 28)
+                            .id("pageTop")
+                    }
+                    .id(navigation.selection.page)
+                    .onAppear {
+                        if navigation.request.pane.sectionAnchor != nil { scroll(to: navigation.request, using: proxy) }
+                        if navigation.path.isEmpty { restoreDetailFocus() }
+                    }
+                    .onChange(of: navigation.request) { _, request in scroll(to: request, using: proxy) }
                 }
-                .id(navigation.selection.page)
-                .onChange(of: navigation.request, initial: true) { _, request in
-                    scroll(to: request, using: proxy)
+                .environment(\.settingsDetailFocus, $focusedDetail)
+                .navigationDestination(for: SettingsDetail.self) { detail in
+                    ScrollView {
+                        SettingsDetailPage(detail: detail, origin: navigation.selection.page, store: store,
+                                           back: { navigation.path.removeAll() })
+                            .padding(.horizontal, 28).padding(.top, 44).padding(.bottom, 28)
+                    }
+                    .navigationBarBackButtonHidden()
                 }
             }
             .background(Color(nsColor: .windowBackgroundColor))
@@ -192,7 +229,19 @@ struct SettingsView: View {
         }
     }
 
-    private func select(_ pane: SettingsPane) { navigation.select(pane) }
+    private func openDetail(_ detail: SettingsDetail) {
+        returnFocus = (detail, navigation.request.sequence)
+        navigation.path.append(detail)
+    }
+
+    private func restoreDetailFocus() {
+        guard let target = returnFocus else { return }
+        returnFocus = nil
+        DispatchQueue.main.async {
+            guard navigation.path.isEmpty, navigation.request.sequence == target.sequence else { return }
+            focusedDetail = target.detail
+        }
+    }
 
     private var sidebar: some View {
         ScrollView {
@@ -207,7 +256,7 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 5).padding(.bottom, 9)
                 ForEach(SettingsPane.pages) { pane in
-                    SidebarItem(pane: pane, selected: navigation.selection.page == pane) { select(pane) }
+                    SidebarItem(pane: pane, selected: navigation.selection.page == pane) { navigation.select(pane) }
                 }
             }
             .padding(.horizontal, 9).padding(.top, 36).padding(.bottom, 12)
@@ -221,13 +270,13 @@ struct SettingsPage: View {
     let pane: SettingsPane
     @ObservedObject var store: ConfigStore
     let open: (SettingsPane) -> Void
+    let openDetail: (SettingsDetail) -> Void
     @Environment(\.settingsSnapshot) private var snapshot
 
     var body: some View {
         let modules = snapshot?.modules ?? store.config.modules
         let module = pane.module
-        let trayDetail = SettingsPane.trayDetails.contains(pane)
-        let inactive = module.map { !ModulePlan.effective(modules)[$0] } ?? (trayDetail && !ModulePlan.effective(modules).tray)
+        let inactive = module.map { !ModulePlan.effective(modules)[$0] } ?? false
         VStack(alignment: .leading, spacing: 22) {
             if let module {
                 ModuleHeader(pane: pane, module: module, store: store)
@@ -239,17 +288,7 @@ struct SettingsPage: View {
                     }
                 }
             }
-            if trayDetail {
-                if inactive { TrayDependencyCard(store: store) }
-                Button { open(.tray) } label: {
-                    Label(tx("Tray", "Bandeja"), systemImage: "chevron.left")
-                }.buttonStyle(.link)
-            }
-            if inactive {
-                Text(tx("You can change these settings now. They’ll take effect when you enable the module.",
-                        "Puedes cambiar estos ajustes ahora. Se aplicarán al activar el módulo."))
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-            }
+            if inactive { InactiveSettingsNote() }
             if pane == .zones { ZonesEditorAction() }
             contents
         }
@@ -264,13 +303,11 @@ struct SettingsPage: View {
         case .zones: ZonesSettingsPane(store: store)
         case .bar: BarSettingsPane(store: store, open: open)
         case .switcher: SwitcherSettingsPane(store: store)
-        case .tray: TrayPane(store: store, open: open)
-        case .mail: MailSettingsPane()
-        case .calendar: CalendarSettingsPane(store: store)
-        case .usage: UsageSettingsPane(store: store)
+        case .tray: TrayPane(store: store, mail: snapshot?.mail ?? MailService.shared, open: openDetail)
+        case .integrations: IntegrationsPane(open: openDetail)
         case .permissions: PermissionsPane()
         case .help: AdvancedPane(store: store)
-        case .appearance, .screens, .about, .barStyle: EmptyView()
+        case .appearance, .screens, .about, .barStyle, .mail, .calendar, .usage: EmptyView()
         }
     }
 }
@@ -305,6 +342,7 @@ struct SettingsSnapshot {
     var ready = true
     var language: String? = nil
     var layouts: ZonesState
+    var mail: MailService
 }
 
 private struct SettingsSnapshotKey: EnvironmentKey { static let defaultValue: SettingsSnapshot? = nil }

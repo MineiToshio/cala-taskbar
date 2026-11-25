@@ -8,3 +8,9 @@ func mergingTrayOrder(_ savedOrder: [String], with visibleOrder: [String]) -> [S
     merged.append(contentsOf: remaining)
     return merged
 }
+
+/// Restore defaults for known items while keeping preferences from other Cala versions.
+func resettingTrayItems(_ knownIDs: Set<String>, layout: [String: String], order: [String])
+    -> (layout: [String: String], order: [String]) {
+    (layout.filter { !knownIDs.contains($0.key) }, order.filter { !knownIDs.contains($0) })
+}

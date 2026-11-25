@@ -141,9 +141,10 @@ enum Snapshots {
         let store = ConfigStore.shared
         let zones = try? ZonesStore(templateName: ZonesModule.templateName, readOnly: true)
         let layouts = zones?.state ?? ZoneTemplates.seedState()
+        let mail = MailService.snapshot()
         func pane(_ p: SettingsPane, modules: ModuleSet? = nil, ready: Bool = true, language: String? = nil) -> some View {
-            SettingsPage(pane: p, store: store, open: { _ in })
-                .environment(\.settingsSnapshot, SettingsSnapshot(modules: modules ?? enabled, ready: ready, language: language, layouts: layouts))
+            SettingsPage(pane: p, store: store, open: { _ in }, openDetail: { _ in })
+                .environment(\.settingsSnapshot, SettingsSnapshot(modules: modules ?? enabled, ready: ready, language: language, layouts: layouts, mail: mail))
                 .padding(34)
         }
         for p in SettingsPane.pages { write(pane(p), p.id, width: 640) }
@@ -151,17 +152,28 @@ enum Snapshots {
         write(pane(.switcher, modules: ModuleSet.none), "switcher-off", width: 640)
         write(pane(.tray, modules: ModuleSet(bar: true, switcher: true, tray: false, zones: true)), "tray-off", width: 640)
         write(pane(.tray, modules: ModuleSet(bar: false, switcher: true, tray: true, zones: true)), "tray-bar-off", width: 640)
-        write(TrayItemOptions(store: store, kind: .monitor), "tray-options-popover", width: 385)
+        func detail(_ page: SettingsDetail, origin: SettingsPane? = nil, modules: ModuleSet? = nil) -> some View {
+            SettingsDetailPage(detail: page, origin: origin ?? page.home, store: store, back: {})
+                .environment(\.settingsSnapshot, SettingsSnapshot(modules: modules ?? enabled, layouts: layouts, mail: mail))
+                .padding(34)
+        }
+        write(detail(.cpuMemory), "tray-detail-cpu", width: 640)
+        write(detail(.disk), "tray-detail-disk", width: 640)
+        write(detail(.mail, origin: .tray), "tray-detail-mail", width: 640)
+        write(detail(.mail), "integrations-mail", width: 640)
+        write(detail(.calendar), "integrations-calendar", width: 640)
+        write(detail(.usage), "integrations-usage", width: 640)
+        write(detail(.cpuMemory, modules: ModuleSet.none), "tray-detail-cpu-off", width: 640)
 
         let window = SettingsView(store: store, navigation: SettingsNavigation())
-            .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts))
+            .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts, mail: mail))
         let defaultSize = SettingsWindowController.defaultSize
         let minimumSize = SettingsWindowController.minimumSize
         write(window, "settings-window", width: defaultSize.width, height: defaultSize.height)
         let minimumNavigation = SettingsNavigation()
-        minimumNavigation.select(.switcher)
+        minimumNavigation.select(.mail)
         let minimumWindow = SettingsView(store: store, navigation: minimumNavigation)
-            .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts))
+            .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts, mail: mail))
         write(minimumWindow, "settings-window-min", width: minimumSize.width, height: minimumSize.height)
         let language = appLanguageOverride
         for code in ["en", "es"] {

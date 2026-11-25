@@ -95,9 +95,9 @@ Click the envelope in the tray to see the latest emails in your inbox, with filt
 
 **Providers:** Gmail (also Google Workspace, if your company admin allows IMAP and app passwords), iCloud and Yahoo. Outlook and Hotmail are not supported: Microsoft requires an OAuth sign-in.
 
-**Connect an account:** *Settings → Mail* guides you step by step, with buttons to the right pages of your provider. Cala signs in with an **app password**: a code your provider generates just for Cala. It is **not** your normal email password. Gmail needs 2-Step Verification turned on to create one.
+**Connect an account:** *Settings → Integrations → Mail* guides you step by step, with buttons to the right pages of your provider. Cala signs in with an **app password**: a code your provider generates just for Cala. It is **not** your normal email password. Gmail needs 2-Step Verification turned on to create one.
 
-**Images:** remote images in emails load by default. Turn that off in *Settings → Mail* if you prefer to block them: when images load, the sender can tell you opened the email. No JavaScript runs in emails, and links open in your browser.
+**Images:** remote images in emails load by default. Turn that off in *Settings → Integrations → Mail* if you prefer to block them: when images load, the sender can tell you opened the email. No JavaScript runs in emails, and links open in your browser.
 
 ---
 
@@ -153,8 +153,8 @@ After each Cala update, macOS shows *"Cala wants to access key "Cala Mail" in yo
 ## Everyday use
 
 - **Settings**: right-click an empty part of the bar → *Settings…*, or click the Cala icon in the menu bar (shown when the bar is off or Zones is on), or open Cala again from Applications.
-- **Modules**: *Settings → General → What Cala does* shows switches, status and direct links for Zones, Taskbar, Window switcher and Tray. The same pages stay available when modules are off. Mail, Calendar and Claude & Codex each have a row in the same sidebar.
-- **Tray:** drag rows within or between **In the bar**, **In More** and **Hidden** to set their order and location. Use an item’s gear to open its options.
+- **Modules**: *Settings → General → What Cala does* shows switches, status and direct links for Zones, Taskbar, Window switcher and Tray. The same pages stay available when modules are off. Open **Integrations** for Mail, Calendar and Claude & Codex.
+- **Tray:** drag a handle within or between **In the bar**, **In More** and **Hidden** to set order and placement. Use the row’s chevron to open its settings.
 - **Open at login**: chosen in the welcome or in *Settings → General*. It shows up in *System Settings → General → Login Items*.
 - **Language**: English or Spanish, following your Mac by default. Change it in *Settings → General → Language*.
 - **Taskbar**: *Settings → Taskbar* holds Dock and menu bar hiding, icon size, transparency, previews and alignment per display. To change the shared theme, open *General → Cala theme*.

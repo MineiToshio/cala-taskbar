@@ -95,9 +95,9 @@ Haz clic en el sobre de la bandeja para ver los últimos correos de tu bandeja d
 
 **Proveedores:** Gmail (también Google Workspace, si el administrador de tu empresa permite IMAP y contraseñas de aplicación), iCloud y Yahoo. Outlook y Hotmail no se admiten: Microsoft exige iniciar sesión con OAuth.
 
-**Conectar una cuenta:** *Configuración → Correo* te guía paso a paso, con botones a las páginas correctas de tu proveedor. Cala inicia sesión con una **contraseña de aplicación**: un código que tu proveedor genera solo para Cala. **No** es tu contraseña normal del correo. En Gmail necesitas tener activada la verificación en dos pasos para crearla.
+**Conectar una cuenta:** *Configuración → Integraciones → Correo* te guía paso a paso, con botones a las páginas correctas de tu proveedor. Cala inicia sesión con una **contraseña de aplicación**: un código que tu proveedor genera solo para Cala. **No** es tu contraseña normal del correo. En Gmail necesitas tener activada la verificación en dos pasos para crearla.
 
-**Imágenes:** las imágenes remotas de los correos se cargan por defecto. Desactívalo en *Configuración → Correo* si prefieres bloquearlas: cuando se cargan, el remitente puede saber que abriste el correo. En los correos no se ejecuta JavaScript y los enlaces se abren en tu navegador.
+**Imágenes:** las imágenes remotas de los correos se cargan por defecto. Desactívalo en *Configuración → Integraciones → Correo* si prefieres bloquearlas: cuando se cargan, el remitente puede saber que abriste el correo. En los correos no se ejecuta JavaScript y los enlaces se abren en tu navegador.
 
 ---
 
@@ -152,8 +152,8 @@ Después de cada actualización de Cala, macOS muestra *«Cala quiere acceder a 
 ## Uso diario
 
 - **Configuración**: clic derecho en una zona vacía de la barra → *Configuración…*, o clic en el icono de Cala de la barra de menús (aparece si la barra está apagada o Zonas está activa), o vuelve a abrir Cala desde Aplicaciones.
-- **Módulos**: *Configuración → General → Qué hace Cala* muestra los interruptores, estados y accesos a Zonas, Barra de tareas, Selector de ventanas y Bandeja. Las páginas siguen disponibles con los módulos apagados. La misma barra lateral incluye filas para **Correo**, **Calendario** y **Claude y Codex**.
-- **Bandeja:** arrastra las filas dentro de un grupo o entre **En la barra**, **En Más** y **Ocultos** para cambiar su orden y ubicación. Usa el engranaje de un elemento para abrir sus opciones.
+- **Módulos**: *Configuración → General → Qué hace Cala* muestra los interruptores, estados y accesos a Zonas, Barra de tareas, Selector de ventanas y Bandeja. Las páginas siguen disponibles con los módulos apagados. Abre **Integraciones** para configurar Correo, Calendario y Claude y Codex.
+- **Bandeja:** arrastra desde el asa dentro de un grupo o entre **En la barra**, **En Más** y **Ocultos**. Pulsa el chevrón de una fila para abrir su detalle.
 - **Abrir al iniciar sesión**: se elige en la bienvenida o en *Configuración → General*. Aparece en *Ajustes del Sistema → General → Ítems de inicio*.
 - **Idioma**: español o inglés; por defecto, el de tu Mac. Se cambia en *Configuración → General → Idioma*.
 - **Barra de tareas**: en *Configuración → Barra de tareas* se ajustan la ocultación del Dock y de la barra de menús, el tamaño de los iconos, la transparencia, las vistas previas y la alineación por pantalla. El tema compartido está en *General → Tema de Cala*.

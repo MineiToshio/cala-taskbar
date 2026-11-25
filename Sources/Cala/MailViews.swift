@@ -98,7 +98,7 @@ private func mailProblem(_ status: MailAccountStatus?) -> String? { status?.prob
 
 private func mailOpenSettings() {
     NotificationCenter.default.post(name: .flyoutHide, object: nil)
-    SettingsWindowController.shared.show(pane: .mail)
+    SettingsWindowController.shared.show(detail: .mail)
 }
 
 private func mailSender(_ message: MailMessage) -> String {
@@ -750,7 +750,7 @@ private struct MailReader: View {
 
 struct MailSettingsPane: View {
     @Environment(\.openURL) private var openURL
-    @ObservedObject private var service = MailService.shared
+    @ObservedObject var service: MailService
     @ObservedObject private var store = ConfigStore.shared
     @State private var email = ""
     @State private var label = ""
@@ -784,7 +784,7 @@ struct MailSettingsPane: View {
                     } else {
                         ForEach(Array(service.accounts.enumerated()), id: \.element.id) { index, account in
                             if index > 0 { RowDivider() }
-                            MailAccountSettingsRow(account: account)
+                            MailAccountSettingsRow(account: account, service: service)
                         }
                     }
                 }
@@ -1176,7 +1176,7 @@ private struct MailProviderPicker: NSViewRepresentable {
 
 private struct MailAccountSettingsRow: View {
     let account: MailAccount
-    @ObservedObject private var service = MailService.shared
+    @ObservedObject var service: MailService
     @State private var editing = false
     @State private var confirmingRemoval = false
 

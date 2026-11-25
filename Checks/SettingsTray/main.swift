@@ -10,3 +10,12 @@ expect("Moving Wi-Fi preserves the relative positions of unknown saved IDs",
 expect("New visible items are saved without dropping unknown entries",
        mergingTrayOrder(["wifi", "future", "volume"], with: ["disk", "volume", "wifi"]),
        ["disk", "future", "volume", "wifi"])
+
+let reset = resettingTrayItems(["disk", "wifi"], layout: ["wifi": "hidden", "disk": "bar", "future-a": "more",
+                                                       "future-b": "future-placement", "layout-only": "hidden"],
+                               order: ["future-b", "disk", "future-a", "wifi", "order-only"])
+guard reset.layout == ["future-a": "more", "future-b": "future-placement", "layout-only": "hidden"] else {
+    fatalError("FAIL resetting tray items should only clear known placements")
+}
+expect("Resetting known items preserves unknown placements and their saved order",
+       reset.order, ["future-b", "future-a", "order-only"])

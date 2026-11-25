@@ -157,6 +157,7 @@ struct CalendarEventRow: View {
 struct CalendarSettingsPane: View {
     @ObservedObject var store: ConfigStore
     @StateObject private var agenda = CalendarService(catalogOnly: true)
+    @Environment(\.settingsSnapshot) private var snapshot
     private var sources: [(id: String, title: String, choices: [CalendarChoice])] {
         Dictionary(grouping: agenda.calendars, by: \.sourceID).map { id, choices in
             (id, choices.first?.sourceTitle ?? tx("Calendars", "Calendarios"), choices)
@@ -221,10 +222,11 @@ struct CalendarSettingsPane: View {
             }
         }
         .onAppear {
+            guard snapshot == nil else { return }
             agenda.start()
             agenda.refreshWithoutRequest(config: store.config)
         }
-        .onDisappear { agenda.stop() }
+        .onDisappear { if snapshot == nil { agenda.stop() } }
         .onChange(of: store.config.calendarEnabled) { _, _ in
             agenda.refreshWithoutRequest(config: store.config)
             refreshActiveEvents()

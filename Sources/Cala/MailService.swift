@@ -161,7 +161,7 @@ final class MailService: ObservableObject {
     private var keychainGate: MailKeychainGate?
     private var credentialsRead: Set<String> = []
 
-    private let accountsURL: URL
+    private let accountsURL: URL?
     private let makeConnection: (MailProvider) -> MailIMAP
     private let readCredential: @Sendable (String) throws -> String?
     private let writeCredential: (String?, String) throws -> Void
@@ -172,6 +172,20 @@ final class MailService: ObservableObject {
                   writeCredential: { try MailKeychain.set($0, for: $1) })
         keychainGate = MailKeychainGate()
         observesWake = true
+    }
+
+    static func snapshot() -> MailService {
+        MailService(snapshotAccount: MailAccount(id: "demo@example.com", label: tx("Example account", "Cuenta de ejemplo"),
+                                                 colorIndex: 0, enabled: true))
+    }
+
+    private init(snapshotAccount: MailAccount) {
+        accountsURL = nil
+        makeConnection = { _ in preconditionFailure("Mail snapshots do not connect to servers") }
+        readCredential = { _ in nil }
+        writeCredential = { _, _ in throw MailFailure.accountsFile }
+        accounts = [snapshotAccount]
+        status = [snapshotAccount.id: .paused]
     }
 
     init(accountsURL: URL, makeConnection: @escaping (MailProvider) -> MailIMAP,
@@ -634,6 +648,7 @@ final class MailService: ObservableObject {
     }
 
     private func save(_ accounts: [MailAccount]) throws {
+        guard let accountsURL else { throw MailFailure.accountsFile }
         do {
             try FileManager.default.createDirectory(at: accountsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(accounts).write(to: accountsURL, options: .atomic)
