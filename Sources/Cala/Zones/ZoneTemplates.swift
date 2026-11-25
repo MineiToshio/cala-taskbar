@@ -20,6 +20,13 @@ enum ZoneTemplates {
         }
     }
 
+    static func displayName(_ layout: ZoneLayout, localizedWith localize: (String, String) -> String) -> String {
+        guard let template = layout.template, ids.contains(template) else { return layout.name }
+        let inferredOriginal = layout.name == name(template) || layout.name == name(template, localizedWith: { _, spanish in spanish })
+        guard !(layout.isNameCustomized ?? !inferredOriginal) else { return layout.name }
+        return name(template, localizedWith: localize)
+    }
+
     static func zones(_ id: String) -> [ZoneRect] {
         func rect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> ZoneRect {
             ZoneRect(x: x, y: y, w: w, h: h)
@@ -66,7 +73,13 @@ enum ZoneTemplates {
     }
 
     static func seedState(names: (String) -> String = name) -> ZonesState {
-        let layouts = ids.map { makeLayout($0, name: names($0)) }
+        let layouts = ids.enumerated().map { index, template in
+            let zones = zones(template).enumerated().map { offset, rect in
+                Zone(id: zoneStorageID(kind: 4, layout: index, zone: offset), rect: rect, seq: offset)
+            }
+            return ZoneLayout(id: zoneStorageID(kind: 3, layout: index), name: names(template),
+                              zones: zones, nextSeq: zones.count, template: template, isNameCustomized: false)
+        }
         return ZonesState(layouts: layouts, defaultLayout: layouts.first?.id)
     }
 }

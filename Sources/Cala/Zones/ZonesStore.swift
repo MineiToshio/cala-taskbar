@@ -4,36 +4,53 @@ import Foundation
 final class ZonesStore {
     enum SaveError: Error { case recoveryFailed }
 
+    static var defaultURL: URL { AppPaths.supportDirectory.appendingPathComponent("zones.json") }
+
     let fileURL: URL
     private(set) var state: ZonesState
     private(set) var recoveryError: Error?
+    private let readOnly: Bool
 
-    init(fileURL: URL = AppPaths.supportDirectory.appendingPathComponent("zones.json"),
-         templateName: (String) -> String = ZoneTemplates.name) throws {
+    init(fileURL: URL = ZonesStore.defaultURL,
+         templateName: (String) -> String = ZoneTemplates.name, readOnly: Bool = false) throws {
         self.fileURL = fileURL
+        self.readOnly = readOnly
         let data: Data
         do {
             data = try Data(contentsOf: fileURL)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             state = ZoneTemplates.seedState(names: templateName)
-            try write(state)
+            if !readOnly { try write(state) }
             return
         }
 
         do {
             state = try JSONDecoder().decode(ZonesState.self, from: data).repaired(names: templateName)
         } catch {
+            if readOnly { throw error }
             state = ZoneTemplates.seedState(names: templateName)
-            let backup = fileURL.appendingPathExtension("bad")
-            let fm = FileManager.default
             do {
-                if fm.fileExists(atPath: backup.path) { try fm.removeItem(at: backup) }
-                try fm.moveItem(at: fileURL, to: backup)
+                try Self.backUpDamagedFile(at: fileURL)
             } catch {
                 recoveryError = error
                 return
             }
             try write(state)
+        }
+    }
+
+    private static func backUpDamagedFile(at source: URL) throws {
+        let fm = FileManager.default
+        var suffix = 0
+        while true {
+            let target = source.appendingPathExtension(suffix == 0 ? "bad" : "bad.\(suffix)")
+            do {
+                // moveItem refuses to replace an existing entry, including a dangling symbolic link.
+                try fm.moveItem(at: source, to: target)
+                return
+            } catch CocoaError.fileWriteFileExists {
+                suffix += 1
+            }
         }
     }
 
@@ -133,7 +150,7 @@ final class ZonesStore {
     }
 
     private func write(_ state: ZonesState) throws {
-        guard recoveryError == nil else { throw SaveError.recoveryFailed }
+        guard !readOnly, recoveryError == nil else { throw SaveError.recoveryFailed }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)

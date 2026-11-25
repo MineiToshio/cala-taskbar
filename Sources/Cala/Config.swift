@@ -70,7 +70,8 @@ struct Config: Codable, Equatable {
     var usageCodexEnabled = true
     var usageClaudeConfigDir = ""
     var usageCodexHome = ""
-    var usageClaudeStatusLine = false
+    /// nil preserves an unknown or invalid choice across saves. An explicit false authorizes cleanup.
+    var usageClaudeStatusLine: Bool? = nil
     /// Notify when a quota window is low or projected to run out before it resets.
     var usageAlertsEnabled = true
     /// Remaining percentage at or below which the low-quota notification fires (10, 15, 20 or 30).
@@ -167,7 +168,7 @@ extension Config {
         usageCodexEnabled = field(Bool.self, .usageCodexEnabled) ?? usageCodexEnabled
         usageClaudeConfigDir = field(String.self, .usageClaudeConfigDir) ?? usageClaudeConfigDir
         usageCodexHome = field(String.self, .usageCodexHome) ?? usageCodexHome
-        usageClaudeStatusLine = field(Bool.self, .usageClaudeStatusLine) ?? usageClaudeStatusLine
+        usageClaudeStatusLine = field(Bool.self, .usageClaudeStatusLine)
         usageAlertsEnabled = field(Bool.self, .usageAlertsEnabled) ?? usageAlertsEnabled
         usageAlertThreshold = field(Int.self, .usageAlertThreshold) ?? usageAlertThreshold
         if ![10, 15, 20, 30].contains(usageAlertThreshold) { usageAlertThreshold = 20; invalid = true }
@@ -195,6 +196,8 @@ extension Config {
 final class ConfigStore: ObservableObject {
     static let shared = ConfigStore()
 
+    private(set) var languageAtLaunch = "system"
+
     @Published var config: Config {
         didSet {
             if config.language != oldValue.language { Self.applyLanguage(config) }
@@ -220,7 +223,10 @@ final class ConfigStore: ObservableObject {
     private var canSave = true
 
     private init() {
-        defer { Self.applyLanguage(config) }
+        defer {
+            languageAtLaunch = config.language
+            Self.applyLanguage(config)
+        }
         config = Config()
         existedAtLaunch = FileManager.default.fileExists(atPath: url.path)
         guard existedAtLaunch else { save(); return }

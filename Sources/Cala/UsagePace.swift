@@ -20,6 +20,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     private var bag = Set<AnyCancellable>()
     private var store: ConfigStore?
     private var run: ModuleCancellation?
+    private var pendingAlerts = Set<String>()
     private let firedKey = "usageAlertsFired"
 
     private func key(_ p: UsageProvider, _ w: UsageWindow) -> String { p.rawValue + "|" + w.id }
@@ -183,40 +184,37 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private func fire(_ id: String, title: String, body: String) {
-        let defaults = UserDefaults.standard
-        var fired = defaults.dictionary(forKey: firedKey) as? [String: Double] ?? [:]
-        guard fired[id] == nil else { return }
-        let cutoff = Date().timeIntervalSince1970 - 10 * 86400
-        fired = fired.filter { $0.value > cutoff }
-        fired[id] = Date().timeIntervalSince1970
-        defaults.set(fired, forKey: firedKey)
-        log("usage: alert \(id.split(separator: "|").last ?? "")")
-        deliver(id: id, title: title, body: body)
-    }
-
-    private func deliver(id: String, title: String, body: String) {
         guard canNotify, let run else { return }
+        let defaults = UserDefaults.standard
+        guard defaults.dictionary(forKey: firedKey)?[id] == nil, pendingAlerts.insert(id).inserted else { return }
         let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            guard !run.isCancelled else { return }
-            let send = {
-                guard !run.isCancelled else { return }
-                let c = UNMutableNotificationContent()
-                c.title = title; c.body = body; c.sound = .default
-                center.add(UNNotificationRequest(identifier: id, content: c, trigger: nil))
-            }
-            switch settings.authorizationStatus {
-            case .authorized, .provisional, .ephemeral: send()
-            case .notDetermined: center.requestAuthorization(options: [.alert, .sound]) { ok, _ in if ok { send() } }
-            default: break
+        center.getNotificationSettings { [weak self] settings in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard !run.isCancelled, self.store?.config.usageAlertsEnabled == true,
+                      [.authorized, .provisional].contains(settings.authorizationStatus) else {
+                    self.pendingAlerts.remove(id)
+                    return
+                }
+                let content = UNMutableNotificationContent()
+                content.title = title
+                content.body = body
+                content.sound = .default
+                center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil)) { [weak self] error in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.pendingAlerts.remove(id)
+                        guard error == nil else { return }
+                        let now = Date().timeIntervalSince1970
+                        let fired = defaults.dictionary(forKey: self.firedKey) as? [String: Double] ?? [:]
+                        var recent = fired.filter { $0.value > now - 10 * 86400 }
+                        recent[id] = now
+                        defaults.set(recent, forKey: self.firedKey)
+                        log("usage: alert \(id.split(separator: "|").last ?? "")")
+                    }
+                }
             }
         }
-    }
-
-    /// Called when the user turns alerts on, so the macOS permission prompt appears in a clear context.
-    func requestAuthorization() {
-        guard canNotify else { return }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,

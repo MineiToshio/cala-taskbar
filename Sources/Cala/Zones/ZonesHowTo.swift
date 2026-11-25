@@ -15,7 +15,7 @@ struct ZonesHowTo: View {
                                   "Mantén ⌘ mientras te mueves para cubrir varias zonas vecinas."))
             step(3, "rectangle.topthird.inset.filled", strip
                  ? tx("To use another layout, move over “Change layout” at the top of the screen and rest on the one you want.",
-                      "Para usar otra distribución, pasa sobre “Cambiar layout” arriba de la pantalla y detente en la que quieras.")
+                      "Para usar otra distribución, pasa sobre “Cambiar distribución” arriba de la pantalla y detente en la que quieras.")
                  : tx("To use another layout, choose it per monitor here or from the Cala icon in the menu bar.",
                       "Para usar otra distribución, elígela por pantalla aquí o desde el icono de Cala en la barra de menús."))
         }

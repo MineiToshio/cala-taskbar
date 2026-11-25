@@ -205,16 +205,6 @@ final class PermissionCenter: NSObject, ObservableObject, CLLocationManagerDeleg
         refresh()
     }
 
-    /// Called when a module is switched on: asks for the first permission it needs that is still missing (one macOS
-    /// dialog or pane at a time; the rest show as cards in Settings). The module starts anyway and waits for it.
-    func requestMissing(for module: ModuleID) {
-        refresh()
-        let missing = ModulePlan.requiredPermissions(for: module).map(PermissionKind.init).filter { !granted($0) }
-        if missing.isEmpty { return }
-        log("permissions: \(module.rawValue) needs \(missing.map(\.rawValue).joined(separator: ","))")
-        request(missing[0])
-    }
-
     func openSettings(_ kind: PermissionKind) {
         NSWorkspace.shared.open(kind.settingsURL)
     }

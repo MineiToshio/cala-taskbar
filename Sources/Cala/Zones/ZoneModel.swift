@@ -10,8 +10,40 @@ struct ZoneRect: Codable, Equatable {
     var isFinite: Bool { x.isFinite && y.isFinite && w.isFinite && h.isFinite }
 }
 
+/// Legacy or seeded entries must get the same IDs when the file is read again before its first write.
+func zoneStorageID(kind: UInt8, layout: Int, zone: Int = 0, attempt: Int = 0) -> UUID {
+    let a = UInt32(truncatingIfNeeded: layout).bigEndian
+    let b = UInt32(truncatingIfNeeded: zone).bigEndian
+    return withUnsafeBytes(of: a) { a in
+        withUnsafeBytes(of: b) { b in
+            UUID(uuid: (0xCA, 0x1A, 0x5A, kind, a[0], a[1], 0x80 | UInt8(truncatingIfNeeded: attempt >> 24), UInt8(truncatingIfNeeded: attempt >> 16),
+                        0x80 | UInt8(truncatingIfNeeded: attempt >> 8), UInt8(truncatingIfNeeded: attempt),
+                        a[2], a[3], b[0], b[1], b[2], b[3]))
+        }
+    }
+}
+
+/// Reserve explicit IDs before repairing any missing entries so a fallback never claims their identity.
+private func restoreStorageIDs<Entry>(_ entries: inout [Entry], missing: WritableKeyPath<Entry, Bool>,
+                                      id: WritableKeyPath<Entry, UUID>, candidate: (Int, Int) -> UUID) {
+    var reserved = Set(entries.lazy.filter { !$0[keyPath: missing] }.map { $0[keyPath: id] })
+    for index in entries.indices where entries[index][keyPath: missing] {
+        var attempt = 0
+        while true {
+            let replacement = candidate(index, attempt)
+            if reserved.insert(replacement).inserted {
+                entries[index][keyPath: id] = replacement
+                entries[index][keyPath: missing] = false
+                break
+            }
+            attempt += 1
+        }
+    }
+}
+
 struct Zone: Codable, Equatable, Identifiable {
     var id: UUID
+    fileprivate var missingStorageID = false
     var rect: ZoneRect
     var seq: Int
 
@@ -25,7 +57,9 @@ struct Zone: Codable, Equatable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
-        id = try fields.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let storedID = try fields.decodeIfPresent(UUID.self, forKey: .id)
+        id = storedID ?? zoneStorageID(kind: 2, layout: 0)
+        missingStorageID = storedID == nil
         rect = try fields.decode(ZoneRect.self, forKey: .rect)
         seq = try fields.decodeIfPresent(Int.self, forKey: .seq) ?? 0
     }
@@ -44,7 +78,9 @@ enum ZoneLayoutMode: String, Codable {
 
 struct ZoneLayout: Codable, Equatable, Identifiable {
     var id: UUID
+    fileprivate var missingStorageID = false
     var name: String
+    var isNameCustomized: Bool?
     var zones: [Zone]
     var nextSeq: Int
     var template: String?
@@ -53,27 +89,41 @@ struct ZoneLayout: Codable, Equatable, Identifiable {
 
     /// Without a `mode`, it is inferred from the zones (see `ZoneLayoutMode.inferred`).
     init(id: UUID = UUID(), name: String, zones: [Zone] = [], nextSeq: Int = 0, template: String? = nil,
-         mode: ZoneLayoutMode? = nil) {
+         mode: ZoneLayoutMode? = nil, isNameCustomized: Bool? = nil) {
         self.id = id
         self.name = name
+        self.isNameCustomized = isNameCustomized
         self.zones = zones
         self.nextSeq = nextSeq
         self.template = template
         self.mode = mode ?? .inferred(from: zones)
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, zones, nextSeq, template, mode }
+    private enum CodingKeys: String, CodingKey { case id, name, zones, nextSeq, template, mode, isNameCustomized }
 
     init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
-        id = try fields.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let storedID = try fields.decodeIfPresent(UUID.self, forKey: .id)
+        id = storedID ?? zoneStorageID(kind: 1, layout: 0)
+        missingStorageID = storedID == nil
         name = try fields.decode(String.self, forKey: .name)
-        zones = try fields.decodeIfPresent([Zone].self, forKey: .zones) ?? []
+        isNameCustomized = try? fields.decodeIfPresent(Bool.self, forKey: .isNameCustomized)
+        var decodedZones = try fields.decodeIfPresent([Zone].self, forKey: .zones) ?? []
+        let layoutIndex = decoder.codingPath.last?.intValue ?? 0
+        restoreStorageIDs(&decodedZones, missing: \.missingStorageID, id: \.id) { index, attempt in
+            zoneStorageID(kind: 2, layout: layoutIndex, zone: index, attempt: attempt)
+        }
+        zones = decodedZones
         nextSeq = try fields.decodeIfPresent(Int.self, forKey: .nextSeq) ?? 0
         template = try fields.decodeIfPresent(String.self, forKey: .template)
         // Older files have no mode, and an unknown value must not cost the whole file: infer it then.
         mode = (try? fields.decodeIfPresent(String.self, forKey: .mode)).flatMap { $0 }
             .flatMap(ZoneLayoutMode.init(rawValue:)) ?? .inferred(from: zones)
+    }
+
+    mutating func rename(to name: String) {
+        self.name = name
+        isNameCustomized = true
     }
 
     @discardableResult
@@ -167,7 +217,11 @@ struct ZonesState: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
         version = try fields.decodeIfPresent(Int.self, forKey: .version) ?? 1
-        layouts = try fields.decodeIfPresent([ZoneLayout].self, forKey: .layouts) ?? []
+        var decodedLayouts = try fields.decodeIfPresent([ZoneLayout].self, forKey: .layouts) ?? []
+        restoreStorageIDs(&decodedLayouts, missing: \.missingStorageID, id: \.id) { index, attempt in
+            zoneStorageID(kind: 1, layout: index, attempt: attempt)
+        }
+        layouts = decodedLayouts
         defaultLayout = try fields.decodeIfPresent(UUID.self, forKey: .defaultLayout)
         activeByDisplay = try fields.decodeIfPresent([String: String].self, forKey: .activeByDisplay) ?? [:]
     }
@@ -217,7 +271,7 @@ struct ZonesState: Codable, Equatable {
         guard let source = layouts.first(where: { $0.id == id }) else { return id }
         var copy = source
         copy.id = UUID()
-        copy.name = name
+        copy.rename(to: name)
         copy.zones = copy.zones.map { Zone(rect: $0.rect, seq: $0.seq) }
         layouts.append(copy)
         return copy.id

@@ -9,7 +9,7 @@ enum TrayPlace: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .bar: return tx("In the bar", "En la barra")
-        case .more: return tx("In  ^", "En  ^")
+        case .more: return tx("In More ⌃", "En Más ⌃")
         case .hidden: return tx("Hidden", "Oculto")
         }
     }
@@ -17,7 +17,9 @@ enum TrayPlace: String, CaseIterable, Identifiable {
 
 struct TrayItemInfo {
     let id: String
-    let title: String
+    fileprivate let englishTitle: String
+    fileprivate var spanishTitle: String? = nil
+    var title: String { tx(englishTitle, spanishTitle ?? englishTitle) }
     let symbol: String
     let defaultPlace: TrayPlace
 }
@@ -25,19 +27,19 @@ struct TrayItemInfo {
 enum TrayItems {
     /// Default left-to-right order.
     static let all: [TrayItemInfo] = [
-        TrayItemInfo(id: trayKB, title: tx("Keyboard", "Teclado"), symbol: "keyboard", defaultPlace: .more),
-        TrayItemInfo(id: trayWifi, title: "Wi-Fi", symbol: "wifi", defaultPlace: .bar),
-        TrayItemInfo(id: trayBT, title: "Bluetooth", symbol: "dot.radiowaves.right", defaultPlace: .more),
-        TrayItemInfo(id: trayBright, title: tx("Brightness", "Brillo"), symbol: "sun.max.fill", defaultPlace: .more),
-        TrayItemInfo(id: trayVol, title: tx("Volume", "Volumen"), symbol: "speaker.wave.2.fill", defaultPlace: .bar),
-        TrayItemInfo(id: trayUsage, title: tx("Claude and Codex", "Claude y Codex"), symbol: "chart.bar.fill", defaultPlace: .bar),
-        TrayItemInfo(id: traySystem, title: tx("CPU and memory", "CPU y memoria"), symbol: "cpu", defaultPlace: .bar),
-        TrayItemInfo(id: trayDisk, title: tx("Disk", "Disco"), symbol: "internaldrive", defaultPlace: .bar),
-        TrayItemInfo(id: trayMail, title: tx("Mail", "Correo"), symbol: "envelope", defaultPlace: .bar),
-        TrayItemInfo(id: trayBatt, title: tx("Battery", "Batería"), symbol: "battery.75", defaultPlace: .bar),
-        TrayItemInfo(id: trayUser, title: tx("User", "Usuario"), symbol: "person.crop.circle", defaultPlace: .more),
-        TrayItemInfo(id: trayDownloads, title: tx("Downloads", "Descargas"), symbol: "arrow.down.circle", defaultPlace: .more),
-        TrayItemInfo(id: trayTrash, title: tx("Trash", "Papelera"), symbol: "trash", defaultPlace: .more),
+        TrayItemInfo(id: trayKB, englishTitle: "Keyboard", spanishTitle: "Teclado", symbol: "keyboard", defaultPlace: .more),
+        TrayItemInfo(id: trayWifi, englishTitle: "Wi-Fi", symbol: "wifi", defaultPlace: .bar),
+        TrayItemInfo(id: trayBT, englishTitle: "Bluetooth", symbol: "dot.radiowaves.right", defaultPlace: .more),
+        TrayItemInfo(id: trayBright, englishTitle: "Brightness", spanishTitle: "Brillo", symbol: "sun.max.fill", defaultPlace: .more),
+        TrayItemInfo(id: trayVol, englishTitle: "Volume", spanishTitle: "Volumen", symbol: "speaker.wave.2.fill", defaultPlace: .bar),
+        TrayItemInfo(id: trayUsage, englishTitle: "Claude and Codex", spanishTitle: "Claude y Codex", symbol: "chart.bar.fill", defaultPlace: .bar),
+        TrayItemInfo(id: traySystem, englishTitle: "CPU and memory", spanishTitle: "CPU y memoria", symbol: "cpu", defaultPlace: .bar),
+        TrayItemInfo(id: trayDisk, englishTitle: "Disk", spanishTitle: "Disco", symbol: "internaldrive", defaultPlace: .bar),
+        TrayItemInfo(id: trayMail, englishTitle: "Mail", spanishTitle: "Correo", symbol: "envelope", defaultPlace: .bar),
+        TrayItemInfo(id: trayBatt, englishTitle: "Battery", spanishTitle: "Batería", symbol: "battery.75", defaultPlace: .bar),
+        TrayItemInfo(id: trayUser, englishTitle: "User", spanishTitle: "Usuario", symbol: "person.crop.circle", defaultPlace: .more),
+        TrayItemInfo(id: trayDownloads, englishTitle: "Downloads", spanishTitle: "Descargas", symbol: "arrow.down.circle", defaultPlace: .more),
+        TrayItemInfo(id: trayTrash, englishTitle: "Trash", spanishTitle: "Papelera", symbol: "trash", defaultPlace: .more),
     ]
     static func info(_ id: String) -> TrayItemInfo? { all.first { $0.id == id } }
 }

@@ -95,21 +95,21 @@ Haz clic en el sobre de la bandeja para ver los últimos correos de tu bandeja d
 
 **Proveedores:** Gmail (también Google Workspace, si el administrador de tu empresa permite IMAP y contraseñas de aplicación), iCloud y Yahoo. Outlook y Hotmail no se admiten: Microsoft exige iniciar sesión con OAuth.
 
-**Conectar una cuenta:** *Configuración → Correo* te guía paso a paso, con botones a las páginas correctas de tu proveedor. Cala inicia sesión con una **contraseña de aplicación**: un código que tu proveedor genera solo para Cala. **No** es tu contraseña normal del correo. En Gmail necesitas tener activada la verificación en dos pasos para crearla.
+**Conectar una cuenta:** *Configuración → Bandeja → Correo* te guía paso a paso, con botones a las páginas correctas de tu proveedor. Cala inicia sesión con una **contraseña de aplicación**: un código que tu proveedor genera solo para Cala. **No** es tu contraseña normal del correo. En Gmail necesitas tener activada la verificación en dos pasos para crearla.
 
-**Imágenes:** las imágenes remotas de los correos se cargan por defecto. Desactívalo en *Configuración → Correo* si prefieres bloquearlas: cuando se cargan, el remitente puede saber que abriste el correo. En los correos no se ejecuta JavaScript y los enlaces se abren en tu navegador.
+**Imágenes:** las imágenes remotas de los correos se cargan por defecto. Desactívalo en *Configuración → Bandeja → Correo* si prefieres bloquearlas: cuando se cargan, el remitente puede saber que abriste el correo. En los correos no se ejecuta JavaScript y los enlaces se abren en tu navegador.
 
 ---
 
 ## Zonas
 
-Zonas te deja acomodar ventanas sin cambiarles el tamaño a mano. Actívalo en la bienvenida, o en *Configuración → General → Qué hace Cala*.
+Zonas te deja acomodar ventanas sin cambiarles el tamaño a mano. Activa Zonas en la bienvenida o en *Configuración → Zonas*.
 
 1. **Arrastra una ventana** por su barra de título.
 2. **Sin soltar el botón, haz clic derecho** (o **mantén Mayús**). Aparecen tus zonas en esa pantalla.
 3. **Ponte sobre una zona y suelta.** La ventana toma su posición y su tamaño.
 
-Para usar otra distribución, pasa sobre la píldora **Cambiar layout** arriba de la pantalla mientras se ven las zonas y detente en la que quieras. Mantén **⌘** para cubrir varias zonas vecinas a la vez. Vuelve a hacer clic derecho, suelta Mayús o suelta fuera de todas las zonas para cancelar: la ventana se queda donde la soltaste. Si arrastras una ventana encajada para sacarla, recupera su tamaño anterior.
+Para usar otra distribución, pasa sobre la píldora **Cambiar distribución** arriba de la pantalla mientras se ven las zonas y detente en la que quieras. Mantén **⌘** para cubrir varias zonas vecinas a la vez. Vuelve a hacer clic derecho, suelta Mayús o suelta fuera de todas las zonas para cancelar: la ventana se queda donde la soltaste. Si arrastras una ventana encajada para sacarla, recupera su tamaño anterior.
 
 - **Distribuciones:** ocho ya hechas (dos y tres columnas, cuadrícula 2 × 2, principal + lateral, dos filas...) y todas las tuyas que quieras. Se dibujan en el editor (*Configuración → Zonas → Editar zonas…*, o el icono de Cala en la barra de menús): arrastra para dibujar, mueve y cambia el tamaño con guías que se pegan a las otras zonas, una cuadrícula opcional de 12 divisiones y una distribución por pantalla (o ninguna).
 - **Sin la barra:** apaga la barra en *Configuración → General* y Cala vive en la barra de menús, sin barra de tareas y sin reservar espacio. El Dock y la barra de menús quedan como macOS los tiene.
@@ -152,15 +152,16 @@ Después de cada actualización de Cala, macOS muestra *«Cala quiere acceder a 
 ## Uso diario
 
 - **Configuración**: clic derecho en una zona vacía de la barra → *Configuración…*, o clic en el icono de Cala de la barra de menús (aparece si la barra está apagada o Zonas está activa), o vuelve a abrir Cala desde Aplicaciones.
-- **Módulos**: *Configuración → General → Qué hace Cala* tiene un interruptor para Barra, Bandeja, Selector de ventanas y Zonas; arrancan y se detienen al instante. La Bandeja vive dentro de la Barra. Si ya usabas Cala, no cambió nada: Barra, Bandeja y selector siguen activos y Zonas apagada hasta que la actives.
+- **Módulos**: *Configuración → General → Qué hace Cala* muestra los interruptores, estados y accesos a Zonas, Barra de tareas, Selector de ventanas y Bandeja. Las páginas siguen disponibles con los módulos apagados. Correo, Calendario y Uso (Claude y Codex) tienen su propia fila bajo Bandeja.
 - **Abrir al iniciar sesión**: se elige en la bienvenida o en *Configuración → General*. Aparece en *Ajustes del Sistema → General → Ítems de inicio*.
 - **Idioma**: español o inglés; por defecto, el de tu Mac. Se cambia en *Configuración → General → Idioma*.
-- **Ocultar el Dock de macOS**: *Configuración → General*. Al apagarlo, o al salir de Cala, el Dock vuelve exactamente como estaba.
+- **Barra de tareas**: en *Configuración → Barra de tareas* se ajustan la ocultación del Dock y de la barra de menús, el tamaño de los iconos, la transparencia, las vistas previas y la alineación por pantalla. El tema compartido está en *General → Tema de Cala*.
+- **Selector de ventanas**: *Configuración → Selector de ventanas* muestra si Opción + Tab está disponible, la opción Comando + Tab y cómo buscar.
 - **Actualizar**: vuelve a ejecutar el comando de la opción 1, o descarga el nuevo DMG y reemplaza Cala en Aplicaciones. Tus ajustes y permisos se conservan.
 
 ## Desinstalar
 
-*Configuración → Avanzado → **Desinstalar Cala…*** devuelve el Dock y la barra de menús a como estaban, quita el inicio de sesión, borra los ajustes de Cala y mueve la app a la Papelera.
+*Configuración → Ayuda y diagnóstico → Opciones avanzadas → **Desinstalar Cala…*** devuelve el Dock y la barra de menús a como estaban, quita el inicio de sesión, borra los ajustes de Cala y mueve la app a la Papelera.
 
 Los permisos quedan listados en *Ajustes del Sistema → Privacidad y seguridad*; puedes quitarlos allí. Sin abrir la app: [`scripts/uninstall.sh`](scripts/uninstall.sh).
 
@@ -175,7 +176,7 @@ Nada sale de tu Mac salvo que tú lo envíes. *Reportar un problema* te muestra 
 - **"Cala no se puede abrir" / "Apple no pudo verificar…"**: es el bloqueo de una sola vez; mira el paso 3 de [Instalar](#instalar), o instala con el comando de Terminal, que no lo muestra.
 - **No veo miniaturas**: activa Grabación de pantalla en *Configuración → Permisos*.
 - **Zonas no hace nada**: necesita Accesibilidad (*Configuración → Permisos*); arranca sola cuando la permites. Comprueba que Zonas esté activa en *Configuración → General → Qué hace Cala*.
-- **El Dock desapareció**: Cala lo oculta solo si lo pediste. Apágalo en *Configuración → General*, o sal de Cala.
+- **El Dock desapareció**: Cala lo oculta solo si lo pediste. Desactiva **Ocultar el Dock de macOS** en *Configuración → Barra de tareas*.
 - **macOS dice «Cala quiere acceder a la llave "Cala Mail" de tu llavero.»**: es lo esperado tras cada actualización; mira [El aviso del Llavero](#el-aviso-del-llavero-correo). Escribe la contraseña de tu Mac (la del llavero Inicio de sesión) y pulsa **Permitir siempre**; va a macOS, no a Cala.
 - **Algo falla**: clic derecho en la barra → *Reportar un problema…*, o abre un [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 

@@ -53,6 +53,7 @@ struct UsageState: Identifiable {
     var id: String { provider.rawValue }
     var enabled = true
     var signedIn = false
+    var didDetectSession = false
     var detection = tx("Checking…", "Comprobando…")
     var reading: UsageReading?
     var error: String?
@@ -350,8 +351,6 @@ final class UsageService: ObservableObject {
     private var run: ModuleCancellation? // service queue only
     private var generations: [UsageProvider: Int] = [:]
     private var active = Set<UsageProvider>()
-    private var statusLineConfigured = false
-    private var configuredDirectory = ""
     private var refreshAfterDetection = false
     private let support = AppPaths.supportDirectory
 
@@ -368,7 +367,7 @@ final class UsageService: ObservableObject {
     private func message(_ message: String) {
         let run = run
         DispatchQueue.main.async {
-            guard let run, self.mainRun === run else { return }
+            guard self.mainRun === run else { return }
             self.statusLineMessage = message
         }
     }
@@ -422,6 +421,7 @@ final class UsageService: ObservableObject {
         providers = providers.map { provider in
             var provider = provider
             provider.fetching = false
+            provider.didDetectSession = false
             return provider
         }
         queue.async {
@@ -436,22 +436,42 @@ final class UsageService: ObservableObject {
             self.active.removeAll()
         }
     }
-    /// Uninstall: take Cala's statusLine entry out of Claude Code's settings.json right now (backup kept).
-    func removeStatusLineNow(config: Config) {
-        stop()
-        queue.sync {
-            if !shellLoaded && config.usageClaudeConfigDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                loadLoginEnvironment()
-            }
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
-            let dir = folder(config.usageClaudeConfigDir, "CLAUDE_CONFIG_DIR", home + "/.claude")
-            statusLine(enable: false, directory: dir)
-            if !configuredDirectory.isEmpty, configuredDirectory != dir {
-                statusLine(enable: false, directory: configuredDirectory)
-            }
-            statusLineConfigured = false
+    func setStatusLineEnabled(_ enabled: Bool, store: ConfigStore) {
+        store.config.usageClaudeStatusLine = enabled
+        // Also queue removal explicitly: stopping the tray can cancel an update queued by the live subscription.
+        if !enabled {
+            let config = store.config
+            queue.async { self.reconcileDisabledStatusLine(config: config) }
         }
     }
+
+    /// Finishes an interrupted opt-out even if the tray stays off after relaunch.
+    func finishStatusLineCleanup(config: Config) {
+        guard config.usageClaudeStatusLine == false else { return }
+        queue.async { self.reconcileDisabledStatusLine(config: config) }
+    }
+
+    /// Complete cleanup before the uninstaller removes the script or the recorded directory.
+    func removeStatusLineNow(config: Config) throws {
+        try queue.sync {
+            let installationExpected = config.usageClaudeStatusLine == true || statusLine.hasInstallationEvidence
+            _ = try statusLine.reconcile(enabled: false, directory: statusLineDirectory(config),
+                                         previousDirectory: previousStatusLineDirectory,
+                                         requireReadableCandidates: installationExpected)
+        }
+        stop()
+    }
+
+    private func statusLineDirectory(_ config: Config) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return folder(config.usageClaudeConfigDir, "CLAUDE_CONFIG_DIR",
+                      ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] ?? home + "/.claude")
+    }
+
+    private func reconcileDisabledStatusLine(config: Config) {
+        reconcileStatusLine(preference: config.usageClaudeStatusLine, directory: statusLineDirectory(config))
+    }
+
     func settingsOpened() {
         guard let run = mainRun else { return }
         queue.async {
@@ -480,6 +500,9 @@ final class UsageService: ObservableObject {
     private func configure(_ new: Config) {
         guard let run, !run.isCancelled else { return }
         let first = !shellLoaded
+        let reconcileIntegration = lastDetection == .distantPast
+            || new.usageClaudeStatusLine != config.usageClaudeStatusLine
+            || new.usageClaudeConfigDir != config.usageClaudeConfigDir
         if lastDetection != .distantPast && shellLoaded && new.usageEnabled == config.usageEnabled && new.usageClaudeEnabled == config.usageClaudeEnabled && new.usageCodexEnabled == config.usageCodexEnabled && new.usageClaudeConfigDir == config.usageClaudeConfigDir && new.usageCodexHome == config.usageCodexHome && new.usageClaudeStatusLine == config.usageClaudeStatusLine {
             config = new; return
         }
@@ -508,13 +531,13 @@ final class UsageService: ObservableObject {
             consumedResets.removeAll()
             refreshAfterDetection = true
         }
+        if reconcileIntegration {
+            let directory = folder(config.usageClaudeConfigDir, "CLAUDE_CONFIG_DIR", home + "/.claude")
+            reconcileStatusLine(preference: config.usageClaudeStatusLine, directory: directory)
+        }
+        guard !run.isCancelled else { return }
         detect(force: true)
         guard !run.isCancelled else { return }
-        if config.usageClaudeStatusLine != statusLineConfigured || (statusLineConfigured && configuredDirectory != claudeDir) {
-            if statusLineConfigured && configuredDirectory != claudeDir { statusLine(enable: false, directory: configuredDirectory) }
-            statusLine(enable: config.usageClaudeStatusLine, directory: claudeDir)
-            statusLineConfigured = config.usageClaudeStatusLine; configuredDirectory = claudeDir
-        }
         if enabled || refreshAfterDetection {
             refreshAfterDetection = false
             if visible || !config.autoHide { for p in UsageProvider.allCases { fetch(p, force: false) } }
@@ -552,6 +575,7 @@ final class UsageService: ObservableObject {
         guard !run.isCancelled else { return }
         if states[0].enabled { observeCredential(credential) }
         let foundClaude = credential != nil || fm.fileExists(atPath: claudeDir) || findExecutable("claude") != nil || fm.fileExists(atPath: "/Applications/Claude.app") || fm.fileExists(atPath: home + "/Applications/Claude.app")
+        states[0].didDetectSession = states[0].enabled
         states[0].signedIn = credential != nil
         states[0].plan = credential?.plan
         if let credential, credential.expired { states[0].detection = tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla") }
@@ -561,11 +585,12 @@ final class UsageService: ObservableObject {
         executable = codexExecutable()
         states[1].enabled = config.usageEnabled && config.usageCodexEnabled
         let auth = states[1].enabled && fm.fileExists(atPath: codexHome + "/auth.json")
+        states[1].didDetectSession = states[1].enabled
         states[1].signedIn = auth
         states[1].detection = auth ? tx("Detected, signed in", "Detectado, con sesión iniciada") : (executable != nil ? tx("Found but not signed in — open Codex and sign in with ChatGPT", "Encontrado, pero sin sesión: abre Codex e inicia sesión con ChatGPT") : tx("Codex not found — install Codex CLI or app and sign in with ChatGPT", "No se encontró Codex: instala la CLI o la app e inicia sesión con ChatGPT"))
         if !states[1].enabled { states[1].detection = tx("Usage disabled", "Uso desactivado") }
         let codexPath = UsageWatcher.resolvedPath(codexHome + "/sessions")
-        let claudePath = states[0].enabled && config.usageClaudeStatusLine
+        let claudePath = states[0].enabled && config.usageClaudeStatusLine == true
             ? support.appendingPathComponent("claude-usage.json").path : nil
         updateWatchers(codexPath: codexPath, claudePath: claudePath, run: run)
         readLocal(); publish()
@@ -904,7 +929,7 @@ final class UsageService: ObservableObject {
             }
         }
         if let best { accept(best, provider: .codex) }
-        if claude && states[0].enabled && config.usageClaudeStatusLine, let obj = readJSON(support.appendingPathComponent("claude-usage.json")),
+        if claude && states[0].enabled && config.usageClaudeStatusLine == true, let obj = readJSON(support.appendingPathComponent("claude-usage.json")),
            let date = UsageJSON.date(obj["timestamp"]), let limits = obj["rate_limits"] as? [String: Any] {
             let reading = UsageJSON.claude(limits, at: date, local: true)
             if !reading.windows.isEmpty { accept(Self.mergingClaudeLocal(reading, previous: states[0].reading), provider: .claude) }
@@ -941,63 +966,33 @@ final class UsageService: ObservableObject {
             try JSONEncoder().encode(cache).write(to: support.appendingPathComponent("usage-cache.json"), options: .atomic)
         } catch { log("usage: cache write failed") }
     }
-    private func statusLine(enable: Bool, directory: String) {
-        let fm = FileManager.default, script = support.appendingPathComponent("claude-statusline.sh")
-        let settings = URL(fileURLWithPath: directory).appendingPathComponent("settings.json")
-        // Shell quoting also handles home directories containing apostrophes/spaces.
-        func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        let command = quote(script.path)
-        let snippet = "printf '%s' \"$input\" | " + quote(script.path) + " >/dev/null # input must contain your original stdin JSON"
+    private var statusLine: ClaudeStatusLine {
+        ClaudeStatusLine(support: support, legacySupport: AppPaths.legacySupportDirectory)
+    }
+
+    private var previousStatusLineDirectory: String? {
+        let cacheURL = support.appendingPathComponent("usage-cache.json")
+        return (try? Data(contentsOf: cacheURL))
+            .flatMap { try? JSONDecoder().decode(Cache.self, from: $0) }?.directories["claude"]
+    }
+
+    private func reconcileStatusLine(preference: Bool?, directory: String) {
         do {
-            var isDirectory: ObjCBool = false
-            guard fm.fileExists(atPath: directory, isDirectory: &isDirectory), isDirectory.boolValue else {
-                message(tx("Claude config folder must already exist; no settings were changed.", "La carpeta de configuración de Claude debe existir ya; no se cambió ningún ajuste.")); return
+            guard let result = try statusLine.reconcilePreference(preference, directory: directory,
+                                                                  previousDirectory: previousStatusLineDirectory) else { return }
+            switch result {
+            case .installed: message(tx("Live updates enabled for new Claude Code sessions.", "Actualizaciones en vivo activadas para las nuevas sesiones de Claude Code."))
+            case .alreadyInstalled: message(tx("Live updates already configured.", "Las actualizaciones en vivo ya están configuradas."))
+            case .removed: message("")
+            case .folderMissing:
+                message(tx("Claude’s configuration folder must already exist.", "La carpeta de configuración de Claude debe existir."))
+            case let .existingCommand(snippet):
+                message(tx("You already have a statusLine; add this line to your script: ", "Ya tienes una statusLine; añade esta línea a tu script: ") + snippet)
             }
-            var object: [String: Any] = [:]
-            let exists = fm.fileExists(atPath: settings.path)
-            let original = exists ? try Data(contentsOf: settings) : Data()
-            if exists {
-                guard let parsed = UsageJSON.object(original) else { message(tx("Cannot edit malformed settings.json", "No se puede editar un settings.json con formato incorrecto")); return }
-                object = parsed
-            }
-            let entry = object["statusLine"] as? [String: Any]
-            let legacyScript = AppPaths.legacySupportDirectory.appendingPathComponent("claude-statusline.sh").path
-            let current = entry?["command"] as? String
-            let ours = entry?["type"] as? String == "command" && (current == command || current == script.path || current == quote(legacyScript) || current == legacyScript)
-            if enable && ours { message(tx("Live updates already configured.", "Las actualizaciones en vivo ya están configuradas.")); return }
-            if enable {
-                try fm.createDirectory(at: support, withIntermediateDirectories: true)
-                // JXA is provided by macOS: no jq, Python or third-party runtime is required.
-                let body = """
-                #!/bin/sh
-                exec /usr/bin/osascript -l JavaScript -e '\
-                ObjC.import("Foundation");
-                var input = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
-                var text = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(input, $.NSUTF8StringEncoding));
-                try {
-                  var d = JSON.parse(text);
-                  var out = JSON.stringify({timestamp: Date.now()/1000, rate_limits: d.rate_limits || {}});
-                  var base = $.NSHomeDirectory().stringByAppendingPathComponent("Library/Application Support/Cala/claude-usage.json");
-                  var data = $(out).dataUsingEncoding($.NSUTF8StringEncoding);
-                  data.writeToFileAtomically(base, true);
-                  var name = (d.model || {}).display_name || "Claude";
-                  $.NSFileHandle.fileHandleWithStandardOutput.writeData($(name + "\\n").dataUsingEncoding($.NSUTF8StringEncoding));
-                } catch (_) {}
-                '
-                """
-                try Data(body.utf8).write(to: script, options: .atomic)
-                try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-                if object["statusLine"] != nil && !ours { message(tx("You already have a statusLine; add this line to your script: ", "Ya tienes una statusLine; añade esta línea a tu script: ") + snippet); return }
-                object["statusLine"] = ["type": "command", "command": command]
-            } else {
-                guard ours else { message(""); return }
-                object.removeValue(forKey: "statusLine")
-            }
-            let backup = settings.appendingPathExtension("mactaskbar.bak")
-            if exists && !fm.fileExists(atPath: backup.path) { try original.write(to: backup, options: .withoutOverwriting) }
-            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-            try data.write(to: settings, options: .atomic)
-            message(enable ? tx("Live updates enabled for new Claude Code sessions.", "Actualizaciones en vivo activadas para las nuevas sesiones de Claude Code.") : "")
-        } catch { message(tx("Could not update Claude settings; check folder permissions.", "No se pudieron actualizar los ajustes de Claude; revisa los permisos de la carpeta.")); log("usage: statusLine configuration failed") }
+        } catch {
+            message(tx("Could not update Claude settings. Check that settings.json is valid and writable.",
+                       "No se pudieron actualizar los ajustes de Claude. Comprueba el formato y los permisos de settings.json."))
+            log("usage: statusLine configuration failed")
+        }
     }
 }

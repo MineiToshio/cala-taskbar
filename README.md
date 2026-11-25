@@ -95,15 +95,15 @@ Click the envelope in the tray to see the latest emails in your inbox, with filt
 
 **Providers:** Gmail (also Google Workspace, if your company admin allows IMAP and app passwords), iCloud and Yahoo. Outlook and Hotmail are not supported: Microsoft requires an OAuth sign-in.
 
-**Connect an account:** *Settings → Mail* guides you step by step, with buttons to the right pages of your provider. Cala signs in with an **app password**: a code your provider generates just for Cala. It is **not** your normal email password. Gmail needs 2-Step Verification turned on to create one.
+**Connect an account:** *Settings → Tray → Mail* guides you step by step, with buttons to the right pages of your provider. Cala signs in with an **app password**: a code your provider generates just for Cala. It is **not** your normal email password. Gmail needs 2-Step Verification turned on to create one.
 
-**Images:** remote images in emails load by default. Turn that off in *Settings → Mail* if you prefer to block them: when images load, the sender can tell you opened the email. No JavaScript runs in emails, and links open in your browser.
+**Images:** remote images in emails load by default. Turn that off in *Settings → Tray → Mail* if you prefer to block them: when images load, the sender can tell you opened the email. No JavaScript runs in emails, and links open in your browser.
 
 ---
 
 ## Zones
 
-Zones lets you place windows without resizing them by hand. Turn it on in the welcome, or in *Settings → General → What Cala does*.
+Zones lets you place windows without resizing them by hand. Turn it on in the welcome or in *Settings → Zones*.
 
 1. **Drag a window** by its title bar.
 2. **While you hold the button, right-click** (or **hold Shift**). Your zones appear on that monitor.
@@ -153,15 +153,16 @@ After each Cala update, macOS shows *"Cala wants to access key "Cala Mail" in yo
 ## Everyday use
 
 - **Settings**: right-click an empty part of the bar → *Settings…*, or click the Cala icon in the menu bar (shown when the bar is off or Zones is on), or open Cala again from Applications.
-- **Modules**: *Settings → General → What Cala does* has one switch each for Bar, Tray, Window switcher and Zones; they start and stop at once. The Tray lives inside the Bar. If you were already using Cala, nothing changed: Bar, Tray and switcher stay on and Zones is off until you turn it on.
+- **Modules**: *Settings → General → What Cala does* shows switches, status and direct links for Zones, Taskbar, Window switcher and Tray. The same pages stay available when modules are off. Mail, Calendar and Usage (Claude and Codex) have their own rows under Tray.
 - **Open at login**: chosen in the welcome or in *Settings → General*. It shows up in *System Settings → General → Login Items*.
 - **Language**: English or Spanish, following your Mac by default. Change it in *Settings → General → Language*.
-- **Hide the macOS Dock**: *Settings → General*. Turning it off, or quitting Cala, brings the Dock back exactly as it was.
+- **Taskbar**: *Settings → Taskbar* holds Dock and menu bar hiding, icon size, transparency, previews and alignment per display. To change the shared theme, open *General → Cala theme*.
+- **Window switcher**: *Settings → Window switcher* shows the Option + Tab status, the Command + Tab option and search instructions.
 - **Update**: run the Option 1 command again, or download the new DMG and replace Cala in Applications. Your settings and permissions are kept.
 
 ## Uninstall
 
-*Settings → Advanced → **Uninstall Cala…*** puts the Dock and menu bar back as they were, removes the login item, deletes Cala's settings and moves the app to the Trash.
+*Settings → Help and diagnostics → Advanced options → **Uninstall Cala…*** puts the Dock and menu bar back as they were, removes the login item, deletes Cala's settings and moves the app to the Trash.
 
 Permissions stay listed in *System Settings → Privacy & Security*; you can remove them there. Without opening the app: [`scripts/uninstall.sh`](scripts/uninstall.sh).
 
@@ -176,7 +177,7 @@ Nothing leaves your Mac unless you send it. *Report a problem* shows you exactly
 - **"Cala can't be opened" / "Apple could not verify…"**: that is the one-time block; see step 3 of [Install](#install), or install with the Option 1 command, which avoids it.
 - **No thumbnails**: turn on Screen Recording in *Settings → Permissions*.
 - **Zones does nothing**: it needs Accessibility (*Settings → Permissions*); it starts by itself once you allow it. Check that Zones is on in *Settings → General → What Cala does*.
-- **The Dock disappeared**: Cala only hides it if you asked. Turn it off in *Settings → General*, or quit Cala.
+- **The Dock disappeared**: Cala only hides it if you asked. Turn off **Hide the macOS Dock** in *Settings → Taskbar*.
 - **macOS asks for my Mac password for "Cala Mail"**: it is expected after each update; see [The Keychain prompt](#the-keychain-prompt-mail). Type your Mac password and choose **Always Allow**; it goes to macOS, not to Cala.
 - **Something is wrong**: right-click the bar → *Report a problem…*, or open an [issue](https://github.com/MineiToshio/cala-taskbar/issues).
 

@@ -45,11 +45,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         ZoneEditor.install()
-        if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
-            // Renders before any module starts: no bar, tap, Dock or menu-bar change while taking pictures.
-            Snapshots.render(to: CommandLine.arguments[i + 1])
-            exit(0)
-        }
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
@@ -74,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Watchdog.start(store: store)
         let modules = registry.launch(onboardingCompleted: OnboardingWindowController.completed,
                                       onboardingPending: OnboardingWindowController.pending, axTrusted: AXIsProcessTrusted())
+        UsageService.shared.finishStatusLineCleanup(config: store.config)
         MenuBarDiagnostics.install()
         // `notifyutil -p local.cala.openSystemPanel` opens the CPU panel while the tray is running.
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), Unmanaged.passUnretained(self).toOpaque(), { _, observer, _, _, _ in
@@ -99,8 +95,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 }
 
-/// `Cala --snapshot <dir>`: every Settings pane in the current language (the Zones pane reads zones.json directly for
-/// its per-monitor layout menus; no module starts), the General and Zones panes and the welcome's module question and zones-only permission page in English
+/// `Cala --snapshot <dir>`: each Settings page by ID, plus off-module variants. The Zones page reads zones.json
+/// without starting the module. Also renders the full Settings window at both supported sizes, and the General
+/// and Zones panes and welcome steps in English
 /// and Spanish, the welcome's last page with "How to use Zones" (`onboarding-ready-zones*`), the drag-time layout strip
 /// (`zones-strip-pill|expanded-light|dark-<lang>`), plus the zones editor (`zones-editor-en/es`, and `zones-editor-light-en/es` in the Snow theme) at 1512 × 982, as 2x PNGs. Views are drawn through an offscreen NSHostingView so AppKit controls (switches, menus,
 /// sliders) render as they do on screen.
@@ -111,34 +108,56 @@ enum Snapshots {
     }
 
     static func render(to dir: String) {
-        func write<V: View>(_ view: V, _ name: String, width: CGFloat) {
-            let host = NSHostingView(rootView: view.frame(width: width, alignment: .leading)
+        func write<V: View>(_ view: V, _ name: String, width: CGFloat, height: CGFloat? = nil) {
+            let host = NSHostingView(rootView: view.frame(width: width, height: height, alignment: .topLeading)
                 .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light)
                 .environment(\.controlActiveState, .active))
-            let window = Window(contentRect: CGRect(x: 0, y: 0, width: width, height: 100), styleMask: .borderless,
-                                backing: .buffered, defer: false)
+            let window = Window(contentRect: CGRect(x: 0, y: 0, width: width, height: height ?? 100),
+                                styleMask: .borderless, backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.appearance = NSAppearance(named: .aqua)
             window.contentView = host
-            let size = host.fittingSize
+            defer { window.close() }
+
+            let size = height.map { CGSize(width: width, height: $0) } ?? host.fittingSize
             window.setContentSize(size)
             host.frame = CGRect(origin: .zero, size: size)
             host.layoutSubtreeIfNeeded()
-            defer { window.close() }
+            if height != nil {
+                // The full Settings view contains two scroll views. Give SwiftUI a turn to lay out
+                // their hosted content at the final size before caching the host itself.
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+                host.layoutSubtreeIfNeeded()
+                host.displayIfNeeded()
+            }
             guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
             host.cacheDisplay(in: host.bounds, to: bitmap)
             if let data = bitmap.representation(using: .png, properties: [:]) {
                 try? data.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
             }
         }
-        func pane(_ p: SettingsPane) -> some View {
-            VStack(alignment: .leading, spacing: 26) { Text(p.title).font(.system(size: 28, weight: .bold)); PaneBody(pane: p, store: ConfigStore.shared) }
+        let enabled = ModuleSet(bar: true, switcher: true, tray: true, zones: true)
+        // Capture display state without starting any modules or changing config.json.
+        let store = ConfigStore.shared
+        let zones = try? ZonesStore(templateName: ZonesModule.templateName, readOnly: true)
+        let layouts = zones?.state ?? ZoneTemplates.seedState()
+        func pane(_ p: SettingsPane, modules: ModuleSet? = nil, ready: Bool = true, language: String? = nil) -> some View {
+            SettingsPage(pane: p, store: store, open: { _ in })
+                .environment(\.settingsSnapshot, SettingsSnapshot(modules: modules ?? enabled, ready: ready, language: language, layouts: layouts))
                 .padding(34)
         }
-        // No module is started (no bar, no event tap): the Zones pane reads zones.json directly for its layout menus.
-        ZonesSettingsPane.snapshotStore = try? ZonesStore(templateName: ZonesModule.templateName)
-        defer { ZonesSettingsPane.snapshotStore = nil }
-        for p in SettingsPane.allCases { write(pane(p), p.rawValue, width: 640) }
+        for p in SettingsPane.pages { write(pane(p), p.id, width: 640) }
+        write(pane(.switcher, ready: false), "switcher-starting", width: 640)
+        write(pane(.switcher, modules: ModuleSet.none), "switcher-off", width: 640)
+        write(pane(.tray, modules: ModuleSet(bar: true, switcher: true, tray: false, zones: true)), "tray-off", width: 640)
+        write(pane(.tray, modules: ModuleSet(bar: false, switcher: true, tray: true, zones: true)), "tray-bar-off", width: 640)
+
+        let window = SettingsView(store: store, navigation: SettingsNavigation())
+            .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts))
+        let defaultSize = SettingsWindowController.defaultSize
+        let minimumSize = SettingsWindowController.minimumSize
+        write(window, "settings-window", width: defaultSize.width, height: defaultSize.height)
+        write(window, "settings-window-min", width: minimumSize.width, height: minimumSize.height)
         let language = appLanguageOverride
         for code in ["en", "es"] {
             appLanguageOverride = code
@@ -146,9 +165,9 @@ enum Snapshots {
             write(OnboardingView(finish: {}, step: .essentials, bar: false, zones: true), "onboarding-essentials-zones-\(code)", width: 600)
             write(OnboardingView(finish: {}, step: .ready, bar: false, zones: true), "onboarding-ready-zones-\(code)", width: 600)
             write(OnboardingView(finish: {}, step: .ready, bar: true, zones: true), "onboarding-ready-bar-zones-\(code)", width: 600)
-            write(pane(.general), "general-\(code)", width: 640)
+            write(pane(.general, language: code), "general-\(code)", width: 640)
             write(pane(.zones), "zones-\(code)", width: 640)
-            if let store = ZonesSettingsPane.snapshotStore {
+            if let store = zones {
                 // The drag-time layout strip as it draws on screen: the collapsed pill and the open strip.
                 let layouts = store.state.layouts
                 let screen = NSScreen.screens.first?.frame ?? CGRect(x: 0, y: 0, width: 1512, height: 982)
@@ -185,6 +204,11 @@ func openAppLauncher() {
 }
 
 let app = NSApplication.shared
+if let index = CommandLine.arguments.firstIndex(of: "--snapshot"), index + 1 < CommandLine.arguments.count {
+    // Snapshots need AppKit layout, but can render before Launch Services starts the application lifecycle.
+    MainActor.assumeIsolated { Snapshots.render(to: CommandLine.arguments[index + 1]) }
+    exit(0)
+}
 // QA builds (CALA_QA_REGULAR=1 in build.sh) run as a regular app so UI-automation tools can see and drive it.
 app.setActivationPolicy(Bundle.main.object(forInfoDictionaryKey: "CalaQARegular") as? Bool == true ? .regular : .accessory)
 #if DEBUG

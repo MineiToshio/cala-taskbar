@@ -3,21 +3,23 @@ import AppKit
 
 struct BarTheme: Identifiable {
     let id: String
-    let name: String
+    private let englishName: String
+    private let spanishName: String
+    var name: String { tx(englishName, spanishName) }
     let colors: [Color]       // gradient stops, empty = system material
     let accent: Color
     let dark: Bool?           // forced color scheme, nil = follow system
 
     static let all: [BarTheme] = [
-        BarTheme(id: "system", name: tx("System", "Sistema"), colors: [], accent: .accentColor, dark: nil),
-        BarTheme(id: "graphite", name: tx("Graphite", "Grafito"), colors: [hex(0x2B2D31), hex(0x1E1F22)], accent: hex(0x5B9DFF), dark: true),
-        BarTheme(id: "midnight", name: tx("Midnight", "Medianoche"), colors: [hex(0x141B3A), hex(0x0B1026)], accent: hex(0x7C9CFF), dark: true),
-        BarTheme(id: "ocean", name: tx("Ocean", "Océano"), colors: [hex(0x0E7490), hex(0x1D4ED8)], accent: hex(0x7DF9FF), dark: true),
-        BarTheme(id: "sunset", name: tx("Sunset", "Atardecer"), colors: [hex(0xF97316), hex(0xDB2777)], accent: hex(0xFFF1B8), dark: true),
-        BarTheme(id: "forest", name: tx("Forest", "Bosque"), colors: [hex(0x14532D), hex(0x365314)], accent: hex(0xA3E635), dark: true),
-        BarTheme(id: "lavender", name: tx("Lavender", "Lavanda"), colors: [hex(0x7C3AED), hex(0xC026D3)], accent: hex(0xF5D0FE), dark: true),
-        BarTheme(id: "candy", name: tx("Candy", "Chicle"), colors: [hex(0xFBCFE8), hex(0xBAE6FD)], accent: hex(0xDB2777), dark: false),
-        BarTheme(id: "snow", name: tx("Snow", "Nieve"), colors: [hex(0xF8FAFC), hex(0xE2E8F0)], accent: hex(0x2563EB), dark: false),
+        BarTheme(id: "system", englishName: "System", spanishName: "Sistema", colors: [], accent: .accentColor, dark: nil),
+        BarTheme(id: "graphite", englishName: "Graphite", spanishName: "Grafito", colors: [hex(0x2B2D31), hex(0x1E1F22)], accent: hex(0x5B9DFF), dark: true),
+        BarTheme(id: "midnight", englishName: "Midnight", spanishName: "Medianoche", colors: [hex(0x141B3A), hex(0x0B1026)], accent: hex(0x7C9CFF), dark: true),
+        BarTheme(id: "ocean", englishName: "Ocean", spanishName: "Océano", colors: [hex(0x0E7490), hex(0x1D4ED8)], accent: hex(0x7DF9FF), dark: true),
+        BarTheme(id: "sunset", englishName: "Sunset", spanishName: "Atardecer", colors: [hex(0xF97316), hex(0xDB2777)], accent: hex(0xFFF1B8), dark: true),
+        BarTheme(id: "forest", englishName: "Forest", spanishName: "Bosque", colors: [hex(0x14532D), hex(0x365314)], accent: hex(0xA3E635), dark: true),
+        BarTheme(id: "lavender", englishName: "Lavender", spanishName: "Lavanda", colors: [hex(0x7C3AED), hex(0xC026D3)], accent: hex(0xF5D0FE), dark: true),
+        BarTheme(id: "candy", englishName: "Candy", spanishName: "Chicle", colors: [hex(0xFBCFE8), hex(0xBAE6FD)], accent: hex(0xDB2777), dark: false),
+        BarTheme(id: "snow", englishName: "Snow", spanishName: "Nieve", colors: [hex(0xF8FAFC), hex(0xE2E8F0)], accent: hex(0x2563EB), dark: false),
     ]
 
     static func named(_ id: String) -> BarTheme { all.first { $0.id == id } ?? all[0] }

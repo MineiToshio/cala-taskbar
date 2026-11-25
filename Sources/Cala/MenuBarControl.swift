@@ -108,12 +108,12 @@ enum MenuBarIcons {
         let process: String
     }
 
-    static let all: [Icon] = [
+    static var all: [Icon] { [
         Icon(id: "wifi", title: "Wi-Fi", note: tx("Cala already shows Wi-Fi.", "Cala ya muestra el Wi-Fi."), domain: "com.apple.controlcenter", key: "WiFi", perHost: true, hiddenValue: 24, process: "ControlCenter"),
         Icon(id: "battery", title: tx("Battery", "Batería"), note: tx("Cala already shows the battery.", "Cala ya muestra la batería."), domain: "com.apple.controlcenter", key: "Battery", perHost: true, hiddenValue: 24, process: "ControlCenter"),
         Icon(id: "user", title: tx("Fast User Switching", "Cambio rápido de usuario"), note: tx("Cala already lets you switch users.", "Cala ya permite cambiar de usuario."), domain: "com.apple.controlcenter", key: "UserSwitcher", perHost: true, hiddenValue: 24, process: "ControlCenter"),
         Icon(id: "input", title: tx("Keyboard language", "Idioma del teclado"), note: tx("The text icon (for example EN). Cala also shows it if you have several keyboards.", "El icono de texto (por ejemplo ES). Cala también lo muestra si tienes varios teclados."), domain: "com.apple.TextInputMenu", key: "visible", perHost: false, hiddenValue: false, process: "SystemUIServer"),
-    ]
+    ] }
 
     private static func host(_ icon: Icon) -> CFString { icon.perHost ? kCFPreferencesCurrentHost : kCFPreferencesAnyHost }
 

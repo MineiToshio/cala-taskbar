@@ -121,7 +121,7 @@ struct SwitcherFooter: View {
 // MARK: - Controller + key interception
 
 /// Window switcher (Option+Tab, optionally Cmd+Tab): one card per WINDOW, not per app.
-final class WindowSwitcher: CalaModule {
+final class WindowSwitcher: CalaModule, ObservableObject {
     static let shared = WindowSwitcher()
     let sm = SwitcherModel()
     let id = ModuleID.switcher
@@ -130,6 +130,7 @@ final class WindowSwitcher: CalaModule {
     private var run: ModuleCancellation?
     private var panel: NSPanel?
     private var captureTask: Task<Void, Never>?
+    @Published private(set) var keyTapReady = false
     private var tap: CFMachPort?
     private var tapSource: CFRunLoopSource?
     private var swallowedKeys = Set<Int64>()
@@ -162,6 +163,7 @@ final class WindowSwitcher: CalaModule {
         retryTimer?.invalidate()
         retryTimer = nil
         removeTap()
+        if keyTapReady { keyTapReady = false }
         panel?.close()
         panel?.contentView = nil
         panel = nil
@@ -190,6 +192,10 @@ final class WindowSwitcher: CalaModule {
     /// Creates the event tap once the needed permissions exist; cheap to call repeatedly.
     private func ensureTap() {
         guard isRunning else { return }
+        defer {
+            let ready = tap.map { CFMachPortIsValid($0) && CGEvent.tapIsEnabled(tap: $0) } ?? false
+            if keyTapReady != ready { keyTapReady = ready }
+        }
         if let t = tap {
             if CFMachPortIsValid(t) {
                 if !CGEvent.tapIsEnabled(tap: t) {

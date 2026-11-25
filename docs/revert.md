@@ -1,11 +1,11 @@
 # Reverting to the normal Dock
 
-**Shortest way:** Settings → Advanced → **Uninstall Cala…** does all of the steps below (Dock, menu bar, login item, statusLine entry, settings, app to the Trash). Without opening the app: `scripts/uninstall.sh`.
+**Shortest way:** Settings → Help and diagnostics → Advanced options → **Uninstall Cala…** does all of the steps below (Dock, menu bar, login item, statusLine entry, settings, app to the Trash). Without opening the app: `scripts/uninstall.sh`.
 
 Everything is reversible. By hand, do these in order.
 
 ## 1. Stop the taskbar
-Settings → Advanced → "Salir…" (there is no Quit in the bar's right-click menu; when the Bar is off or Zones is on, the Cala icon in the menu bar also has **Quit Cala**). To open it again: Spotlight or Launchpad, search "Cala", or `open ~/Applications/Cala.app`.
+Settings → Help and diagnostics → Advanced options → "Salir…" (there is no Quit in the bar's right-click menu; when the Bar is off or Zones is on, the Cala icon in the menu bar also has **Quit Cala**). To open it again: Spotlight or Launchpad, search "Cala", or `open ~/Applications/Cala.app`.
 
 ## 2. Remove start at login
 Settings → General → switch off "Open at login", or System Settings → General → Login Items → remove Cala.
@@ -15,7 +15,7 @@ rm -rf ~/Applications/Cala.app
 ```
 
 ## 3. Bring the Dock back
-**Easiest:** Settings → General → switch off "Hide the macOS Dock" (before quitting). It restores the exact previous values.
+**Easiest:** Settings → Taskbar → switch off "Hide the macOS Dock" (before quitting). It restores the exact previous values.
 
 By hand:
 
@@ -41,6 +41,6 @@ The project folder (including `build/Cala.app`) can then be deleted.
 Removed with `brew uninstall --cask dockdoor`. To get it back: `brew install --cask dockdoor`.
 
 ## What the Dock switch does
-Settings → General → **Hide the macOS Dock** turns on Dock auto-hide with a very long delay and restarts the Dock. Turning it off restores the exact previous values, kept in `config.json` (`dockBackup*`). If "Return the Dock when the bar quits" is on (default), quitting the bar also restores the Dock, and launching it again hides it again.
+Settings → Taskbar → **Hide the macOS Dock** turns on Dock auto-hide with a very long delay and restarts the Dock. Turning it off restores the exact previous values, kept in `config.json` (`dockBackup*`). If "Restore the Dock when quitting Cala" is on (default), quitting the bar also restores the Dock, and launching it again hides it again.
 
 Normal Quit and SIGTERM run the Dock restore handler when that setting is enabled. A crash, force-quit or SIGKILL cannot run cleanup; if the Dock stays hidden, use the manual commands above.

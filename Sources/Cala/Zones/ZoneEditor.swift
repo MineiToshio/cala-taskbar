@@ -161,8 +161,9 @@ final class ZoneEditor: NSObject {
         guard let session, session.dialog == nil, let store else { return }
         // If Zones was started (or restarted) while editing, save into the running module's store: the draft is
         // merged onto its current state, so the module uses the new layouts at once and nothing is stale.
-        let target = ZonesModule.current.flatMap { $0.isRunning ? $0.store : nil } ?? store
         do {
+            // Settings can change a display’s assignment while the editor is open with Zones paused.
+            let target = try ZonesModule.current?.store ?? ZonesStore(fileURL: store.fileURL, templateName: ZonesModule.templateName)
             try target.saveEditorDraft(session.finishedDraft, basedOn: session.original)
             log("zones editor: saved \(target.state.layouts.count) layouts\(target === store ? "" : " into the running module")")
             close()
@@ -370,7 +371,7 @@ final class ZoneEditorSession {
     var layout: ZoneLayout? { layoutIndex.map { draft.layouts[$0] } }
     var layoutName: String {
         get { layout?.name ?? "" }
-        set { if let layoutIndex { draft.layouts[layoutIndex].name = newValue } }
+        set { if let layoutIndex { draft.layouts[layoutIndex].rename(to: newValue) } }
     }
     var hasChanges: Bool { draft != original }
     var monitorName: String { monitors.first { $0.key == displayKey }?.name ?? "" }
@@ -388,7 +389,8 @@ final class ZoneEditorSession {
     nonisolated static var untitled: String { tx("Untitled layout", "Distribución sin título") }
 
     nonisolated static func displayName(_ layout: ZoneLayout) -> String {
-        layout.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? untitled : layout.name
+        let name = ZoneTemplates.displayName(layout, localizedWith: tx)
+        return name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? untitled : name
     }
 
     /// Zones are switched off on this monitor (menu-bar icon or Settings): the canvas still shows a layout to edit.
@@ -524,6 +526,13 @@ final class ZoneEditorSession {
     func rename(_ id: UUID) {
         select(id)
         renameRequest += 1
+    }
+
+    func confirmLayoutName() {
+        if let layoutIndex {
+            let entered = draft.layouts[layoutIndex].name
+            draft.layouts[layoutIndex].rename(to: entered)
+        }
     }
 
     func restoreOriginal(_ id: UUID) {

@@ -219,6 +219,18 @@ enum Uninstaller {
 
     private static func run(store: ConfigStore) {
         log("uninstall: start")
+        do {
+            try UsageService.shared.removeStatusLineNow(config: store.config)
+        } catch {
+            log("uninstall: Claude statusLine cleanup failed: \(error)")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = tx("Cala couldn’t remove its Claude Code command", "Cala no pudo retirar su comando de Claude Code")
+            alert.informativeText = tx("Cala is still installed. Check the Claude Code settings file and retry. \(error.localizedDescription)",
+                                       "Cala sigue instalada. Revisa el archivo de ajustes de Claude Code y vuelve a intentarlo. \(error.localizedDescription)")
+            alert.runModal()
+            return
+        }
         let fm = FileManager.default
         // 1. Give back what Cala changed in the system.
         if store.config.hideNativeDock { DockControl.setHidden(false, store) }
@@ -227,7 +239,6 @@ enum Uninstaller {
             MenuBarControl.setHidden(false, store)
         }
         MenuBarIcons.restoreForTrayStop(store)
-        if store.config.usageClaudeStatusLine { UsageService.shared.removeStatusLineNow(config: store.config) }
         // 2. Stop starting at login and stop the crash watchdog.
         LoginItem.set(false)
         LoginItem.migrateLegacy()

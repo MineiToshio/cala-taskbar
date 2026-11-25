@@ -2,12 +2,13 @@ import AppKit
 import Combine
 
 /// Main-thread owner of the enabled modules and their shared thumbnail watcher.
-final class ModuleRegistry {
+final class ModuleRegistry: ObservableObject {
     static let shared = ModuleRegistry()
 
     let bar: BarModule
     let tray: TrayModule
     let zones: ZonesModule
+    @Published private(set) var runningModules = ModuleSet.none
     private let store = ConfigStore.shared
     private let thumbnails = ThumbnailWatch()
     private let statusItem = StatusItemController()
@@ -143,6 +144,7 @@ final class ModuleRegistry {
             if next.tray && !effective.tray { log("module tray: off (needs bar)") }
             if effective.zones && modules[.zones] == nil { log("module zones: requested, unavailable (no module registered)") }
         }
+        if runningModules != running { runningModules = running }
         let zones = isRunning(.zones) ? modules[.zones] as? any ZonesStatusMenuProvider : nil
         statusItem.refresh(effective, zones: zones)
     }

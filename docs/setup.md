@@ -25,7 +25,7 @@ After a code change, run `./install.sh` again. The installer advances the build 
 **Re-grant after moving.** macOS ties Accessibility and Screen Recording grants to the app’s path and signature. In each account, add `/Applications/Cala.app` in System Settings → Privacy & Security and remove the entry for the previous path. If a grant looks on but fails, reset it with the `tccutil` command below and grant it again.
 
 ## Permissions (System Settings > Privacy & Security)
-The first launch shows a welcome that first asks "What do you want to use?" (Bar, Zones or both; nothing runs until you answer), then asks only for the permissions that choice needs (Bar: Accessibility and Screen Recording; Zones alone: Accessibility), each with its reason and a button to the exact pane; status updates live (PermissionCenter, `Sources/Cala/Permissions.swift`). Nothing is requested at launch after that: every optional permission is also asked the first time its feature is used. Settings → Permissions lists what the running modules need (Accessibility and Screen Recording for the Bar or the Switcher; Accessibility alone for Zones) and, while the Tray is on, the five optional ones (Calendar, Location, Bluetooth, Finder automation, Notifications). Input Monitoring is never requested.
+The first launch shows a welcome that first asks "What do you want to use?" (Bar, Zones or both; nothing runs until you answer), then asks only for the permissions that choice needs (Bar: Accessibility and Screen Recording; Zones alone: Accessibility), each with its reason and a button to the exact pane; status updates live (PermissionCenter, `Sources/Cala/Permissions.swift`). Settings → **Permissions** shows the grant and the module or feature that uses it. Module pages also offer buttons for missing access. Opening a Settings page leaves permission requests to explicit buttons. You can replay the welcome from **Help and diagnostics**.
 
 To test the welcome from scratch:
 ```bash
@@ -37,12 +37,12 @@ open /Applications/Cala.app
 ```
 
 ## Recommended system settings
-1. **Hide the macOS Dock:** Settings → General → "Hide the macOS Dock". The app does it for you (see [features.md](features.md)); it keeps the Dock running because the bar reads badges from it. Manual alternative:
+1. **Hide the macOS Dock:** Settings → Taskbar → "Hide the macOS Dock". The app does it for you (see [features.md](features.md)); it keeps the Dock running because the bar reads badges from it. Manual alternative:
    ```bash
    defaults write com.apple.dock autohide -bool true && defaults write com.apple.dock autohide-delay -float 1000 && killall Dock
    ```
    A major macOS update may reset the setting; toggle the setting off/on or quit and start a fresh process to re-apply it. Reopening a running instance only opens Settings.
-2. **Hide the menu bar:** Settings → General → "Hide the whole menu bar" (restored exactly when turned off or on quit), or by hand in System Settings > Desktop & Dock > Menu Bar. Third-party menu bar icons cannot be moved into the taskbar (macOS does not allow it), so they only appear when the mouse goes to the top.
+2. **Hide the menu bar:** Settings → Taskbar → "Hide the whole menu bar" (restored exactly when turned off or on quit), or by hand in System Settings > Desktop & Dock > Menu Bar. Third-party menu bar icons cannot be moved into the taskbar (macOS does not allow it), so they only appear when the mouse goes to the top.
 3. **Uninstall DockDoor** if present: `brew uninstall --cask dockdoor`. Quit the running process first; deleting the app does not stop a copy already in memory. Other user sessions keep their own copy until they log out or the machine restarts.
 
 The **Permissions** pane in the Settings window shows which grants are missing and opens the right page.

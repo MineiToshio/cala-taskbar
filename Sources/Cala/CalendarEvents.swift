@@ -111,10 +111,12 @@ final class CalendarService: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var runID: UUID? // main only
     private let preview: Bool
+    private let catalogOnly: Bool
 
-    init(preview: Bool = false, permission: CalendarPermission = .notRequested,
+    init(preview: Bool = false, catalogOnly: Bool = false, permission: CalendarPermission = .notRequested,
          calendars: [CalendarChoice] = [], events: [UpcomingEvent] = [], makeStore: @escaping () -> EKEventStore = { EKEventStore() }) {
         self.makeStore = makeStore
+        self.catalogOnly = catalogOnly
         self.preview = preview; self.permission = permission; self.calendars = calendars; self.events = events
     }
 
@@ -144,8 +146,10 @@ final class CalendarService: ObservableObject {
         }
     }
 
-    /// Called only from the calendar flyout or its Settings section, including enabling it there.
+    /// Opening the flyout or explicitly asking for access can request permission.
     func open(config: Config) { load(config: config, mayRequest: true) }
+    /// Settings can inspect authorization and load calendars without asking for access.
+    func refreshWithoutRequest(config: Config) { load(config: config, mayRequest: false) }
     /// Keeps events fresh for the bar's Join button without opening the flyout. It only reads when full access
     /// was already granted, so it never shows a permission prompt.
     func backgroundRefresh(config: Config) {
@@ -203,6 +207,10 @@ final class CalendarService: ObservableObject {
             let choices = calendars.map { CalendarChoice(id: $0.calendarIdentifier, title: $0.title,
                 sourceID: $0.source?.sourceIdentifier ?? "local", sourceTitle: $0.source?.title ?? calendarText("On My Mac", "En mi Mac"), tint: CalendarTint($0.cgColor)) }
                 .sorted { ($0.sourceTitle, $0.title, $0.id) < ($1.sourceTitle, $1.title, $1.id) }
+            if self.catalogOnly {
+                self.publish(.granted, calendars: choices, token: token)
+                return
+            }
             let selected = calendars.filter { !config.calendarExcludedIDs.contains($0.calendarIdentifier) }
             let now = Date(), end = Calendar.current.date(byAdding: .day, value: config.calendarDays, to: Date())!
             var snapshots: [UpcomingEvent] = []

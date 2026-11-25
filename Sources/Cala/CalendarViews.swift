@@ -7,17 +7,29 @@ extension CalendarTint {
 
 struct CalendarPermissionView: View {
     @ObservedObject var agenda: CalendarService
+    var inSettings = false
     var allow: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(agenda.permission.message, systemImage: agenda.permission == .granted ? "calendar.badge.checkmark" : "calendar.badge.exclamationmark")
                 .font(.system(size: 11.5)).flyoutSecondary().fixedSize(horizontal: false, vertical: true)
             if let error = agenda.error { Text(error).font(.system(size: 11)).flyoutSecondary().fixedSize(horizontal: false, vertical: true) }
-            if agenda.permission == .notRequested {
-                Button(calendarText("Allow calendar access", "Permitir acceso al calendario"), action: allow).font(.system(size: 11))
+            if agenda.permission == .notRequested || (inSettings && agenda.permission == .writeOnly) {
+                let title = agenda.permission == .writeOnly
+                    ? tx("Allow full access", "Permitir acceso completo")
+                    : tx("Allow calendar access", "Permitir acceso al calendario")
+                permissionButton(title, action: allow)
             } else if agenda.permission != .requesting && agenda.permission != .granted {
-                Button(calendarText("Open Privacy Settings", "Abrir ajustes de privacidad"), action: CalendarNavigation.privacy).font(.system(size: 11))
+                permissionButton(tx("Open Privacy Settings", "Abrir ajustes de privacidad"), action: CalendarNavigation.privacy)
             }
+        }
+    }
+
+    @ViewBuilder private func permissionButton(_ title: String, action: @escaping () -> Void) -> some View {
+        if inSettings {
+            Button(title, action: action).buttonStyle(.borderedProminent)
+        } else {
+            Button(title, action: action).font(.system(size: 11))
         }
     }
 }
@@ -144,8 +156,7 @@ struct CalendarEventRow: View {
 
 struct CalendarSettingsPane: View {
     @ObservedObject var store: ConfigStore
-    @ObservedObject var agenda: CalendarService
-    init(store: ConfigStore, agenda: CalendarService = .shared) { self.store = store; self.agenda = agenda }
+    @StateObject private var agenda = CalendarService(catalogOnly: true)
     private var sources: [(id: String, title: String, choices: [CalendarChoice])] {
         Dictionary(grouping: agenda.calendars, by: \.sourceID).map { id, choices in
             (id, choices.first?.sourceTitle ?? tx("Calendars", "Calendarios"), choices)
@@ -156,6 +167,16 @@ struct CalendarSettingsPane: View {
             Card {
                 SettingRow(title: tx("Show upcoming events", "Mostrar próximos eventos"), caption: tx("Read events from the accounts configured on this Mac.", "Lee los eventos de las cuentas configuradas en este Mac.")) {
                     Toggle(tx("Show upcoming events", "Mostrar próximos eventos"), isOn: $store.config.calendarEnabled).labelsHidden().toggleStyle(FlyoutSwitchStyle())
+                }
+                if store.config.calendarEnabled && agenda.permission != .granted {
+                    RowDivider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(tx("Allow access to see your events", "Permite el acceso para ver tus eventos"))
+                            .font(.system(size: 13, weight: .medium))
+                        CalendarPermissionView(agenda: agenda, inSettings: true) { agenda.open(config: store.config) }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 RowDivider()
                 SettingRow(title: tx("Join button", "Botón Unirse"), caption: tx("Show a Join button in the bar for meetings with a Meet, Zoom, Teams or Webex link, from 5 minutes before they start.", "Muestra un botón Unirse en la barra para las reuniones con enlace de Meet, Zoom, Teams o Webex, desde 5 minutos antes de que empiecen.")) {
@@ -169,14 +190,14 @@ struct CalendarSettingsPane: View {
                 }
             }
             VStack(alignment: .leading, spacing: 8) {
-                if store.config.calendarEnabled {
-                    CalendarPermissionView(agenda: agenda) { agenda.open(config: store.config) }
-                } else {
-                    Text(tx("Upcoming events are disabled.", "Los próximos eventos están desactivados.")).font(.system(size: 12)).foregroundStyle(.secondary)
-                }
+                Button(tx("Add account… (Google, iCloud, Exchange)", "Añadir cuenta… (Google, iCloud, Exchange)"), action: CalendarNavigation.addAccount)
+                Text(tx("Add your Google accounts there and enable Calendars; they appear here automatically.", "Añade ahí tus cuentas de Google y activa Calendarios; aparecerán aquí automáticamente."))
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }.padding(.horizontal, 4)
             if store.config.calendarEnabled && agenda.permission == .granted {
-                if sources.isEmpty {
+                if agenda.loading && sources.isEmpty {
+                    ProgressView(tx("Loading calendars…", "Cargando calendarios…")).controlSize(.small)
+                } else if sources.isEmpty {
                     Text(tx("No calendars found. Add an account or enable Calendars in Internet Accounts.", "No se encontraron calendarios. Añade una cuenta o activa Calendarios en Cuentas de Internet."))
                         .font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 4)
                 }
@@ -198,17 +219,27 @@ struct CalendarSettingsPane: View {
                     }
                 }
             }
-            VStack(alignment: .leading, spacing: 8) {
-                Button(tx("Add account… (Google, iCloud, Exchange)", "Añadir cuenta… (Google, iCloud, Exchange)"), action: CalendarNavigation.addAccount)
-                Text(tx("Add your Google accounts there and enable Calendars; they appear here automatically.", "Añade ahí tus cuentas de Google y activa Calendarios; aparecerán aquí automáticamente."))
-                    .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }.padding(.horizontal, 4)
         }
-        .onAppear { agenda.open(config: store.config) }
-        .onChange(of: store.config.calendarEnabled) { _, _ in agenda.open(config: store.config) }
-        .onChange(of: store.config.calendarDays) { _, _ in agenda.open(config: store.config) }
-        .onChange(of: store.config.calendarExcludedIDs) { _, _ in agenda.open(config: store.config) }
+        .onAppear {
+            agenda.start()
+            agenda.refreshWithoutRequest(config: store.config)
+        }
+        .onDisappear { agenda.stop() }
+        .onChange(of: store.config.calendarEnabled) { _, _ in
+            agenda.refreshWithoutRequest(config: store.config)
+            refreshActiveEvents()
+        }
+        .onChange(of: store.config.calendarDays) { _, _ in refreshActiveEvents() }
+        .onChange(of: store.config.calendarExcludedIDs) { _, _ in refreshActiveEvents() }
+        .onChange(of: agenda.permission) { old, permission in
+            if permission == .granted && old != .notRequested { refreshActiveEvents() }
+        }
     }
+
+    private func refreshActiveEvents() {
+        CalendarService.shared.refreshWithoutRequest(config: store.config)
+    }
+
     private func included(_ id: String) -> Binding<Bool> {
         Binding(get: { !store.config.calendarExcludedIDs.contains(id) }, set: { included in
             if included { store.config.calendarExcludedIDs.removeAll { $0 == id } }

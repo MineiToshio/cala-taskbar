@@ -1008,6 +1008,68 @@ func checkStore() throws {
            && !oldLayout.isTemplate && oldLayout.nextSeq == 1 && legacy.state.activeByDisplay.isEmpty
            && ZonePicking.chosen(CGPoint(x: 50, y: 50), zones: oldLayout.zones, usable: usable) == oldLayout.zones.last)
 
+    for (label, input, count) in [("missing IDs", Data(old.utf8), 1),
+                                  ("an empty layout list", Data(#"{"layouts":[]}"#.utf8), 8)] {
+        let path = root.appendingPathComponent("repair-\(count).json")
+        try input.write(to: path)
+        let readOnly = try ZonesStore(fileURL: path, readOnly: true)
+        let edit = try ZonesStore(fileURL: path)
+        let diskBeforeEdit = try Data(contentsOf: path)
+        expect("Reopening \(label) preserves repaired layout and zone IDs without writing", readOnly.state == edit.state && diskBeforeEdit == input)
+        let layoutID = readOnly.state.layouts[0].id
+        let selected = try edit.setActiveLayout(layoutID, forDisplay: "external-display")
+        expect("Settings can select the repaired ID after reopening \(label)", selected && edit.layout(forDisplay: "external-display")?.id == layoutID)
+        var renamed = readOnly.state
+        renamed.layouts[0].name = "Renamed"
+        let mergeTarget = try ZonesStore(fileURL: path)
+        try mergeTarget.saveEditorDraft(renamed, basedOn: readOnly.state)
+        expect("An editor rename with \(label) preserves count and a newer assignment",
+               mergeTarget.state.layouts.count == count && mergeTarget.state.layouts[0].name == "Renamed"
+               && mergeTarget.layout(forDisplay: "external-display")?.id == layoutID)
+    }
+
+    let localizedTemplate = ZoneTemplates.makeLayout("two-columns", name: "Dos columnas")
+    var personalized = localizedTemplate
+    personalized.name = "Workspace"
+    expect("Default template names follow the display language and custom names stay intact",
+           ZoneTemplates.displayName(localizedTemplate, localizedWith: { english, _ in english }) == "Two columns"
+           && ZoneTemplates.displayName(personalized, localizedWith: { _, spanish in spanish }) == "Workspace")
+
+    // The explicit IDs were assigned on a previous load, then moved to another index in the JSON.
+    let explicitLayout = zoneStorageID(kind: 1, layout: 0)
+    let explicitZone = zoneStorageID(kind: 2, layout: 0, zone: 0)
+    let mixed = """
+    {"defaultLayout":"\(explicitLayout)","activeByDisplay":{"kept":"\(explicitLayout)"},
+     "layouts":[{"name":"Missing ID","zones":[{"rect":{"x":0,"y":0,"w":0.5,"h":1}},
+                  {"id":"\(explicitZone)","rect":{"x":0.5,"y":0,"w":0.5,"h":1}}]},
+                {"id":"\(explicitLayout)","name":"Explicit ID"}]}
+    """
+    let mixedURL = root.appendingPathComponent("mixed.json")
+    try Data(mixed.utf8).write(to: mixedURL)
+    let mixedPreview = try ZonesStore(fileURL: mixedURL, readOnly: true)
+    let mixedEditable = try ZonesStore(fileURL: mixedURL)
+    let mixedLayouts = mixedEditable.state.layouts
+    expect("Explicit layout IDs and assignments survive a collision with an earlier missing ID",
+           mixedLayouts.count == 2 && mixedLayouts[0].id != explicitLayout && mixedLayouts[1].id == explicitLayout
+           && mixedEditable.layout(forDisplay: "kept")?.name == "Explicit ID")
+    let mixedZones = mixedLayouts[0].zones
+    expect("Explicit zone IDs survive a collision with an earlier missing ID",
+           mixedZones.count == 2 && mixedZones[0].id != explicitZone && mixedZones[1].id == explicitZone
+           && mixedZones[0].rect.x == 0 && mixedZones[1].rect.x == 0.5)
+    expect("Mixed repaired IDs are stable before the first write", mixedPreview.state == mixedEditable.state)
+    let assignedMixed = try mixedEditable.setActiveLayout(mixedLayouts[0].id, forDisplay: "new")
+    let roundTripped = try ZonesStore(fileURL: mixedURL, readOnly: true)
+    expect("Saving and reopening mixed IDs preserves every layout and zone",
+           assignedMixed && roundTripped.state == mixedEditable.state
+           && roundTripped.state.layouts.count == 2 && roundTripped.state.layouts[0].zones.count == 2)
+
+    var customSpanish = ZoneTemplates.makeLayout("two-columns", name: "Dos columnas")
+    customSpanish.rename(to: "Dos columnas")
+    let renamedTemplate = try JSONDecoder().decode(ZoneLayout.self, from: JSONEncoder().encode(customSpanish))
+    expect("Explicitly renaming a template to its Spanish label survives reload and English display",
+           renamedTemplate.isNameCustomized == true
+           && ZoneTemplates.displayName(renamedTemplate, localizedWith: { english, _ in english }) == "Dos columnas")
+
     let broken = Data("invalid JSON".utf8)
     try broken.write(to: url)
     let recovered = try ZonesStore(fileURL: url)
@@ -1016,19 +1078,23 @@ func checkStore() throws {
     let reloaded = try ZonesStore(fileURL: url)
     expect("Corrupt JSON is preserved as .bad before seeding", backupData == broken && reloaded.state == recovered.state)
 
-    try broken.write(to: url)
-    try fm.removeItem(at: backup)
-    try fm.createSymbolicLink(at: backup, withDestinationURL: root.appendingPathComponent("missing"))
-    let locked = try ZonesStore(fileURL: url)
-    var saveDisabled = false
-    do {
-        try locked.save(draft)
-    } catch ZonesStore.SaveError.recoveryFailed {
-        saveDisabled = true
-    }
-    let protectedData = try Data(contentsOf: url)
-    expect("Failed backup disables writes and preserves the existing file",
-           locked.recoveryError != nil && saveDisabled && protectedData == broken && locked.state.layouts.count == 8)
+    let directoryBackupURL = root.appendingPathComponent("directory-backup.json")
+    try broken.write(to: directoryBackupURL)
+    let directoryBackup = directoryBackupURL.appendingPathExtension("bad")
+    try fm.createDirectory(at: directoryBackup, withIntermediateDirectories: false)
+    let prior = directoryBackup.appendingPathComponent("previous-backup.json")
+    try Data("keep this".utf8).write(to: prior)
+    let dangling = directoryBackupURL.appendingPathExtension("bad.1")
+    let missingTarget = root.appendingPathComponent("missing").path
+    try fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: missingTarget)
+    let recoveredAgain = try ZonesStore(fileURL: directoryBackupURL)
+    let preservedPrior = try Data(contentsOf: prior)
+    let preservedLink = try fm.destinationOfSymbolicLink(atPath: dangling.path)
+    let freshBackup = try Data(contentsOf: directoryBackupURL.appendingPathExtension("bad.2"))
+    expect("Recovery skips existing files, directories and dangling links without deleting any backup",
+           recoveredAgain.recoveryError == nil && preservedPrior == Data("keep this".utf8)
+           && preservedLink == missingTarget && freshBackup == broken)
+
 }
 
 do {

@@ -3,9 +3,12 @@ import Combine
 
 /// Zones: drag another app's window, right-click (or hold Shift) to show the zones, release over one to snap.
 /// Main-thread owner of the store, the drag tap, the worker and the overlay. Nothing exists while stopped.
-final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
+final class ZonesModule: CalaModule, ZonesStatusMenuProvider, ObservableObject {
     let id = ModuleID.zones
     private(set) var isRunning = false
+    @Published private(set) var dragTapReady = false
+    @Published private(set) var layoutLoadFailed = false
+    @Published private(set) var layoutSaveFailed = false
     /// Loaded in start() (the only place zones.json is read), released in stop(). The editor uses it.
     private(set) var store: ZonesStore?
 
@@ -86,10 +89,13 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         do {
             zones = try ZonesStore(templateName: Self.templateName)
         } catch {
+            layoutLoadFailed = true
             log("zones: could not load zones.json: \(error)")
             return
         }
         if let error = zones.recoveryError { log("zones: zones.json was invalid and could not be backed up (\(error)); saving is off") }
+        if layoutLoadFailed { layoutLoadFailed = false }
+        layoutSaveFailed = zones.recoveryError != nil
         store = zones
         isRunning = true
         Self.current = self
@@ -146,6 +152,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
         retryTimer = nil
         tap?.uninstall()          // disables and invalidates the port, stops the tap thread's run loop
         tap = nil
+        if dragTapReady { dragTapReady = false }
         mover?.stop()             // cancels queued AX work and drops snap records
         mover = nil
         overlay.close()           // orders out, closes and releases every panel
@@ -167,6 +174,9 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
 
     private func ensureTap() {
         guard isRunning, let tap else { return }
+        defer {
+            if dragTapReady != tap.isInstalled { dragTapReady = tap.isInstalled }
+        }
         let trusted = AXIsProcessTrusted()
         if tap.isInstalled && !trusted {
             // Accessibility was revoked: drop the tap rather than keep an active tap the system may stop serving.
@@ -513,10 +523,30 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider {
     func setLayout(_ layout: UUID?, forDisplay key: String) {
         guard isRunning, let store else { return }
         do {
-            try store.setActiveLayout(layout, forDisplay: key)
+            guard try store.setActiveLayout(layout, forDisplay: key) else {
+                NotificationCenter.default.post(name: Self.didChange, object: nil)
+                return
+            }
+            if layoutSaveFailed { layoutSaveFailed = false }
             log("zones: display layout set to \(layout.map { id in store.state.layouts.first { $0.id == id }?.name ?? "?" } ?? "off")")
         } catch {
+            if !layoutSaveFailed { layoutSaveFailed = true }
             log("zones: could not save the layout choice: \(error)")
+        }
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
+    }
+
+    func reopenLayoutStore() {
+        guard isRunning else { return }
+        do {
+            let reopened = try ZonesStore(templateName: Self.templateName)
+            if let error = reopened.recoveryError { throw error }
+            endSession()
+            store = reopened
+            layoutSaveFailed = false
+        } catch {
+            layoutSaveFailed = true
+            log("zones: could not reopen zones.json: \(error)")
         }
         NotificationCenter.default.post(name: Self.didChange, object: nil)
     }

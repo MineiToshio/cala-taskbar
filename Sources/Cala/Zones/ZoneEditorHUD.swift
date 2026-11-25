@@ -83,6 +83,7 @@ struct ZoneEditorHUD: View {
             .frame(width: 240)   // fixed, so nothing beside it shifts as the name changes
             .focused($nameFocused)
             .onSubmit {
+                session.confirmLayoutName()
                 nameFocused = false
                 session.focusCanvas()
             }

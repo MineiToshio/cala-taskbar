@@ -227,7 +227,7 @@ final class ZoneStripView: NSView {
         style.lineBreakMode = .byTruncatingTail
         let text = NSMutableAttributedString(string: name, attributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor, .paragraphStyle: style])
-        text.append(NSAttributedString(string: "  ·  " + tx("Change layout", "Cambiar layout"), attributes: [
+        text.append(NSAttributedString(string: "  ·  " + tx("Change layout", "Cambiar distribución"), attributes: [
             .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: style]))
         return text
     }
