@@ -766,6 +766,68 @@ do {
                && !ZoneWindowFit.matches(CGRect(x: 720, y: 25, width: 700, height: 875), zoneAX))
 }
 
+// MARK: Drag candidates
+
+do {
+    let frame = CGRect(x: 100, y: 100, width: 880, height: 640)
+    let press = CGPoint(x: 140, y: 110)
+    let point = CGPoint(x: 165, y: 130)
+    let settings = ZoneDragCandidate.Window(key: .init(pid: getpid(), windowID: 10), frame: frame)
+    let candidate = ZoneDragCandidate(original: settings, initialIDs: [10], point: press)
+    var machine = ZoneDragMachine()
+    let generation = machine.leftDown(at: press, shift: false, command: false)!
+    let check = machine.leftDragged(to: point, shift: false, command: false)
+    expect("Cala Settings: a stationary window leaves the right click alone",
+           check && !candidate.originalMoved(to: frame) && !machine.rightDown())
+    expect("Cala Settings: its own window confirms on the same CG movement as an external window",
+           candidate.originalMoved(to: frame.offsetBy(dx: 25, dy: 20)) && machine.confirmDrag(generation: generation))
+    expect("Cala Settings: right-click activates zones and the release requests a snap",
+           machine.rightDown() && machine.rightUp()
+               && machine.leftUp(at: point, shift: false, command: false)?.zonesMode == true)
+}
+
+do {
+    let browserPID: pid_t = 99
+    let original = ZoneDragCandidate.Window(key: .init(pid: browserPID, windowID: 10),
+                                            frame: CGRect(x: 100, y: 100, width: 900, height: 700))
+    let press = CGPoint(x: 160, y: 112)
+    let first = CGPoint(x: 200, y: 160)
+    let second = CGPoint(x: 240, y: 190)
+    let frame = CGRect(x: 170, y: 150, width: 800, height: 600)
+    func window(_ id: CGWindowID, _ frame: CGRect, pid: pid_t = browserPID) -> ZoneDragCandidate.Window {
+        ZoneDragCandidate.Window(key: .init(pid: pid, windowID: id), frame: frame)
+    }
+
+    var machine = ZoneDragMachine()
+    let generation = machine.leftDown(at: press, shift: false, command: false)!
+    var candidate = ZoneDragCandidate(original: original, initialIDs: [10, 11], point: press)
+    let check = machine.leftDragged(to: first, shift: false, command: false)
+    let visible = [original, window(11, frame), window(12, frame, pid: 80), window(13, frame),
+                   window(14, frame), window(15, frame), window(16, frame)]
+    expect("Tab detach: the original stays put and a new ID alone does not confirm a drag",
+           check && !candidate.originalMoved(to: original.frame)
+               && candidate.shouldRecheck(at: first, time: 10)
+               && candidate.recheck(windows: visible, at: first, time: 10) == nil && !machine.rightDown())
+
+    expect("Tab detach: fallback scans are rate limited and require cursor motion",
+           !candidate.shouldRecheck(at: second, time: 10.01)
+               && !candidate.shouldRecheck(at: first, time: 10.05)
+               && candidate.shouldRecheck(at: second, time: 10.05))
+    let moved = frame.offsetBy(dx: 40, dy: 30)
+    let resized = CGRect(x: moved.minX, y: moved.minY, width: moved.width + 50, height: moved.height)
+    let next = [original, window(11, moved), window(12, moved, pid: 80), window(13, frame),
+                window(14, resized), window(15, frame.offsetBy(dx: -40, dy: 30)), window(16, moved)]
+    _ = machine.leftDragged(to: second, shift: false, command: false)
+    let adopted = candidate.recheck(windows: next, at: second, time: 10.05)
+    expect("Tab detach: only a new, same-process window tracking the cursor at a stable size is adopted",
+           adopted?.key == window(16, moved).key && adopted?.frame == moved)
+    expect("Tab detach: adoption confirms the same press and the right-click snap survives to release",
+           adopted != nil && machine.confirmDrag(generation: generation)
+               && machine.rightDown() && machine.rightUp()
+               && machine.leftUp(at: second, shift: false, command: false)
+                   == ZoneDragMachine.Release(generation: generation, point: second, zonesMode: true, command: false))
+}
+
 // MARK: Layout strip
 
 do {

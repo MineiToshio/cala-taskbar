@@ -1,6 +1,6 @@
 # Zones
 
-Zones is one of Cala's four modules (see [architecture.md](architecture.md#modules)). While you drag a window of another app, you bring up a set of rectangles ("zones") on that monitor and drop the window into one: the window takes that zone's position and size. Zones works with or without the bar; someone who only wants zones turns the Bar off and Cala lives in the menu bar.
+Zones is one of Cala's four modules. While you drag a window, bring up the zones on that monitor and drop the window into one to give it the zone's position and size. Zones works with or without the bar. [Module architecture](architecture.md#modules)
 
 Contents: [Using it](#using-it) · [Overlap and several zones](#overlap-and-several-zones) · [What gets moved](#what-gets-moved) · [Layouts](#layouts) · [Coordinates and the usable area](#coordinates-and-the-usable-area) · [Storage](#storage-zonesjson) · [Monitors](#monitors) · [Editor](#editor) · [Settings keys](#settings-keys) · [Permissions](#permissions) · [Threads and cost](#threads-and-cost) · [Drag-gesture prototype](#drag-gesture-prototype-and-the-right-click-verification) · [Known limitations](#known-limitations) · [Manual test checklist](#manual-test-checklist-for-the-owner)
 
@@ -23,7 +23,9 @@ Contents: [Using it](#using-it) · [Overlap and several zones](#overlap-and-seve
 
 **Switching the layout while dragging (layout strip).** In zones mode, a pill appears at the top centre of the monitor under the pointer, just below the menu bar, above the zones. It always looks the same and says what it is: the current layout's small picture, its name, **Change layout** (*Cambiar distribución*) and a down chevron, for example `▦ Dev · Change layout ⌄` (12 pt, themed; "Off" with a no-entry sign on a monitor without zones). Nothing about it changes over time or with use. Move the pointer onto the pill and it opens into a row of that monitor's layouts, each pictured at the monitor's shape with its name, the current one ringed in the accent colour (the same list as the **Change layout…** picker in Settings → Zones, without Off; up to nine are shown, smaller on a narrow screen, centred on the current one when there are more). Rest the pointer on another layout for about 0.35 s (a small ring fills up) and it becomes that monitor's layout: it is saved like a choice in Settings, the zones crossfade to the new ones, its name shows briefly under the strip, and zones mode stays on, so you go on and drop the window into one of the new zones. Moving between pictures takes 0.1 s to count (no flicker on their edges), the current layout never fires, and a picture fires only once until the pointer leaves it. Leaving the strip or releasing the button cancels the wait. While the pointer is inside the open strip no zone is highlighted and a release there snaps nothing (the window stays). The closed pill never blocks the zones under it (picking goes on there as if it were not drawn); only the pill itself, not its surroundings, opens the strip. Everything runs on the main thread from the pointer position the drag already sends; the strip is a click-through panel that never takes the mouse. Turn it off with **Show layouts while dragging** in Settings → Zones (`zonesLayoutStrip`).
 
-**The right-click is swallowed only during a confirmed window drag.** A drag is confirmed when, at mouse-down, the topmost window under the pointer is a normal window of another app (not Cala's own, not the menu bar, Dock or a panel), and it then moves at least 3 pt while its size stays the same (this check uses only the window list, so it is confirmed at once; the Accessibility details follow right after). Resizing from an edge, selecting text, dragging a slider or drag-and-drop inside an app are therefore never window drags, and a right-click there reaches the app as usual (context menus keep working). The matching right-button-up is swallowed too, so the app never sees an orphan "up". The reverse also holds: a right-button-down that is *not* swallowed clears any pending swallow, so an "up" lost upstream (a remapper, a dropped Bluetooth link) can never eat a later, ordinary right-click.
+**Right-click is swallowed only during a confirmed window drag.** At mouse-down, Cala finds the topmost normal window under the pointer, including its own Settings window. The window list confirms a drag when that window moves at least 3 pt at a stable size. Resizing, selecting text and dragging a slider leave right-clicks with the app. A swallowed right-button-down also consumes its matching up. An ordinary right-button-down clears any pending swallow from an earlier click.
+
+When a Chrome tab detaches, its source window can stay in place while a new window follows the pointer. If the original window has yet to move, Zones can recheck the on-screen window list on pointer movement, at most once every 40 ms. Two observations must show the same new window from the original process moving with the pointer at a stable size. On drop, Zones looks up that window's exact ID via Accessibility, after Chrome finishes detaching the tab.
 
 **Dragging a snapped window out restores its size.** Cala remembers each window's size from before its first snap (in memory only, up to 200 windows, forgotten when Cala or the module stops). When you drag a window that is still exactly where it was snapped (within 2 pt), it gets its original size back at once, keeping the grab point under the pointer horizontally. If you had resized it by hand since, nothing is restored. If the app refuses a size change in the middle of the drag, Cala retries on mouse-up.
 
@@ -39,18 +41,18 @@ Zones may overlap (a small "picture-in-picture" zone over a big one is fine).
 
 ## What gets moved
 
-Cala moves a window through the Accessibility API (`AXPosition` and `AXSize`); it never injects clicks or drags.
+Cala moves other apps' windows through Accessibility (`AXPosition` and `AXSize`). It moves its own normal windows, including Settings, with AppKit's `NSWindow.setFrame` on the main thread. Both paths use the same zones and drag-out size memory.
 
 Ignored (the window is never offered zones). Cala decides this a few milliseconds after the drag starts, because a right-click must be swallowed from the first instant of a real window drag; once it has found the window cannot be placed it stops swallowing, so only a right-click in that very first moment is lost, and later right-clicks reach the app normally:
-- Cala's own windows, including the zones editor.
+- Cala's zone editor and utility panels.
 - Full-screen windows.
 - Sheets (`AXSheet`), system dialogs (`AXSystemDialog`) and windows with an unknown subrole. Ordinary app dialogs (`AXDialog`) are movable.
 - Windows whose position cannot be set.
 - Windows of macOS UI processes: Dock, SystemUIServer, Control Center, Notification Center, loginwindow, SecurityAgent, CoreServicesUIAgent, Spotlight, WindowManager (Stage Manager) and the screenshot UI. Normal system apps (Finder, Safari, Notes...) work like any other app.
-- Windows with no Accessibility entry (an app that exposes no `AXWindows`). The log says why: `zones: ignoring drag ...`.
+- External windows with no Accessibility entry. The log reports `zones: ignoring drag ...`.
 
 How the window is placed:
-- **Resizable:** size, then position, then size again (some apps clamp the size to the monitor the window was on before the move), then read back.
+- **Resizable:** for external windows, set size, position and size again, then read back. Some apps clamp the first resize to the current monitor. For Cala windows, constrain the size to the window's limits and set the frame in one call.
 - **Bigger than the zone** (the app has a minimum size): the window keeps its size, starts at the zone's top-left corner and is kept inside the usable area.
 - **Smaller or rounded** (terminals snap to character cells): the size is accepted and the zone's corner kept.
 - **Not resizable** (position only): centred in the zone, kept inside the usable area.
@@ -212,8 +214,8 @@ An active event tap sits in the path of **every** mouse click on the Mac, so the
 | Thread | Owns | Rules |
 |---|---|---|
 | Tap thread (`Cala.zones.tap`, own run loop) | The `CGEventTap` and its callback | O(1): updates a small state machine under an unfair lock and hands off with `async`. No Accessibility, no `CGWindowList`, no logging or file I/O. A stall in Cala's UI can never delay system mouse input |
-| Worker (`Cala.zones.worker`, serial queue) | Every `CGWindowList` and Accessibility call: finding the window under the press, confirming it moves, resolving its AX element, snapping, restoring | Per-element Accessibility timeout 0.25 s; stale results are dropped by a press generation counter |
-| Main | Overlay panels, the store, the editor, the status menu, session start and end | Receives the pointer position as one coalesced update, not one per event |
+| Worker (`Cala.zones.worker`, serial queue) | Window-list probes, candidate selection, Accessibility calls and snap records | Coalesced move checks. Full rechecks are rate limited and driven by pointer movement. The Accessibility messaging timeout is 0.25 s. Press generations discard stale results |
+| Main | Overlay panels, the store, the editor, the status menu, session start and end, AppKit window placement | Coalesced overlay updates can run during AppKit's event-tracking loop |
 
 If macOS disables the tap (timeout or user input) it is re-enabled at once, the current gesture is cancelled and the overlay is hidden (also when the periodic check, not the callback, finds the tap disabled), so a missed mouse-up cannot leave zones mode or a click-through overlay stuck; the mouse-up of an already confirmed drag is still reported, so a drag-out size restore finishes; the periodic check also rebuilds a dead tap. When the module stops, the tap is disabled and invalidated, its thread ends, the worker's queued work is cancelled, snap records are dropped and every overlay panel is closed and released.
 
@@ -271,6 +273,8 @@ Do this from the **console** session (a background Fast User Switching session r
 - [ ] Drag a Finder or TextEdit window by its title bar, right-click mid-drag: the zones appear, **no context menu**, and the window **keeps following the pointer**.
 - [ ] Right-click again: zones hide, window still follows. Right-click once more and release over a zone: the window snaps.
 - [ ] Same with a Chrome or other Electron window dragged by its tab strip.
+- [ ] Drag Cala's Settings by its title bar, right-click and drop it into a zone. Drag it out again to check size restore.
+- [ ] In Chrome, pull one tab out of a window with multiple tabs. Once the detached window follows the pointer, right-click and drop it into a zone. The detached window snaps and the source window stays in place.
 - [ ] Release the button while zones are showing, over empty space: the window stays, and the next click behaves normally (the left-up was not lost).
 - If any of these ever fail: set *Activate zones with* to **Hold Shift** and report it.
 - Optional isolated probe, with the same checks and its own log: see [scripts/prototypes/drag-tap/README.md](../scripts/prototypes/drag-tap/README.md).

@@ -1,7 +1,7 @@
 import AppKit
 import Combine
 
-/// Zones: drag another app's window, right-click (or hold Shift) to show the zones, release over one to snap.
+/// Zones: drag a window, right-click (or hold Shift) to show the zones, release over one to snap.
 /// Main-thread owner of the store, the drag tap, the worker and the overlay. Nothing exists while stopped.
 final class ZonesModule: CalaModule, ZonesStatusMenuProvider, ObservableObject {
     let id = ModuleID.zones
@@ -108,7 +108,7 @@ final class ZonesModule: CalaModule, ZonesStatusMenuProvider, ObservableObject {
         let tap = ZoneDragTap(
             onPress: { [weak mover] gen, point in mover?.press(generation: gen, at: point) },
             onMoveCheck: { [weak mover] gen in mover?.checkMove(generation: gen) },
-            onSync: { [weak self] in DispatchQueue.main.async { self?.sync(run) } },
+            onSync: { [weak self] in ZoneDragTap.performOnMainDuringDrag { self?.sync(run) } },
             onRelease: { [weak self] release in DispatchQueue.main.async { self?.release(release, run: run) } },
             onDisabled: { [weak self] type in DispatchQueue.main.async { self?.tapDisabled(type, run: run) } })
         mover.attach(tap)

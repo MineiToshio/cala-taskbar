@@ -2,17 +2,9 @@ import AppKit
 import ApplicationServices
 
 /// The zones worker: every CGWindowList and AX call of the drag pipeline runs here, on one serial queue,
-/// never on the tap thread and never on main. All stored state is only touched on `queue`.
+/// never on the tap thread and never on main. AppKit window operations run on main; drag state lives on `queue`.
 /// Frames are AX/CG global coordinates (top-left origin of the primary screen, y down).
 final class ZoneWindowMover: @unchecked Sendable {
-    private struct Candidate {
-        var generation: UInt64
-        var windowID: CGWindowID
-        var pid: pid_t
-        var start: CGRect
-        var decided = false   // confirmed or rejected: checked once per press
-    }
-
     private struct Drag {
         var key: ZoneRestore.WindowKey
         var window: AXUIElement
@@ -21,6 +13,18 @@ final class ZoneWindowMover: @unchecked Sendable {
         /// The frame to restore later: the frame at drag start, or the restored size when it was dragged out of a zone.
         var original: CGRect
         var restoredSize: CGSize?
+    }
+
+    private struct AppKitDrag {
+        var key: ZoneRestore.WindowKey
+        var original: CGRect
+        var restoredSize: CGSize?
+    }
+
+    private enum Target {
+        case accessibility(Drag)
+        case appKit(AppKitDrag)
+        case detached(ZoneDragCandidate.Window)
     }
 
     /// Apps whose windows are never zones targets (system UI, Stage Manager, security prompts).
@@ -34,8 +38,8 @@ final class ZoneWindowMover: @unchecked Sendable {
     private let cancellation = ModuleCancellation()
     private let ownPID = getpid()
     private weak var tap: ZoneDragTap?
-    private var candidate: Candidate?
-    private var drags: [UInt64: Drag] = [:]
+    private var candidate: (generation: UInt64, probe: ZoneDragCandidate)?
+    private var drags: [UInt64: Target] = [:]
     private var records = ZoneRestore.Records()
 
     func attach(_ tap: ZoneDragTap) { self.tap = tap }
@@ -56,8 +60,13 @@ final class ZoneWindowMover: @unchecked Sendable {
         queue.async { [self] in
             guard !cancellation.isCancelled else { return }
             candidate = nil
-            guard let (id, pid, frame) = Self.windowUnder(point), pid != ownPID else { return }
-            candidate = Candidate(generation: generation, windowID: id, pid: pid, start: frame)
+            let windows = Self.onScreenWindows()
+            guard let window = Self.windowUnder(point, in: windows) else { return }
+            let ids = windows.compactMap { info -> CGWindowID? in
+                guard (info[kCGWindowOwnerPID as String] as? pid_t) == window.key.pid else { return nil }
+                return info[kCGWindowNumber as String] as? CGWindowID
+            }
+            candidate = (generation, ZoneDragCandidate(original: window, initialIDs: Set(ids), point: point))
         }
     }
 
@@ -65,58 +74,118 @@ final class ZoneWindowMover: @unchecked Sendable {
         queue.async { [self] in
             guard !cancellation.isCancelled, let tap else { return }
             let (current, point) = tap.beginMoveCheck(generation: generation)
-            guard current, var c = candidate, c.generation == generation, !c.decided,
-                  let now = Self.bounds(of: c.windowID), ZoneWindowFit.isMove(from: c.start, to: now) else { return }
+            guard current, var c = candidate, c.generation == generation else { return }
+            let window = c.probe.original
+            let now = Self.bounds(of: window.key.windowID)
+            let detached: ZoneDragCandidate.Window?
+            if c.probe.originalMoved(to: now) {
+                detached = nil
+            } else {
+                let time = ProcessInfo.processInfo.systemUptime
+                guard window.key.pid != ownPID, c.probe.shouldRecheck(at: point, time: time) else { return }
+                let windows = Self.onScreenWindows().compactMap { info -> ZoneDragCandidate.Window? in
+                    guard (info[kCGWindowOwnerPID as String] as? pid_t) == window.key.pid else { return nil }
+                    return Self.normalWindow(info)
+                }
+                detached = c.probe.recheck(windows: windows, at: point, time: time)
+                candidate = c
+                guard detached != nil, !Self.deniedBundles.contains(Self.bundleID(for: window.key.pid)) else { return }
+            }
             // Confirm on the CG move alone, before any AX call: until the tap knows about the drag, a
-            // right-click would reach the app (a context menu mid-drag). AX resolution follows right away.
-            c.decided = true
-            candidate = c
+            // right-click would reach the app (a context menu mid-drag).
+            candidate = nil
             guard tap.confirmDrag(generation: generation) else { return }
-            guard let drag = resolve(c, frame: now) else {
+            drags = drags.filter { $0.key + 8 > generation }
+            if let detached {
+                // Chromium can publish the AX window only after the tab has finished detaching.
+                drags[generation] = .detached(detached)
+                return
+            }
+            guard let now else { return }
+            if window.key.pid == ownPID {
+                let restored = records.restoreOnDrag(window.key, current: now, cursorX: point.x,
+                                                     initialFrameAX: window.frame)
+                drags[generation] = .appKit(AppKitDrag(key: window.key, original: restored ?? window.frame,
+                                                      restoredSize: restored?.size))
+                if let restored {
+                    ZoneDragTap.performOnMainDuringDrag { [self] in
+                        guard tap.isDragging(generation: generation),
+                              let (local, height) = appKitWindow(window.key.windowID) else { return }
+                        local.setFrame(ZoneGeometry.appKitRect(fromAX: restored, primaryHeight: height), display: true)
+                    }
+                }
+                return
+            }
+            guard let drag = resolve(window, frame: now) else {
                 // Not a window zones may place: end the gesture without a snap. A swallowed right down
                 // keeps its pending up swallowed (the machine only drops the drag).
                 tap.rejectDrag(generation: generation)
                 return
             }
-            drags = drags.filter { $0.key + 8 > generation }
-            drags[generation] = restoreIfSnapped(drag, start: c.start, now: now, cursorX: point.x)
+            drags[generation] = .accessibility(restoreIfSnapped(drag, start: window.frame, now: now, cursorX: point.x))
         }
     }
 
     /// After the mouse-up of a confirmed drag: snap into `target` (zones mode) or finish a restore.
     func finish(generation: UInt64, cursorX: CGFloat, target: CGRect?, usable: CGRect?) {
         queue.async { [self] in
-            guard !cancellation.isCancelled, let drag = drags.removeValue(forKey: generation) else { return }
+            guard !cancellation.isCancelled, let moving = drags.removeValue(forKey: generation) else { return }
             if let target, let usable {
                 // Let the app and the window server finish their own drag first.
                 queue.asyncAfter(deadline: .now() + 0.04) { [self] in
                     guard !cancellation.isCancelled else { return }
-                    snap(drag, into: target, usable: usable)
+                    switch moving {
+                    case .accessibility(let drag):
+                        snap(drag, into: target, usable: usable)
+                    case .appKit(let drag):
+                        DispatchQueue.main.async { [self] in snapAppKit(drag, into: target, usable: usable) }
+                    case .detached(let window):
+                        // Match only the adopted ID. The source browser window can still overlap its frame.
+                        if let drag = resolve(window, frame: nil) { snap(drag, into: target, usable: usable) }
+                    }
                 }
-            } else if let size = drag.restoredSize {
-                finishRestore(drag, size: size, cursorX: cursorX)
+            } else {
+                switch moving {
+                case .accessibility(let drag):
+                    if let size = drag.restoredSize { finishRestore(drag, size: size, cursorX: cursorX) }
+                case .appKit(let drag):
+                    if let size = drag.restoredSize {
+                        DispatchQueue.main.async { [self] in finishAppKitRestore(drag, size: size, cursorX: cursorX) }
+                    }
+                case .detached:
+                    break
+                }
             }
         }
     }
 
     // MARK: Window lookup (worker)
 
-    /// Topmost on-screen window under `p`, if it is a normal (layer 0) window. Menus, the Dock, Cala's bar and
-    /// panels are higher layers: a press on them is never a window drag.
-    private static func windowUnder(_ p: CGPoint) -> (CGWindowID, pid_t, CGRect)? {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-                as? [[String: Any]] else { return nil }
-        for info in list {
-            guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
-                  let frame = CGRect(dictionaryRepresentation: bounds), frame.contains(p) else { continue }
-            // Fully transparent windows (invisible overlays some apps keep on screen) never receive the click.
-            if let alpha = info[kCGWindowAlpha as String] as? Double, alpha == 0 { continue }
-            guard (info[kCGWindowLayer as String] as? Int) == 0,
-                  let id = info[kCGWindowNumber as String] as? CGWindowID,
-                  let pid = info[kCGWindowOwnerPID as String] as? pid_t else { return nil }
-            return (id, pid, frame)
+    private static func onScreenWindows() -> [[String: Any]] {
+        CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+    }
+
+    /// A higher-layer surface (menu, Dock or panel) above a normal window blocks the press.
+    private static func windowUnder(_ p: CGPoint, in windows: [[String: Any]]) -> ZoneDragCandidate.Window? {
+        for info in windows {
+            guard let frame = visibleFrame(info), frame.contains(p) else { continue }
+            return normalWindow(info)
         }
         return nil
+    }
+
+    private static func normalWindow(_ info: [String: Any]) -> ZoneDragCandidate.Window? {
+        guard (info[kCGWindowLayer as String] as? Int) == 0, let frame = visibleFrame(info),
+              let id = info[kCGWindowNumber as String] as? CGWindowID,
+              let pid = info[kCGWindowOwnerPID as String] as? pid_t else { return nil }
+        return ZoneDragCandidate.Window(key: .init(pid: pid, windowID: id), frame: frame)
+    }
+
+    private static func visibleFrame(_ info: [String: Any]) -> CGRect? {
+        if let alpha = info[kCGWindowAlpha as String] as? Double, alpha == 0 { return nil }
+        guard let bounds = info[kCGWindowBounds as String] as? NSDictionary else { return nil }
+        return CGRect(dictionaryRepresentation: bounds)
     }
 
     private static func bounds(of id: CGWindowID) -> CGRect? {
@@ -126,26 +195,27 @@ final class ZoneWindowMover: @unchecked Sendable {
     }
 
     /// The AX window behind a moving CG window, if zones may place it.
-    private func resolve(_ c: Candidate, frame: CGRect) -> Drag? {
-        let bundle = NSRunningApplication(processIdentifier: c.pid)?.bundleIdentifier ?? ""
+    private func resolve(_ candidate: ZoneDragCandidate.Window, frame: CGRect?) -> Drag? {
+        let key = candidate.key
+        let bundle = Self.bundleID(for: key.pid)
         if Self.deniedBundles.contains(bundle) { return nil }
-        let app = AXUIElementCreateApplication(c.pid)
+        let app = AXUIElementCreateApplication(key.pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
         guard let windows = WindowService.attr(app, kAXWindowsAttribute) as? [AXUIElement] else {
-            log("zones: ignoring drag, no AX windows for \(bundle.isEmpty ? "pid \(c.pid)" : bundle)")
+            log("zones: ignoring drag, no AX windows for \(bundle.isEmpty ? "pid \(key.pid)" : bundle)")
             return nil
         }
         var match = windows.first { element in
             var id: CGWindowID = 0
-            return _AXUIElementGetWindow(element, &id) == .success && id == c.windowID
+            return _AXUIElementGetWindow(element, &id) == .success && id == key.windowID
         }
-        if match == nil {
+        if match == nil, let frame {
             // Fallback: the window whose AX frame is closest to the CG frame (it is moving, so allow some slack).
             let scored = windows.compactMap { w in WindowService.frame(w).map { (w, hypot($0.minX - frame.minX, $0.minY - frame.minY)) } }
             match = scored.filter { $0.1 < 40 }.min { $0.1 < $1.1 }?.0
         }
         guard let window = match else {
-            log("zones: ignoring drag, window \(c.windowID) of \(bundle) not found via AX")
+            log("zones: ignoring drag, window \(key.windowID) of \(bundle) not found via AX")
             return nil
         }
         let role = WindowService.attr(window, kAXRoleAttribute) as? String
@@ -162,8 +232,52 @@ final class ZoneWindowMover: @unchecked Sendable {
             return nil
         }
         let resizable = Self.settable(window, kAXSizeAttribute)
-        let key = ZoneRestore.WindowKey(pid: c.pid, windowID: c.windowID)
-        return Drag(key: key, window: window, app: app, resizable: resizable, original: c.start, restoredSize: nil)
+        return Drag(key: key, window: window, app: app, resizable: resizable, original: candidate.frame, restoredSize: nil)
+    }
+
+    private static func bundleID(for pid: pid_t) -> String {
+        NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
+    }
+
+    // MARK: Cala windows (main)
+
+    private func appKitWindow(_ id: CGWindowID) -> (NSWindow, CGFloat)? {
+        guard !cancellation.isCancelled, !ZonesModule.editorOpen, let height = NSScreen.screens.first?.frame.height,
+              let window = NSApp.window(withWindowNumber: Int(id)), window.isVisible, window.level == .normal,
+              window.styleMask.contains(.titled), !window.styleMask.contains(.fullScreen), !(window is NSPanel),
+              window.isMovable, !window.ignoresMouseEvents, !window.isSheet, window.attachedSheet == nil else { return nil }
+        return (window, height)
+    }
+
+    private func snapAppKit(_ drag: AppKitDrag, into target: CGRect, usable: CGRect) {
+        guard let (window, height) = appKitWindow(drag.key.windowID) else { return }
+        let resizable = window.styleMask.contains(.resizable)
+        var size = window.frame.size
+        if resizable {
+            // setFrame can bypass the size limits normally enforced during a user resize.
+            let contentMin = window.frameRect(forContentRect: CGRect(origin: .zero, size: window.contentMinSize)).size
+            let contentMax = window.frameRect(forContentRect: CGRect(origin: .zero, size: window.contentMaxSize)).size
+            size = CGSize(width: max(window.minSize.width, contentMin.width,
+                                     min(target.width, window.maxSize.width, contentMax.width)),
+                          height: max(window.minSize.height, contentMin.height,
+                                      min(target.height, window.maxSize.height, contentMax.height)))
+        }
+        let placed = ZoneWindowFit.place(size: size, in: target, usable: usable, centered: !resizable)
+        window.setFrame(ZoneGeometry.appKitRect(fromAX: placed, primaryHeight: height), display: true)
+        let after = ZoneGeometry.axRect(fromAppKit: window.frame, primaryHeight: height)
+        queue.async { [self] in
+            guard !cancellation.isCancelled else { return }
+            records.recordSnap(drag.key, originalFrameAX: drag.original, snappedFrameAX: after)
+            log("zones: snapped pid=\(drag.key.pid) frame=\(Self.describe(after)) target=\(Self.describe(target)) via AppKit")
+        }
+    }
+
+    private func finishAppKitRestore(_ drag: AppKitDrag, size: CGSize, cursorX: CGFloat) {
+        guard let (window, height) = appKitWindow(drag.key.windowID),
+              abs(window.frame.width - size.width) > 2 || abs(window.frame.height - size.height) > 2 else { return }
+        let frame = ZoneGeometry.axRect(fromAppKit: window.frame, primaryHeight: height)
+        let restored = ZoneRestore.restoredFrame(current: frame, originalSize: size, cursorX: cursorX)
+        window.setFrame(ZoneGeometry.appKitRect(fromAX: restored, primaryHeight: height), display: true)
     }
 
     // MARK: Restore on drag out (worker)
