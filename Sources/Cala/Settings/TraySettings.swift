@@ -8,6 +8,9 @@ struct TrayPane: View {
     @Environment(\.settingsSnapshot) private var snapshot
     @State private var confirmReset = false
 
+    private let headingHeight: CGFloat = 36
+    private let handleWidth: CGFloat = 42
+
     var body: some View {
         let groups = itemGroups
         VStack(alignment: .leading, spacing: 22) {
@@ -15,12 +18,7 @@ struct TrayPane: View {
             Text(tx("Drag the handle to reorder items or move them between groups.",
                     "Arrastra desde el asa para ordenar los elementos o moverlos entre grupos."))
                 .font(.system(size: 11.5)).foregroundStyle(.secondary)
-            Card {
-                ForEach(groups) { group in
-                    groupRows(group)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            itemList(groups)
             Button(tx("Reset order and placement…", "Restablecer orden y ubicación…")) { confirmReset = true }
                 .alert(tx("Reset tray order and placement?", "¿Restablecer orden y ubicación de la Bandeja?"), isPresented: $confirmReset) {
                     Button(tx("Reset", "Restablecer"), role: .destructive) {
@@ -47,39 +45,61 @@ struct TrayPane: View {
         }
     }
 
-    @ViewBuilder private func groupRows(_ group: TrayItemGroup) -> some View {
-        HStack(spacing: 8) {
-            Text(placementHeading(group.place)).font(.system(size: 13, weight: .semibold))
-            Text(group.items.count.formatted()).font(.system(size: 12).monospacedDigit())
-                .foregroundStyle(.secondary)
+    private func itemList(_ groups: [TrayItemGroup]) -> some View {
+        let rows = groups.flatMap(\.rows)
+        let height = rows.reduce(CGFloat.zero) { height, row in
+            if case .heading = row { return height + headingHeight }
+            return height + SettingsDetailRowLayout.height
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, 24)
-        .frame(height: 36)
-        .overlay(alignment: .top) {
-            if group.place != .bar { RowDivider().allowsHitTesting(false) }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
-        .modifier(TrayDropTarget(place: group.place, index: 0, surface: .header, move: move))
 
-        if group.items.isEmpty {
-            Text(tx("Drop items here", "Suelta elementos aquí"))
-                .font(.system(size: 11.5)).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 24)
-                .frame(height: SettingsDetailRowLayout.height)
-                .modifier(TrayDropTarget(place: group.place, index: 0, surface: .empty, move: move))
-        }
-        ForEach(Array(group.items.enumerated()), id: \.element) { index, id in
-            if let info = TrayItems.info(id) {
-                itemRow(info, group: group, index: index)
-                    .overlay(alignment: .top) {
-                        RowDivider().padding(.leading, index == 0 ? 8 : 74).allowsHitTesting(false)
+        // Keep all rows in one native move source so AppKit supplies the preview and insertion line.
+        return List {
+            ForEach(rows, id: \.self) { row in
+                Group {
+                    switch row {
+                    case let .heading(place):
+                        groupHeading(place, count: groups.first { $0.place == place }?.items.count ?? 0)
+                    case .empty:
+                        Text(tx("Drop items here", "Suelta elementos aquí"))
+                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(height: SettingsDetailRowLayout.height)
+                    case let .item(id):
+                        if let info = TrayItems.info(id),
+                           let group = groups.first(where: { $0.place == store.config.place(id) }),
+                           let index = group.items.firstIndex(of: id) {
+                            itemRow(info, group: group, index: index)
+                        }
                     }
-                    .modifier(TrayDropTarget(place: group.place, index: index, surface: .item, move: move))
+                }
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0,
+                                          trailing: SettingsDetailRowLayout.listTrailingInset))
+                .moveDisabled(row.itemID == nil)
+            }
+            .onMove { from, to in
+                guard from.count == 1, let source = from.first,
+                      let target = trayMoveTarget(in: rows, source: source, destination: to),
+                      let id = rows[source].itemID else { return }
+                move(id, to: target.place, at: target.index)
             }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden).scrollDisabled(true)
+        .frame(height: height + 12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func groupHeading(_ place: TrayPlace, count: Int) -> some View {
+        HStack(spacing: 8) {
+            Text(placementHeading(place)).font(.system(size: 13, weight: .semibold))
+            Text(count.formatted()).font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: headingHeight)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 
     private func itemRow(_ info: TrayItemInfo, group: TrayItemGroup, index: Int) -> some View {
@@ -88,31 +108,15 @@ struct TrayPane: View {
         let caption = itemCaption(id)
         let canMoveUp = index > 0
         let canMoveDown = index + 1 < group.items.count
-        return GeometryReader { geometry in
-            HStack(spacing: 0) {
-                dragHandle
-                    .contentShape(Rectangle())
-                    .help(tx("Drag to move", "Arrastrar para mover"))
-                    .onDrag { TrayItemDrag.provider(for: id) } preview: {
-                        HStack(spacing: 0) {
-                            dragHandle
-                            itemLabel(info, detail: detail, caption: caption)
-                        }
-                        .frame(width: geometry.size.width, height: SettingsDetailRowLayout.height)
-                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                        .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 8))
-                    }
-                    .accessibilityHidden(true)
-
-                if let detail {
-                    SettingsDetailLink(detail: detail, open: open) {
-                        itemLabel(info, detail: detail, caption: caption)
-                    }
-                    .buttonStyle(TrayDetailButtonStyle())
-                } else {
-                    itemLabel(info, detail: nil, caption: caption)
-                        .focusable()
+        return HStack(spacing: 0) {
+            dragHandle
+            if let detail {
+                TrayDetailTapTarget(detail: detail, handleWidth: handleWidth, open: { open(detail) }) {
+                    itemLabel(info, detail: detail, caption: caption)
                 }
+            } else {
+                itemLabel(info, detail: nil, caption: caption)
+                    .focusable()
             }
         }
         .frame(height: SettingsDetailRowLayout.height)
@@ -140,7 +144,9 @@ struct TrayPane: View {
     private var dragHandle: some View {
         Image(systemName: "line.3.horizontal").font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
-            .frame(width: TrayDetailButtonStyle.handleWidth, height: SettingsDetailRowLayout.height)
+            .frame(width: handleWidth, height: SettingsDetailRowLayout.height)
+            .help(tx("Drag to move", "Arrastrar para mover"))
+            .accessibilityHidden(true)
     }
 
     private func itemLabel(_ info: TrayItemInfo, detail: SettingsDetail?, caption: String?) -> some View {
@@ -154,7 +160,6 @@ struct TrayPane: View {
             Spacer(minLength: 4)
             if detail != nil { SettingsDetailChevron() }
         }
-        .padding(.trailing, SettingsDetailRowLayout.trailingInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
@@ -222,102 +227,37 @@ struct TrayPane: View {
     }
 }
 
-private struct TrayDetailButtonStyle: ButtonStyle {
-    static let handleWidth: CGFloat = 58
+private struct TrayDetailTapTarget<Label: View>: View {
+    let detail: SettingsDetail
+    let handleWidth: CGFloat
+    let open: () -> Void
+    @ViewBuilder var label: Label
+    @Environment(\.settingsDetailFocus) private var focus
+    @State private var hovered = false
 
-    func makeBody(configuration: Configuration) -> some View {
-        HighlightedLabel(label: configuration.label, pressed: configuration.isPressed)
+    var body: some View {
+        if let focus { target.focused(focus, equals: detail) }
+        else { target }
     }
 
-    private struct HighlightedLabel: View {
-        let label: Configuration.Label
-        let pressed: Bool
-        @State private var hovered = false
-
-        var body: some View {
-            label
-                .foregroundStyle(Color.primary)
-                .onHover { hovered = $0 }
-                .background {
-                    Rectangle()
-                        .fill(Color.primary.opacity(pressed ? 0.12 : (hovered ? 0.06 : 0)))
-                        .padding(.leading, -TrayDetailButtonStyle.handleWidth)
-                        .allowsHitTesting(false)
-                }
-        }
-    }
-}
-
-private enum TrayItemDrag {
-    static let typeIdentifier = "local.cala.settings.tray-item"
-
-    static func provider(for id: String) -> NSItemProvider {
-        let provider = NSItemProvider()
-        provider.registerDataRepresentation(forTypeIdentifier: typeIdentifier, visibility: .ownProcess) { completion in
-            completion(Data(id.utf8), nil)
-            return nil
-        }
-        return provider
-    }
-}
-
-private struct TrayDropTarget: ViewModifier {
-    enum Surface { case header, item, empty }
-    let place: TrayPlace
-    let index: Int
-    let surface: Surface
-    let move: (String, TrayPlace, Int) -> Void
-    @State private var edge: VerticalEdge?
-
-    func body(content: Content) -> some View {
-        content
-            .contentShape(Rectangle())
-            .overlay(alignment: edge == .bottom ? .bottom : .top) {
-                if edge != nil {
-                    Rectangle().fill(Color.accentColor).frame(height: 2).padding(.horizontal, 12)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
+    private var target: some View {
+        let title = tx("Configure \(detail.title)", "Configurar \(detail.title)")
+        return label
+            .onHover { hovered = $0 }
+            .background {
+                Rectangle().fill(Color.primary.opacity(hovered ? 0.06 : 0))
+                    .padding(.leading, -handleWidth)
+                    .allowsHitTesting(false)
             }
-            .onDrop(of: [TrayItemDrag.typeIdentifier], delegate: Delegate(place: place, index: index, surface: surface,
-                                                                         edge: $edge, move: move))
-    }
-
-    private struct Delegate: DropDelegate {
-        let place: TrayPlace
-        let index: Int
-        let surface: Surface
-        @Binding var edge: VerticalEdge?
-        let move: (String, TrayPlace, Int) -> Void
-
-        private func target(at info: DropInfo) -> (edge: VerticalEdge, index: Int) {
-            switch surface {
-            case .header: (.bottom, 0)
-            case .empty: (.top, 0)
-            case .item:
-                info.location.y < SettingsDetailRowLayout.height / 2 ? (.top, index) : (.bottom, index + 1)
-            }
-        }
-
-        func dropEntered(info: DropInfo) { edge = target(at: info).edge }
-
-        func dropUpdated(info: DropInfo) -> DropProposal? {
-            edge = target(at: info).edge
-            return DropProposal(operation: .move)
-        }
-
-        func dropExited(info: DropInfo) { edge = nil }
-
-        func performDrop(info: DropInfo) -> Bool {
-            edge = nil
-            guard let provider = info.itemProviders(for: [TrayItemDrag.typeIdentifier]).first else { return false }
-            let insertionIndex = target(at: info).index
-            provider.loadDataRepresentation(forTypeIdentifier: TrayItemDrag.typeIdentifier) { data, _ in
-                guard let data, let id = String(data: data, encoding: .utf8) else { return }
-                DispatchQueue.main.async { move(id, place, insertionIndex) }
-            }
-            return true
-        }
+            // Recognize a completed click alongside the List's drag, leaving the handle gesture-free.
+            .simultaneousGesture(TapGesture().onEnded { open() })
+            .focusable(interactions: .activate)
+            .onKeyPress(keys: [.return, .space]) { _ in open(); return .handled }
+            .help(title)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(title)
+            .accessibilityAction { open() }
     }
 }
 

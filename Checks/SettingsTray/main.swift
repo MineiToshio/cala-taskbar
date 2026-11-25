@@ -23,6 +23,33 @@ expect("Resetting known items preserves unknown placements and their saved order
 let groups = [TrayItemGroup(place: .bar, items: ["wifi", "volume", "disk"]),
               TrayItemGroup(place: .more, items: ["keyboard"]),
               TrayItemGroup(place: .hidden, items: [])]
+let rows = groups.flatMap(\.rows)
+guard rows == [.heading(.bar), .item("wifi"), .item("volume"), .item("disk"),
+               .heading(.more), .item("keyboard"), .heading(.hidden), .empty(.hidden)] else {
+    fatalError("FAIL native list rows include headers and a placeholder only for the empty group")
+}
+
+func expectTarget(_ name: String, source: Int, destination: Int, place: TrayPlace, index: Int) {
+    guard let target = trayMoveTarget(in: rows, source: source, destination: destination),
+          target.place == place, target.index == index else { fatalError("FAIL \(name): unexpected destination") }
+    print("PASS \(name)")
+}
+
+expectTarget("Native drop below a group header targets its first slot",
+             source: 1, destination: 5, place: .more, index: 0)
+expectTarget("Native drop above the first header targets the first slot in the bar",
+             source: 5, destination: 0, place: .bar, index: 0)
+expectTarget("Native drop below an empty group's header targets its first slot",
+             source: 2, destination: 7, place: .hidden, index: 0)
+expectTarget("Native drop below the empty placeholder targets the same slot",
+             source: 2, destination: 8, place: .hidden, index: 0)
+expectTarget("Native drop before the next header targets the end of the preceding group",
+             source: 5, destination: 4, place: .bar, index: 3)
+expectTarget("Native upward move uses the insertion gap ahead of the target item",
+             source: 3, destination: 1, place: .bar, index: 0)
+expectTarget("Native downward move reports the gap before removing the source",
+             source: 1, destination: 3, place: .bar, index: 2)
+
 let savedOrder = ["future-first", "wifi", "volume", "future-middle", "disk", "keyboard", "future-last"]
 let savedLayout = ["keyboard": "more", "future-first": "future-placement"]
 
