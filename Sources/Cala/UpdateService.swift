@@ -1,7 +1,6 @@
 import AppKit
 import Combine
 import IOKit.pwr_mgt
-import os
 
 enum UpdateState: Codable, Equatable {
     case idle, checking, upToDate(Date), available(String), skipped(String)
@@ -55,7 +54,7 @@ final class UpdateService: ObservableObject {
     @Published var state: UpdateState = .idle
     @Published var available: UpdateManifest?
     @Published var pendingRestart = false {
-        didSet { restartFlag.withLock { $0 = pendingRestart } }
+        didSet { MailKeychain.isRestartingForUpdate = pendingRestart }
     }
     @Published private(set) var installPath: InstallPath = .unsupported
     @Published private(set) var offer: UpdateManifest?
@@ -150,7 +149,6 @@ final class UpdateService: ObservableObject {
     private enum Activity { case checking, preparing, downloading, cancelling, installing }
     private static let key = "update.state"
     private let work = DispatchQueue(label: "Cala.update", qos: .utility)
-    private let restartFlag = OSAllocatedUnfairLock(initialState: false)
     private weak var store: ConfigStore?
     private var site: Site?
     private var saved = Saved()
@@ -177,9 +175,6 @@ final class UpdateService: ObservableObject {
         windowOpen || activity == .preparing || activity == .downloading || activity == .cancelling
             || activity == .installing || pendingRestart
     }
-
-    /// Mail's helper can finish on a worker thread.
-    var isRestartingForUpdate: Bool { restartFlag.withLock { $0 } }
 
     var canAutoInstall: Bool { installPath == .ready }
     var currentVersion: String { site?.running.version ?? Telemetry.appVersion() }

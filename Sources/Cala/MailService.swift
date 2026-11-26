@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import Security
+import os
 
 enum MailAccountStatus: Equatable {
     case connecting, connected, paused
@@ -921,6 +922,13 @@ final class MailService: ObservableObject {
 enum MailKeychain {
     private enum Exit: Int32 { case ok = 0, notFound = 1, denied = 2, refused = 77, unverified = 78 }
 
+    // UpdateService publishes this flag on main. The helper can finish on a Mail worker.
+    private static let updateRestart = OSAllocatedUnfairLock(initialState: false)
+    static var isRestartingForUpdate: Bool {
+        get { updateRestart.withLock { $0 } }
+        set { updateRestart.withLock { $0 = newValue } }
+    }
+
     static var helperURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cala-keychain") }
 
     /// The helper's cdhash: the Keychain prompts again only when this changes (see MailKeychainGate).
@@ -957,7 +965,7 @@ enum MailKeychain {
 
     private static func refusal(_ status: Int32) throws {
         if status == Exit.refused.rawValue {
-            throw UpdateService.shared.isRestartingForUpdate ? MailFailure.updateRestart : MailFailure.keychainRestart
+            throw isRestartingForUpdate ? MailFailure.updateRestart : MailFailure.keychainRestart
         }
         if status == Exit.unverified.rawValue { throw MailFailure.keychainUnverified }
     }
@@ -992,7 +1000,7 @@ enum MailKeychain {
         try? output.fileHandleForReading.close()
         try? errors.fileHandleForReading.close()
         let status = process.terminationStatus
-        let updateRestart = status == Exit.refused.rawValue && UpdateService.shared.isRestartingForUpdate
+        let updateRestart = status == Exit.refused.rawValue && isRestartingForUpdate
         if !updateRestart && (status > Exit.denied.rawValue || process.terminationReason != .exit) {
             let text = String(decoding: message.prefix(300), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             log("mail: Keychain helper \(command) failed (\(status)): \(text)")
