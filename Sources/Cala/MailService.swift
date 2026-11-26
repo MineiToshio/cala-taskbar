@@ -193,7 +193,7 @@ struct MailCredentialStore: @unchecked Sendable {
         do {
             value = try get(Self.ownAccount(id))
             own = value == nil ? .missing : .found
-        } catch let error as MailFailure where error == .keychainRestart || error == .keychainUnverified {
+        } catch let error as MailFailure where error == .keychainRestart || error == .updateRestart || error == .keychainUnverified {
             own = .refused
             failure = error
         } catch let error as MailFailure where error == .keychainDenied {
@@ -776,7 +776,9 @@ final class MailService: ObservableObject {
                     explainKeychainAgain(for: id)
                     return
                 }
-                log("mail: \(logName(id)) sync failed \(failure.logCode) retry=\(!failure.requiresUserAction)")
+                if failure != .updateRestart {
+                    log("mail: \(logName(id)) sync failed \(failure.logCode) retry=\(!failure.requiresUserAction)")
+                }
                 status[id] = failure.status
                 failOperations(in: run, with: failure, afterDisconnect: !failure.requiresUserAction)
                 publishInbox()
@@ -954,7 +956,9 @@ enum MailKeychain {
     }
 
     private static func refusal(_ status: Int32) throws {
-        if status == Exit.refused.rawValue { throw MailFailure.keychainRestart }
+        if status == Exit.refused.rawValue {
+            throw UpdateService.shared.isRestartingForUpdate ? MailFailure.updateRestart : MailFailure.keychainRestart
+        }
         if status == Exit.unverified.rawValue { throw MailFailure.keychainUnverified }
     }
 
@@ -988,7 +992,8 @@ enum MailKeychain {
         try? output.fileHandleForReading.close()
         try? errors.fileHandleForReading.close()
         let status = process.terminationStatus
-        if status > Exit.denied.rawValue || process.terminationReason != .exit {
+        let updateRestart = status == Exit.refused.rawValue && UpdateService.shared.isRestartingForUpdate
+        if !updateRestart && (status > Exit.denied.rawValue || process.terminationReason != .exit) {
             let text = String(decoding: message.prefix(300), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             log("mail: Keychain helper \(command) failed (\(status)): \(text)")
         }
@@ -999,7 +1004,7 @@ enum MailKeychain {
 enum MailFailure: LocalizedError {
     case invalidEmail, invalidAppPassword, authenticationFailed, appPasswordRequired, blocked, offline, timedOut
     /// The Keychain helper refused this process, typically because Cala.app was replaced while this copy kept running.
-    case keychainRestart
+    case keychainRestart, updateRestart
     /// The Keychain helper could not confirm who called it (an OS check failed; Developer ID builds only).
     case keychainUnverified
     /// The helper's own item vanished for an account already moved: explain the coming macOS windows, then read again.
@@ -1028,7 +1033,7 @@ enum MailFailure: LocalizedError {
 
     var requiresUserAction: Bool {
         switch self {
-        case .authenticationFailed, .appPasswordRequired, .blocked, .keychainDenied, .keychainRestart, .keychainUnverified: return true
+        case .authenticationFailed, .appPasswordRequired, .blocked, .keychainDenied, .keychainRestart, .updateRestart, .keychainUnverified: return true
         default: return false
         }
     }
@@ -1037,7 +1042,7 @@ enum MailFailure: LocalizedError {
         let message = localizedDescription
         switch self {
         case .authenticationFailed, .appPasswordRequired, .keychainDenied: return .authFailed(message)
-        case .blocked, .keychainRestart, .keychainUnverified: return .blocked(message)
+        case .blocked, .keychainRestart, .updateRestart, .keychainUnverified: return .blocked(message)
         default: return .offline(message)
         }
     }
@@ -1072,6 +1077,8 @@ enum MailFailure: LocalizedError {
         case .keychainDenied:
             return tx("macOS didn’t let Cala read the app password from the Keychain. Press Refresh and choose “Always Allow”.",
                       "macOS no dejó que Cala leyera la contraseña de aplicación del Llavero. Pulsa Actualizar y elige «Permitir siempre».")
+        case .updateRestart:
+            return tx("Restarting to finish the update", "Reiniciando para terminar la actualización")
         case .keychainRestart:
             return tx("Restart Cala to refresh its Keychain access.", "Reinicia Cala para actualizar el acceso al llavero.")
         case .keychainNeedsNotice:

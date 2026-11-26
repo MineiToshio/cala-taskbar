@@ -16,7 +16,7 @@ check("equivalent dotted build", UpdatePolicy.decide(running: "10", disk: "010.0
 check("invalid disk build", UpdatePolicy.decide(running: "10", disk: "11..2", blockers: []), .none)
 check("invalid running build", UpdatePolicy.decide(running: "+10", disk: "11", blockers: []), .none)
 check("missing or incomplete bundle", UpdatePolicy.decide(running: "10", disk: nil, blockers: []), .none)
-let blockers: [UpdatePolicy.Blocker] = [.inactiveSession, .drag, .zonesEditor, .settings, .onboarding, .modal]
+let blockers: [UpdatePolicy.Blocker] = [.inactiveSession, .drag, .zonesEditor, .settings, .onboarding, .modal, .updater]
 for blocker in blockers {
     check(blocker.rawValue, UpdatePolicy.decide(running: "10", disk: "11", blockers: [blocker]), .deferred(blocker))
 }

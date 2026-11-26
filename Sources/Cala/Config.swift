@@ -52,6 +52,8 @@ struct Config: Codable, Equatable {
     var crashReports = "ask"
     /// Open Cala again by itself if it crashes (see Watchdog).
     var relaunchOnCrash = true
+    var updateChecks = true
+    var updateAutoInstall = false
     /// Suggest restarting the Mac, with the reasons, in the system panel.
     var restartAdvice = true
     var hideMenuBar = false
@@ -105,7 +107,7 @@ struct Config: Codable, Equatable {
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, monitorBarMetric, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
         case dockOverridePending
-        case crashReports, relaunchOnCrash, restartAdvice, menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
+        case crashReports, relaunchOnCrash, updateChecks, updateAutoInstall, restartAdvice, menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
         case mailLoadsRemoteImages
@@ -156,6 +158,8 @@ extension Config {
         hideMenuBar = field(Bool.self, .hideMenuBar) ?? hideMenuBar
         crashReports = field(String.self, .crashReports) ?? crashReports
         relaunchOnCrash = field(Bool.self, .relaunchOnCrash) ?? relaunchOnCrash
+        updateChecks = field(Bool.self, .updateChecks) ?? updateChecks
+        updateAutoInstall = field(Bool.self, .updateAutoInstall) ?? updateAutoInstall
         restartAdvice = field(Bool.self, .restartAdvice) ?? restartAdvice
         if !["ask", "auto", "never"].contains(crashReports) { crashReports = "ask"; invalid = true }
         menuBarHiddenIcons = field([String].self, .menuBarHiddenIcons) ?? menuBarHiddenIcons

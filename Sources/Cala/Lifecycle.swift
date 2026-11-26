@@ -163,11 +163,11 @@ enum AppLocation {
 }
 
 enum Relaunch {
-    private static var pending: (app: URL, inBackground: Bool)?
+    private static var pending: (app: URL, inBackground: Bool, update: PendingUpdate?)?
 
-    static func open(_ app: URL = AppLocation.bundleURL, inBackground: Bool = false) {
+    static func open(_ app: URL = AppLocation.bundleURL, inBackground: Bool = false, update: PendingUpdate? = nil) {
         guard pending == nil else { return }
-        pending = (app, inBackground)
+        pending = (app, inBackground, update)
         defer { pending = nil }
         NSApp.terminate(nil)
     }
@@ -177,6 +177,14 @@ enum Relaunch {
         guard let request = pending else { return }
         pending = nil
         let p = Process()
+        if let update = request.update {
+            p.executableURL = update.helper
+            p.arguments = ["watch", "--pending", PendingUpdate.url.path, "--pid", String(getpid()), "--target", request.app.path]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch { log("update: could not start rollback helper: \(error)") }
+            return
+        }
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         let script = """
         for i in $(/usr/bin/seq 1 600); do
