@@ -635,7 +635,7 @@ struct UsagePane: View {
         if window.isResetting(now) { return tx("resetting…", "reiniciándose…") }
         let formatter = DateFormatter(); formatter.locale = Locale.current; formatter.timeZone = .current
         formatter.dateFormat = "EEE d, h:mm a"
-        let relative = UsagePace.formatted(reset.timeIntervalSince(now))
+        let relative = UsagePaceProjection.formatted(reset.timeIntervalSince(now))
         return tx("resets ", "se reinicia ") + formatter.string(from: reset) + tx(" · in ", " · en ") + relative
     }
     private func provider(_ state: UsageState, now: Date) -> some View {

@@ -2,28 +2,19 @@ import Foundation
 import Combine
 import UserNotifications
 
-struct PaceResult {
-    var text: String
-    /// The quota is projected to run out before it resets.
-    var warn: Bool
-    var secondsToEmpty: TimeInterval
-    var secondsToReset: TimeInterval
-}
-
 /// Burn-rate projection and quota alerts for the Claude / Codex usage windows.
 ///
-/// The rate comes from recent readings (last 30 min, kept in memory) and falls back to the average since the
-/// window started. No credentials are involved: it only looks at the usage percentages already published.
+/// The rate comes from recent readings and falls back to the average since the window started.
+/// No credentials are involved: it only looks at the usage percentages already published.
 final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     static let shared = UsagePace()
-    private var samples: [String: [(date: Date, used: Double)]] = [:]
+    private var history = UsagePaceHistory()
     private var bag = Set<AnyCancellable>()
     private var store: ConfigStore?
     private var run: ModuleCancellation?
     private var pendingAlerts = Set<String>()
     private let firedKey = "usageAlertsFired"
 
-    private func key(_ p: UsageProvider, _ w: UsageWindow) -> String { p.rawValue + "|" + w.id }
     private var canNotify: Bool { Bundle.main.bundleURL.pathExtension == "app" }
 
     func start(store: ConfigStore) {
@@ -50,67 +41,8 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         store = nil
     }
 
-    // MARK: Projection
-
-    static func duration(_ w: UsageWindow) -> TimeInterval? {
-        let minutes = w.durationMinutes ?? w.presentationOrder.1
-        return minutes.isFinite && minutes > 0 ? minutes * 60 : nil
-    }
-
-    /// Exact remaining time, never rounded up: "2 d 3 h 12 min", "4 h 47 min", "16 min", "42 s".
-    static func formatted(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds))      // truncated: a countdown never claims more time than there is
-        let d = total / 86400, h = (total % 86400) / 3600, m = (total % 3600) / 60
-        var parts: [String] = []
-        if d > 0 { parts.append("\(d) d") }
-        if h > 0 { parts.append("\(h) h") }
-        if m > 0 { parts.append("\(m) min") }
-        return parts.isEmpty ? "\(total) s" : parts.joined(separator: " ")
-    }
-
-    /// Always answers for a window that is counting (so the line never comes and goes): a projection, "no recent use",
-    /// or "measuring". The recent rate uses a lookback proportional to the window (30 min for the 5-hour session, ~8 h
-    /// for the weekly one), because the percentages are whole numbers and a weekly window moves too slowly to read a
-    /// rate from half an hour of data.
     func pace(_ provider: UsageProvider, _ window: UsageWindow, now: Date = Date()) -> PaceResult? {
-        guard let reset = window.resetsAt, reset > now, !window.isResetting(now) else { return nil }
-        let remaining = 100 - window.used
-        guard remaining > 0 else { return nil }
-        let untilReset = reset.timeIntervalSince(now)
-        let total = Self.duration(window)
-        func result(_ text: String, warn: Bool = false, toEmpty: TimeInterval = .infinity) -> PaceResult {
-            PaceResult(text: text, warn: warn, secondsToEmpty: toEmpty, secondsToReset: untilReset)
-        }
-
-        let lookback = max(1800, (total ?? 0) * 0.05)
-        let recent = (samples[key(provider, window)] ?? []).filter { now.timeIntervalSince($0.date) <= lookback }
-        var rate: Double?   // percentage points per second
-        if let first = recent.first, let last = recent.last {
-            let span = last.date.timeIntervalSince(first.date), delta = last.used - first.used
-            if span >= 300 {
-                if delta >= 2 || (delta > 0 && span >= lookback * 0.5) { rate = delta / span }
-                else if delta <= 0 && span >= lookback * 0.8 {
-                    return result(calendarText("No recent use", "Sin uso reciente"))
-                }
-            }
-        }
-        if rate == nil, let total {
-            let elapsed = total - untilReset
-            if window.used <= 0 { return result(calendarText("Not used yet", "Sin uso todavía")) }
-            if elapsed >= 600 { rate = window.used / elapsed }
-        }
-        guard let rate, rate > 0 else { return result(calendarText("Measuring pace…", "Midiendo el ritmo…")) }
-
-        let toEmpty = remaining / rate
-        if toEmpty < untilReset - 60 {
-            let text = calendarText("At this pace it runs out in \(Self.formatted(toEmpty)), before the reset",
-                                    "A este ritmo se agota en \(Self.formatted(toEmpty)), antes del reinicio")
-            return result(text, warn: true, toEmpty: toEmpty)
-        }
-        let left = max(0, Int((remaining - rate * untilReset).rounded()))
-        let text = calendarText("At this pace you reach the reset with ~\(left)% left",
-                                "A este ritmo llegas al reinicio con ~\(left)% disponible")
-        return result(text, toEmpty: toEmpty)
+        history.pace(provider, window, now: now)
     }
 
     // MARK: History and alerts
@@ -119,18 +51,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         let now = Date()
         for state in states where state.available {
             guard let reading = state.reading else { continue }
-            for w in reading.windows where w.used.isFinite {
-                let k = key(state.provider, w)
-                var list = samples[k] ?? []
-                if let last = list.last {
-                    if last.date == reading.date { continue }
-                    if w.used < last.used - 5 { list.removeAll() }     // the window reset
-                }
-                list.append((reading.date, w.used))
-                list = list.filter { now.timeIntervalSince($0.date) <= 43_200 }
-                if list.count > 600 { list.removeFirst(list.count - 600) }
-                samples[k] = list
-            }
+            history.ingest(reading, for: state.provider, now: now)
             if store?.config.usageAlertsEnabled == true { evaluate(state, now: now) }
         }
         saveHistory(now)
@@ -145,22 +66,13 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         guard let size = (try? historyURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size < 2_000_000,
               let data = try? Data(contentsOf: historyURL),
               let raw = try? JSONDecoder().decode([String: [[Double]]].self, from: data) else { return }
-        let now = Date()
-        for (k, rows) in raw {
-            let list = rows.compactMap { r -> (date: Date, used: Double)? in
-                guard r.count == 2, r[0].isFinite, r[1].isFinite else { return nil }
-                let d = Date(timeIntervalSince1970: r[0])
-                return d <= now.addingTimeInterval(5) && now.timeIntervalSince(d) <= 43_200 ? (d, min(100, max(0, r[1]))) : nil
-            }.sorted { $0.date < $1.date }
-            if !list.isEmpty { samples[k] = list }
-        }
+        history.restore(raw, now: Date())
     }
 
     private func saveHistory(_ now: Date) {
         guard now.timeIntervalSince(lastHistorySave) > 60 else { return }
         lastHistorySave = now
-        let raw = samples.mapValues { $0.map { [$0.date.timeIntervalSince1970, $0.used] } }
-        guard let data = try? JSONEncoder().encode(raw) else { return }
+        guard let data = try? JSONEncoder().encode(history.persistedSamples) else { return }
         try? FileManager.default.createDirectory(at: AppPaths.supportDirectory, withIntermediateDirectories: true)
         try? data.write(to: historyURL, options: .atomic)
     }
@@ -169,15 +81,16 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         let threshold = Double(store?.config.usageAlertThreshold ?? 20)
         for w in state.orderedWindows where !w.isResetting(now) {
             let remaining = 100 - w.used
-            guard remaining > 0, let reset = w.resetsAt, reset > now else { continue }
+            guard remaining > 0, let reset = w.resetsAt, reset > now,
+                  let key = UsagePaceHistory.key(state.provider, w) else { continue }
             let cycle = String(Int(reset.timeIntervalSince1970 / 60))
-            let base = state.provider.rawValue + "|" + w.id + "|" + cycle
-            let resetIn = Self.formatted(reset.timeIntervalSince(now))
+            let base = key + "|" + cycle
+            let resetIn = UsagePaceProjection.formatted(reset.timeIntervalSince(now))
             if remaining <= threshold {
                 fire(base + "|thr", title: calendarText("\(state.provider.title): \(Int(remaining.rounded()))% left", "\(state.provider.title): te queda \(Int(remaining.rounded()))%"),
                      body: calendarText("\(w.title) · resets in \(resetIn)", "\(w.title) · se reinicia en \(resetIn)"))
             } else if let p = pace(state.provider, w, now: now), p.warn, p.secondsToEmpty <= 3600 {
-                fire(base + "|proj", title: calendarText("\(state.provider.title) may run out in \(Self.formatted(p.secondsToEmpty))", "\(state.provider.title) se podría agotar en \(Self.formatted(p.secondsToEmpty))"),
+                fire(base + "|proj", title: calendarText("\(state.provider.title) may run out in \(UsagePaceProjection.formatted(p.secondsToEmpty))", "\(state.provider.title) se podría agotar en \(UsagePaceProjection.formatted(p.secondsToEmpty))"),
                      body: calendarText("\(w.title) · at this pace it ends before the reset in \(resetIn)", "\(w.title) · a este ritmo se acaba antes del reinicio en \(resetIn)"))
             }
         }

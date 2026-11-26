@@ -4,50 +4,6 @@ import CoreServices
 import CryptoKit
 import Darwin
 
-// Usage values are safe to cache. Credentials never enter a published or persisted object.
-enum UsageProvider: String, Codable, CaseIterable {
-    case claude, codex
-    var title: String { self == .claude ? "Claude" : "Codex" }
-    var glyph: String { self == .claude ? "✳" : "⬡" }
-    var trayID: String { "__t_usage_" + rawValue }
-    var interval: TimeInterval { self == .claude ? 120 : 60 }
-}
-
-struct UsageWindow: Codable, Identifiable {
-    var id: String
-    var title: String
-    var used: Double
-    var resetsAt: Date?
-    var durationMinutes: Double? = nil
-    // Provider categories take precedence; old caches can recover duration from their title.
-    var presentationOrder: (Int, Double) {
-        let label = title.lowercased()
-        let hours = label.hasSuffix(" h") ? Double(label.dropLast(2)) : nil
-        let duration = [durationMinutes, hours.map { $0 * 60 }].compactMap { $0 }
-            .first { $0.isFinite && $0 > 0 } ?? .infinity
-        if id == "five_hour" || id == "session" || id.hasPrefix("session-") || label == "5-hour session" || label == "sesión de 5 horas" || duration == 300 {
-            return (0, 300)
-        }
-        let scoped = id.hasPrefix("weekly_scoped") || id.hasPrefix("seven_day_") ||
-            (label.hasPrefix("weekly ·") && label != "weekly · all models") ||
-            (label.hasPrefix("semanal ·") && label != "semanal · todos los modelos")
-        if scoped { return (2, 10080) }
-        if id == "seven_day" || id.hasPrefix("weekly_all") || label == "weekly" || label == "weekly · all models" || label == "semanal" || label == "semanal · todos los modelos" || duration == 10080 {
-            return (1, 10080)
-        }
-        return (3, duration)
-    }
-    func isResetting(_ now: Date) -> Bool { resetsAt.map { $0 <= now } ?? false }
-    func effectiveUsed(_ now: Date) -> Double { isResetting(now) ? 0 : used }
-}
-
-struct UsageReading: Codable {
-    var windows: [UsageWindow]
-    var plan: String?
-    var date: Date
-    var apiDate: Date? = nil
-}
-
 struct UsageState: Identifiable {
     var provider: UsageProvider
     var id: String { provider.rawValue }
@@ -139,64 +95,6 @@ enum UsageProcess {
         p.waitUntilExit()
         try? input.fileHandleForWriting.close(); try? output.fileHandleForReading.close()
         return Result(data: rpc ? reply : data, status: p.terminationStatus, timedOut: timedOut)
-    }
-}
-
-enum UsageJSON {
-    static func object(_ data: Data) -> [String: Any]? { (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] }
-    static func number(_ value: Any?) -> Double? {
-        guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite else { return nil }
-        return n.doubleValue
-    }
-    static func boundedDate(_ value: Date?) -> Date? {
-        guard let value, value.timeIntervalSince1970.isFinite, value.timeIntervalSince1970 >= 0, value.timeIntervalSince1970 < 253_402_300_800 else { return nil }
-        return value
-    }
-    static func date(_ value: Any?) -> Date? {
-        if let n = number(value), n > 0 { return boundedDate(Date(timeIntervalSince1970: n)) }
-        guard let s = value as? String else { return nil }
-        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = boundedDate(f.date(from: s)) { return d }
-        f.formatOptions = [.withInternetDateTime]; return boundedDate(f.date(from: s))
-    }
-    static func window(_ id: String, _ title: String, _ used: Any?, _ reset: Any?, durationMinutes: Double? = nil) -> UsageWindow? {
-        guard let n = number(used) else { return nil }
-        return UsageWindow(id: id, title: title, used: max(0, min(100, n)), resetsAt: date(reset), durationMinutes: durationMinutes)
-    }
-    static func claude(_ obj: [String: Any], at date: Date, local: Bool = false) -> UsageReading {
-        var windows: [UsageWindow] = []
-        if let limits = obj["limits"] as? [[String: Any]], !limits.isEmpty {
-            for (index, limit) in limits.enumerated() {
-                let kind = limit["kind"] as? String ?? ""
-                let model = ((limit["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String
-                let title: String
-                switch kind {
-                case "session": title = tx("5-hour session", "Sesión de 5 horas")
-                case "weekly_all": title = tx("Weekly · all models", "Semanal · todos los modelos")
-                case "weekly_scoped": title = tx("Weekly · ", "Semanal · ") + (model ?? tx("model", "modelo"))
-                default: continue
-                }
-                if let w = window("\(kind)-\(index)", title, limit["percent"], limit["resets_at"]) { windows.append(w) }
-            }
-        } else {
-            for (key, title) in [("five_hour", tx("5-hour session", "Sesión de 5 horas")), ("seven_day", tx("Weekly · all models", "Semanal · todos los modelos")), ("seven_day_opus", tx("Weekly · ", "Semanal · ") + "Opus"), ("seven_day_sonnet", tx("Weekly · ", "Semanal · ") + "Sonnet")] {
-                if let d = obj[key] as? [String: Any], let w = window(key, title, d[local ? "used_percentage" : "utilization"], d["resets_at"]) { windows.append(w) }
-            }
-        }
-        return UsageReading(windows: windows, plan: nil, date: date, apiDate: local ? nil : date)
-    }
-    static func codex(_ obj: [String: Any], at date: Date, format: String) -> UsageReading {
-        var windows: [UsageWindow] = []
-        for key in ["primary", "secondary"] {
-            guard let d = obj[key + (format == "http" ? "_window" : "")] as? [String: Any],
-                  let duration = number(d[format == "rpc" ? "windowDurationMins" : (format == "http" ? "limit_window_seconds" : "window_minutes")]), duration > 0 else { continue }
-            let minutes = format == "http" ? duration / 60 : duration
-            let title = minutes == 300 ? tx("5-hour session", "Sesión de 5 horas") : (minutes == 10080 ? tx("Weekly", "Semanal") : String(format: "%g h", minutes / 60))
-            var reset = d[format == "rpc" ? "resetsAt" : (format == "http" ? "reset_at" : "resets_at")]
-            if reset == nil, let after = number(d["reset_after_seconds"]) { reset = date.timeIntervalSince1970 + after }
-            if let w = window(key, title, d[format == "rpc" ? "usedPercent" : "used_percent"], reset, durationMinutes: minutes) { windows.append(w) }
-        }
-        return UsageReading(windows: windows, plan: obj[format == "rpc" ? "planType" : "plan_type"] as? String, date: date)
     }
 }
 
