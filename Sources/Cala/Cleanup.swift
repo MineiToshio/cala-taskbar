@@ -75,11 +75,64 @@ struct WorktreeGroup: Identifiable, Equatable {
 }
 
 struct CacheItem: Identifiable, Equatable {
-    var id: String { path }
-    let path: String
+    let id: String
     let name: String
     let note: String
+    /// Folders whose contents are emptied (never the folders themselves).
+    let paths: [String]
+    /// Folders inside `paths` that are kept and not counted (a browser's cache has its own row).
+    var excluding: [String] = []
+    /// Apps that must be closed before this cache can be emptied (a running browser would corrupt it).
+    var bundleIDs: [String] = []
     var bytes: Int64?
+}
+
+/// A browser whose page cache gets its own row. Only folders that hold downloaded page data are listed:
+/// cookies, saved passwords, history, sessions, Local Storage and IndexedDB are never touched.
+struct BrowserCache {
+    let name: String
+    let bundleIDs: [String]
+    /// Under ~/Library/Caches: the whole folder is cache.
+    let caches: String
+    /// Under ~/Library/Application Support: only the cache folders below are emptied, in every profile.
+    let support: String?
+
+    static let all: [BrowserCache] = [
+        BrowserCache(name: "Chrome", bundleIDs: ["com.google.Chrome"], caches: "Google/Chrome", support: "Google/Chrome"),
+        BrowserCache(name: "Brave", bundleIDs: ["com.brave.Browser"], caches: "BraveSoftware/Brave-Browser", support: "BraveSoftware/Brave-Browser"),
+        BrowserCache(name: "Edge", bundleIDs: ["com.microsoft.edgemac"], caches: "Microsoft Edge", support: "Microsoft Edge"),
+        BrowserCache(name: "Arc", bundleIDs: ["company.thebrowser.Browser"], caches: "Arc", support: "Arc/User Data"),
+        BrowserCache(name: "Vivaldi", bundleIDs: ["com.vivaldi.Vivaldi"], caches: "Vivaldi", support: "Vivaldi"),
+        BrowserCache(name: "Opera", bundleIDs: ["com.operasoftware.Opera"], caches: "com.operasoftware.Opera", support: "com.operasoftware.Opera"),
+        BrowserCache(name: "Chromium", bundleIDs: ["org.chromium.Chromium"], caches: "Chromium", support: "Chromium"),
+        BrowserCache(name: "Firefox", bundleIDs: ["org.mozilla.firefox"], caches: "Firefox", support: nil),
+        // Safari's cache is protected by macOS without Full Disk Access; it only shows up when it can be read.
+        BrowserCache(name: "Safari", bundleIDs: ["com.apple.Safari"], caches: "com.apple.Safari", support: nil),
+    ]
+
+    /// Cache folders inside each Chromium profile (a folder that has a Preferences file) and at the top level.
+    static let profileCaches = ["Cache", "Code Cache", "GPUCache", "DawnGraphiteCache", "DawnWebGPUCache",
+                                "Service Worker/CacheStorage", "Service Worker/ScriptCache"]
+    static let topCaches = ["GrShaderCache", "ShaderCache", "GraphiteDawnCache", "component_crx_cache"]
+
+    var cachesPath: String { NSHomeDirectory() + "/Library/Caches/" + caches }
+
+    /// Existing, readable cache folders of this browser.
+    func paths() -> [String] {
+        var out: [String] = []
+        if Cleanup.isRealFolder(cachesPath), Cleanup.isReadable(cachesPath) { out.append(cachesPath) }
+        guard let support else { return out }
+        let root = NSHomeDirectory() + "/Library/Application Support/" + support
+        let fm = FileManager.default
+        guard Cleanup.isRealFolder(root) else { return out }
+        for top in Self.topCaches where Cleanup.isRealFolder(root + "/" + top) { out.append(root + "/" + top) }
+        for profile in ((try? fm.contentsOfDirectory(atPath: root)) ?? []).sorted() {
+            let dir = root + "/" + profile
+            guard Cleanup.isRealFolder(dir), fm.fileExists(atPath: dir + "/Preferences") else { continue }
+            for sub in Self.profileCaches where Cleanup.isRealFolder(dir + "/" + sub) { out.append(dir + "/" + sub) }
+        }
+        return out
+    }
 }
 
 // MARK: - Discovery and removal
@@ -215,8 +268,8 @@ enum Cleanup {
 
     static func caches() -> [CacheItem] {
         let h = NSHomeDirectory()
+        let browserCaches = BrowserCache.all.map(\.cachesPath).filter(isRealFolder)
         let list: [(String, String, String)] = [
-            (h + "/Library/Caches", calendarText("App caches", "Cachés de apps"), calendarText("Apps rebuild them as needed. Quit big apps first.", "Las apps las regeneran. Cierra antes las apps grandes.")),
             (h + "/Library/Developer/Xcode/DerivedData", "Xcode DerivedData", calendarText("Build output; Xcode recreates it.", "Resultado de compilar; Xcode lo recrea.")),
             (h + "/Library/Developer/Xcode/iOS DeviceSupport", calendarText("Xcode device support", "Soporte de dispositivos de Xcode"), calendarText("Downloaded again when you connect a device.", "Se vuelve a descargar al conectar un dispositivo.")),
             (h + "/.npm/_cacache", calendarText("npm cache", "Caché de npm"), calendarText("Packages are downloaded again on demand.", "Los paquetes se vuelven a bajar cuando hacen falta.")),
@@ -225,9 +278,34 @@ enum Cleanup {
             (h + "/.bun/install/cache", calendarText("Bun cache", "Caché de Bun"), calendarText("Packages are downloaded again on demand.", "Los paquetes se vuelven a bajar cuando hacen falta.")),
             (h + "/.cargo/registry/cache", calendarText("Cargo cache", "Caché de Cargo"), calendarText("Crates are downloaded again on demand.", "Los crates se vuelven a bajar cuando hacen falta.")),
         ]
-        return list.compactMap { path, name, note in
-            isRealFolder(path) ? CacheItem(path: path, name: name, note: note) : nil
+        var items: [CacheItem] = []
+        let appCaches = h + "/Library/Caches"
+        if isRealFolder(appCaches) {
+            items.append(CacheItem(id: appCaches, name: calendarText("App caches", "Cachés de apps"),
+                                   note: calendarText("Apps rebuild them as needed. Quit big apps first. Browsers have their own rows.", "Las apps las regeneran. Cierra antes las apps grandes. Los navegadores van aparte."),
+                                   paths: [appCaches], excluding: browserCaches))
         }
+        for b in BrowserCache.all {
+            let paths = b.paths()
+            guard !paths.isEmpty else { continue }
+            items.append(CacheItem(id: "browser:" + b.bundleIDs[0], name: calendarText("\(b.name) — page cache", "\(b.name) — caché de páginas"),
+                                   note: calendarText("Images, videos and files pages keep to load faster. Passwords, cookies, history and sessions stay.", "Imágenes, videos y archivos que las páginas guardan para cargar más rápido. Contraseñas, cookies, historial y sesiones se conservan."),
+                                   paths: paths, bundleIDs: b.bundleIDs))
+        }
+        for (path, name, note) in list where isRealFolder(path) {
+            items.append(CacheItem(id: path, name: name, note: note, paths: [path]))
+        }
+        return items
+    }
+
+    static func isReadable(_ path: String) -> Bool { (try? FileManager.default.contentsOfDirectory(atPath: path)) != nil }
+
+    static func isRunning(_ bundleIDs: [String]) -> Bool {
+        bundleIDs.contains { !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }
+    }
+
+    static func size(_ item: CacheItem) -> Int64 {
+        item.paths.reduce(0) { $0 + DiskService.size(of: $1, excluding: item.excluding).bytes }
     }
 
     /// A directory that is not itself a symlink: a cache folder redirected elsewhere (another disk, a project) is never offered.
@@ -236,15 +314,29 @@ enum Cleanup {
         return type == .typeDirectory
     }
 
-    /// Deletes the contents of a cache folder (never the folder itself). Entries are removed as they are: a symlink
-    /// inside is unlinked, never followed. Returns how many entries could not be removed.
-    static func empty(_ item: CacheItem) -> Int {
-        let fm = FileManager.default
+    /// Deletes the contents of a cache's folders (never the folders themselves). Entries are removed as they are: a
+    /// symlink inside is unlinked, never followed. Returns a problem to report, or nil.
+    static func empty(_ item: CacheItem) -> String? {
         // Re-checked at deletion time, and only for the fixed list of known cache folders.
-        guard caches().contains(where: { $0.path == item.path }), isRealFolder(item.path) else { return 1 }
+        guard let fresh = caches().first(where: { $0.id == item.id }) else { return calendarText("not found", "no encontrada") }
+        if isRunning(fresh.bundleIDs) { return calendarText("close it first", "ciérralo antes") }
         var failed = 0
-        for child in (try? fm.contentsOfDirectory(atPath: item.path)) ?? [] {
-            do { try fm.removeItem(atPath: item.path + "/" + child) } catch { failed += 1 }
+        for path in fresh.paths where isRealFolder(path) { failed += emptyContents(path, keeping: fresh.excluding) }
+        return failed > 0 ? "\(failed) " + calendarText("item(s) could not be removed", "elemento(s) no se pudieron quitar") : nil
+    }
+
+    /// Removes every entry of `dir` except the kept folders; a folder that contains a kept one is emptied the same way.
+    private static func emptyContents(_ dir: String, keeping: [String]) -> Int {
+        let fm = FileManager.default
+        var failed = 0
+        for child in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
+            let path = dir + "/" + child
+            if keeping.contains(path) { continue }
+            if keeping.contains(where: { $0.hasPrefix(path + "/") }) {
+                if isRealFolder(path) { failed += emptyContents(path, keeping: keeping) }
+                continue
+            }
+            do { try fm.removeItem(atPath: path) } catch { failed += 1 }
         }
         return failed
     }
@@ -264,8 +356,39 @@ final class CleanupModel: ObservableObject {
     @Published var trashCount: Int?
     @Published var trashDenied = false
     @Published var trashChecking = false
+    /// Bundle IDs of running apps that block a cache (a browser must be closed before its cache is emptied).
+    @Published var running = Set<String>()
     private var generation = 0
     static let trashID = "__trash"
+
+    init() {
+        let nc = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.refreshRunning() }
+        }
+    }
+
+    func refreshRunning() {
+        let wanted = Set(caches.flatMap(\.bundleIDs))
+        running = wanted.filter { Cleanup.isRunning([$0]) }
+        selected.subtract(caches.filter { blocked($0) }.map(\.id))
+    }
+
+    func blocked(_ c: CacheItem) -> Bool { c.bundleIDs.contains { running.contains($0) } }
+
+    /// Counts the Trash on its own when Cala may already control Finder; otherwise waits for the button, so the
+    /// macOS permission prompt never appears just from opening the window.
+    private func autoCheckTrash(_ gen: Int) {
+        trashChecking = true
+        TrashService.permission { status in
+            guard gen == self.generation else { return }
+            switch status {
+            case .granted: self.checkTrash()
+            case .denied: self.trashDenied = true; self.trashChecking = false
+            case .notAsked: self.trashChecking = false
+            }
+        }
+    }
 
     func checkTrash() {
         trashChecking = true
@@ -281,6 +404,8 @@ final class CleanupModel: ObservableObject {
         let gen = generation
         scanning = true; message = ""; selected = []; trashCount = nil; trashDenied = false
         caches = Cleanup.caches(); groups = []
+        refreshRunning()
+        autoCheckTrash(gen)
         let extra = ConfigStore.shared.config.diskFolders
         let cacheList = caches
         DispatchQueue.global(qos: .utility).async {
@@ -301,7 +426,7 @@ final class CleanupModel: ObservableObject {
             for c in cacheList {
                 limit.wait(); done.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    let n = DiskService.size(of: c.path).bytes
+                    let n = Cleanup.size(c)
                     DispatchQueue.main.async {
                         if gen == self.generation, let i = self.caches.firstIndex(where: { $0.id == c.id }) { self.caches[i].bytes = n }
                     }
@@ -314,7 +439,7 @@ final class CleanupModel: ObservableObject {
     }
 
     var selectedGroups: [WorktreeGroup] { groups.filter { selected.contains($0.id) && $0.safe } }
-    var selectedCaches: [CacheItem] { caches.filter { selected.contains($0.id) } }
+    var selectedCaches: [CacheItem] { caches.filter { selected.contains($0.id) && !blocked($0) } }
     var selectedBytes: Int64 {
         selectedGroups.reduce(0) { $0 + ($1.bytes ?? 0) } + selectedCaches.reduce(0) { $0 + ($1.bytes ?? 0) }
     }
@@ -363,7 +488,7 @@ final class CleanupModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             var problems: [String] = []
             for g in gs { if let p = Cleanup.remove(g) { problems.append(p) } }
-            for c in cs { let n = Cleanup.empty(c); if n > 0 { problems.append("\(c.name): \(n) " + calendarText("item(s) could not be removed", "elemento(s) no se pudieron quitar")) } }
+            for c in cs { if let p = Cleanup.empty(c) { problems.append(c.name + ": " + p) } }
             if trash {
                 let sem = DispatchSemaphore(value: 0)
                 var ok = false
@@ -541,7 +666,7 @@ struct CleanupView: View {
             if model.trashChecking {
                 ProgressView().controlSize(.small).scaleEffect(0.7)
             } else if model.trashCount == nil && !model.trashDenied {
-                Button(calendarText("Check", "Comprobar")) { model.checkTrash() }
+                Button(calendarText("Allow and count", "Permitir y contar")) { model.checkTrash() }
             } else if model.trashDenied {
                 Button(calendarText("Open Automation settings", "Abrir Automatización")) {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
@@ -558,20 +683,23 @@ struct CleanupView: View {
         if let n = model.trashCount {
             return n == 0 ? calendarText("The Trash is empty.", "La Papelera está vacía.") : calendarText("Deletes everything in the Trash for good.", "Borra para siempre todo lo que hay en la Papelera.")
         }
-        return calendarText("Press Check to count the items. The first time, macOS asks to let Cala control Finder.", "Pulsa Comprobar para contar los elementos. La primera vez, macOS pregunta si dejas que Cala controle Finder.")
+        return calendarText("Cala counts the Trash through Finder. macOS asks once whether to allow it; after that it is counted on its own.", "Cala cuenta la Papelera a través de Finder. macOS pregunta una sola vez si lo permites; después se cuenta sola.")
     }
 
     private func cacheRow(_ c: CacheItem) -> some View {
-        HStack(spacing: 12) {
-            check(c.id, enabled: true)
+        let blocked = model.blocked(c)
+        let app = c.name.components(separatedBy: " — ").first ?? c.name
+        return HStack(spacing: 12) {
+            check(c.id, enabled: !blocked)
             VStack(alignment: .leading, spacing: 3) {
                 Text(c.name).font(.system(size: 13, weight: .medium))
-                Text(c.note).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(blocked ? calendarText("Close \(app) to clean its cache.", "Cierra \(app) para limpiar su caché.") : c.note)
+                    .font(.system(size: 11)).foregroundStyle(blocked ? StatusColor.color(.attention) : Color.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             Text(c.bytes.map(diskBytes) ?? "…").font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
-        .help(c.path)
+        .help(c.paths.joined(separator: "\n"))
     }
 }

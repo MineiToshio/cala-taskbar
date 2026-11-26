@@ -255,6 +255,18 @@ enum TrashService {
         return (result, (error?[NSAppleScript.errorNumber] as? NSNumber)?.intValue)
     }
 
+    enum Permission { case granted, denied, notAsked }
+
+    /// Whether Cala may already send Apple events to Finder, without ever showing the macOS prompt. Main-thread callback.
+    static func permission(_ done: @escaping (Permission) -> Void) {
+        queue.async {
+            let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.finder")
+            let status = target.aeDesc.map { AEDeterminePermissionToAutomateTarget($0, AEEventClass(typeWildCard), AEEventID(typeWildCard), false) } ?? OSStatus(procNotFound)
+            let p: Permission = status == noErr ? .granted : (Int(status) == notAuthorized ? .denied : .notAsked)
+            DispatchQueue.main.async { done(p) }
+        }
+    }
+
     /// Calls back on the main thread with the number of items (nil if unknown) and whether Automation was denied.
     static func count(_ done: @escaping (Int?, Bool) -> Void) {
         queue.async {
