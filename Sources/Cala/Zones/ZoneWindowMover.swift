@@ -188,8 +188,17 @@ final class ZoneWindowMover: @unchecked Sendable {
 
     /// A higher-layer surface (menu, Dock or panel) above a normal window blocks the press.
     private static func windowUnder(_ p: CGPoint, in windows: [[String: Any]]) -> ZoneDragCandidate.Window? {
+        let dockPID = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
+        // CoreGraphics display bounds: already top-left based and safe off the main thread (NSScreen is not).
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16), count: UInt32 = 0
+        CGGetActiveDisplayList(16, &ids, &count)
+        let displays = ids.prefix(Int(count)).map(CGDisplayBounds)
         for info in windows {
             guard let frame = visibleFrame(info), frame.contains(p) else { continue }
+            // The Dock keeps a click-through surface over the whole display it lives on (seen with autohide):
+            // it must not hide the window below, or no drag on that display ever reaches zones.
+            if ZoneDragCandidate.isDockDisplaySurface(owner: info[kCGWindowOwnerPID as String] as? pid_t,
+                                                     dockPID: dockPID, frame: frame, displays: displays) { continue }
             return normalWindow(info)
         }
         return nil

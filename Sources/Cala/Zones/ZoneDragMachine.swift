@@ -185,6 +185,13 @@ struct ZoneDragCandidate {
         tabBand(of: frame).contains(point)
     }
 
+    /// The Dock's full-display, click-through surface (not the Dock bar itself, which is smaller).
+    static func isDockDisplaySurface(owner: pid_t?, dockPID: pid_t?, frame: CGRect, displays: [CGRect]) -> Bool {
+        guard let owner, owner == dockPID else { return false }
+        return displays.contains { abs($0.minX - frame.minX) < 1 && abs($0.minY - frame.minY) < 1
+            && abs($0.width - frame.width) < 1 && abs($0.height - frame.height) < 1 }
+    }
+
     private static func tabBand(of frame: CGRect) -> CGRect {
         CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: min(tabBandHeight, frame.height))
     }

@@ -844,6 +844,13 @@ do {
            ZoneDragCandidate.mayDetachTab(at: press, in: original.frame)
                && ZoneDragCandidate.mayDetachTab(at: CGPoint(x: 160, y: 190), in: original.frame)
                && !ZoneDragCandidate.mayDetachTab(at: CGPoint(x: 160, y: 220), in: original.frame))
+    let displays = [CGRect(x: 0, y: 0, width: 1512, height: 982), CGRect(x: -3840, y: 0, width: 3840, height: 1080)]
+    expect("Press: the Dock's full-display surface does not hide the window below; the Dock bar and other apps still do",
+           ZoneDragCandidate.isDockDisplaySurface(owner: 7, dockPID: 7, frame: displays[0], displays: displays)
+               && !ZoneDragCandidate.isDockDisplaySurface(owner: 7, dockPID: 7, frame: CGRect(x: 300, y: 900, width: 900, height: 82),
+                                                          displays: displays)
+               && !ZoneDragCandidate.isDockDisplaySurface(owner: 8, dockPID: 7, frame: displays[0], displays: displays)
+               && !ZoneDragCandidate.isDockDisplaySurface(owner: 7, dockPID: nil, frame: displays[0], displays: displays))
     let ordinary = ZoneDragCandidate(original: original, point: press)
     expect("Tab detach: an ordinary content drag never requests a full scan",
            !ordinary.shouldRecheck(at: first, time: 10))
