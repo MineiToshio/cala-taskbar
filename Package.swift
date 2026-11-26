@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(name: "Cala", path: "Sources/Cala",
-                          linkerSettings: [.linkedFramework("OpenDirectory")])
+                          linkerSettings: [.linkedFramework("OpenDirectory")]),
+        .executableTarget(name: "cala-update", path: "Sources/CalaUpdateHelper")
     ]
 )

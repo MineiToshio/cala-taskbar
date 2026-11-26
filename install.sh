@@ -8,7 +8,8 @@ if (( EUID == 0 )); then
 fi
 cd "$(dirname "$0")"
 
-SRC="$PWD/build/Cala.app"
+build_dir=${CALA_BUILD_DIR:-build}
+SRC="${build_dir:a}/Cala.app"
 DEST_DIR=/Applications
 DEST="$DEST_DIR/Cala.app"
 LEGACY_DIR="$HOME/Applications"
@@ -16,6 +17,7 @@ PLIST="$HOME/Library/LaunchAgents/local.cala.plist"
 OLD_PLIST="$HOME/Library/LaunchAgents/local.mactaskbar.plist"
 PB=/usr/libexec/PlistBuddy
 uid=$(id -u)
+owner=$(id -un)
 
 # Local rebuilds can come from the same commit. Advance past the installed build by default.
 if [[ -z "${CALA_BUILD_NUMBER:-}" ]]; then
@@ -32,18 +34,19 @@ fi
 # Validate the staged copy before publishing it. Both names are on the same volume, so
 # renamex_np can atomically exchange two populated directories (or install a new name exclusively).
 publish() {
-  /usr/bin/sudo /bin/zsh -f -s -- "$SRC" "$DEST" <<'PUBLISH'
+  /usr/bin/sudo /bin/zsh -f -s -- "$SRC" "$DEST" "$owner" <<'PUBLISH'
 set -euo pipefail
 src=$1
 dest=$2
+owner=$3
 dir=${dest:h}
 stage=$(/usr/bin/mktemp -d "$dir/.cala-install.XXXXXXXX")
 trap '/bin/rm -rf "$stage"' EXIT
 staged="$stage/Cala.app"
 /usr/bin/ditto "$src" "$staged"
-/usr/sbin/chown -Rh root:admin "$staged"
+/usr/sbin/chown -Rh "$owner:admin" "$staged"
 /bin/chmod -RN "$staged"
-/bin/chmod -R go-w "$staged"
+/bin/chmod -R u+rwX,g+rwX,o-w "$staged"
 /usr/bin/codesign --verify --deep --strict "$staged"
 
 if [[ -e "$dest" || -L "$dest" ]]; then
