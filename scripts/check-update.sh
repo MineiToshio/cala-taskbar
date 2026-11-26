@@ -28,6 +28,45 @@ fi
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
+python3 - <<'PY'
+import re, subprocess
+from collections import defaultdict
+from pathlib import Path
+
+matches = subprocess.check_output([
+    "/usr/bin/grep", "-RnE", "--include=*.swift",
+    r"UpdateTestHook|updateTestHook|local\.cala\.test\.update|update-test-state\.json", "Sources",
+], text=True)
+references = defaultdict(set)
+for match in matches.splitlines():
+    file, line, _ = match.split(":", 2)
+    references[Path(file)].add(int(line))
+
+hook = Path("Sources/Cala/UpdateTestHook.swift")
+for path in references.keys() | {hook}:
+    branches = []
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        directive = re.fullmatch(r"\s*#(if|elseif|else|endif)\b\s*(.*?)\s*(?://.*)?", line)
+        if directive:
+            kind, condition = directive.groups()
+            if kind == "if":
+                branches.append(condition == "CALA_UPDATE_TEST")
+            elif kind == "endif":
+                branches.pop()
+            else:
+                branches[-1] = False
+        elif (number in references[path] or (path == hook and line.strip())) and not any(branches):
+            raise SystemExit(f"FAIL {path}:{number}: updater test hook outside #if CALA_UPDATE_TEST")
+print("PASS updater test hook is conditionally compiled")
+PY
+swift build -c release
+/usr/bin/strings .build/release/Cala > "$out/release-strings"
+if /usr/bin/grep -Fn 'local.cala.test.update' "$out/release-strings"; then
+    print -u2 "FAIL updater test notification is present in the release binary"
+    exit 1
+fi
+print "PASS updater test notification is absent from the release binary"
+
 compile=(swiftc -O -module-cache-path "$out/modules")
 "${compile[@]}" -o "$out/cala-update" "$policy" "$src/UpdateVersion.swift" Checks/Update/main.swift
 "$out/cala-update"

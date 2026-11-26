@@ -165,24 +165,26 @@ extension UpdateState {
         }
     }
 
-    var message: String {
+    var message: String { message(localize: tx) }
+
+    func message(localize: (String, String) -> String) -> String {
         switch self {
-        case .idle: return tx("Not checked yet", "Aún no se ha revisado")
-        case .checking: return tx("Checking…", "Buscando…")
+        case .idle: return localize("Not checked yet", "Aún no se ha revisado")
+        case .checking: return localize("Checking…", "Buscando…")
         case .upToDate(let date):
             let time = date.formatted(date: .omitted, time: .shortened)
-            return tx("Cala is up to date. Checked at \(time).", "Cala está al día. Revisado a las \(time).")
-        case .available(let v): return tx("Cala \(v) is available.", "Cala \(v) está disponible.")
-        case .skipped(let v): return tx("You skipped Cala \(v).", "Omitiste Cala \(v).")
-        case .downloading(let p): return tx("Downloading… \(p)%", "Descargando… \(p)%")
-        case .verifying: return tx("Verifying…", "Verificando…")
-        case .installing: return tx("Installing…", "Instalando…")
+            return localize("Cala is up to date. Checked at \(time).", "Cala está al día. Revisado a las \(time).")
+        case .available(let v): return localize("Cala \(v) is available.", "Cala \(v) está disponible.")
+        case .skipped(let v): return localize("You skipped Cala \(v).", "Omitiste Cala \(v).")
+        case .downloading(let p): return localize("Downloading… \(p)%", "Descargando… \(p)%")
+        case .verifying: return localize("Verifying…", "Verificando…")
+        case .installing: return localize("Installing…", "Instalando…")
         case .pendingRestart(let reason):
             switch UpdatePolicy.Blocker(rawValue: reason) {
             case .inactiveSession:
-                return tx("Installed. Cala restarts when this session is active.", "Instalada. Cala se reinicia cuando esta sesión esté activa.")
+                return localize("Installed. Cala restarts when this session is active.", "Instalada. Cala se reinicia cuando esta sesión esté activa.")
             case .drag:
-                return tx("Installed. Cala restarts when you finish dragging.", "Instalada. Cala se reinicia cuando termines de arrastrar.")
+                return localize("Installed. Cala restarts when you finish dragging.", "Instalada. Cala se reinicia cuando termines de arrastrar.")
             default:
                 let (en, es): (String, String)
                 switch UpdatePolicy.Blocker(rawValue: reason) {
@@ -192,39 +194,39 @@ extension UpdateState {
                 case .updater: (en, es) = ("the update window", "la ventana de actualización")
                 default: (en, es) = ("the dialog", "el diálogo")
                 }
-                return tx("Installed. Cala restarts when you close \(en).", "Instalada. Cala se reinicia cuando cierres \(es).")
+                return localize("Installed. Cala restarts when you close \(en).", "Instalada. Cala se reinicia cuando cierres \(es).")
             }
         case .rolledBack(let v, let cur):
-            return tx("Cala \(v) didn't start, so \(cur) was restored.", "Cala \(v) no arrancó, así que se restauró la \(cur).")
+            return localize("Cala \(v) didn't start, so \(cur) was restored.", "Cala \(v) no arrancó, así que se restauró la \(cur).")
         case .offline:
-            return tx("Couldn't reach GitHub. Cala will try again later.", "No se pudo conectar con GitHub. Cala lo intentará más tarde.")
+            return localize("Couldn't reach GitHub. Cala will try again later.", "No se pudo conectar con GitHub. Cala lo intentará más tarde.")
         case .feedUnavailable:
-            return tx("Update information isn't available right now.", "La información de actualizaciones no está disponible ahora.")
+            return localize("Update information isn't available right now.", "La información de actualizaciones no está disponible ahora.")
         case .verificationFailed:
-            return tx("The download didn't pass the security check, so nothing was installed.",
+            return localize("The download didn't pass the security check, so nothing was installed.",
                       "La descarga no pasó la verificación de seguridad, así que no se instaló nada.")
         case .diskFull(let bytes):
             let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-            return tx("Not enough free space (needs \(size)).", "No hay espacio suficiente (necesita \(size)).")
+            return localize("Not enough free space (needs \(size)).", "No hay espacio suficiente (necesita \(size)).")
         case .busy:
-            return tx("Another account is installing this update.", "Otra cuenta está instalando esta actualización.")
+            return localize("Another account is installing this update.", "Otra cuenta está instalando esta actualización.")
         case .blockedByMacOS:
-            return tx("macOS blocked the update. Allow Cala in System Settings › Privacy & Security › App Management.",
+            return localize("macOS blocked the update. Allow Cala in System Settings › Privacy & Security › App Management.",
                       "macOS bloqueó la actualización. Permite Cala en Ajustes del Sistema › Privacidad y seguridad › Gestión de apps.")
         case .needsAdmin:
-            return tx("Ask an administrator to install it, or install it by hand.", "Pide a un administrador que la instale, o instálala a mano.")
+            return localize("Ask an administrator to install it, or install it by hand.", "Pide a un administrador que la instale, o instálala a mano.")
         case .needsNewerMacOS(let v, let macOS):
-            return tx("Cala \(v) needs macOS \(macOS) or later.", "Cala \(v) necesita macOS \(macOS) o posterior.")
+            return localize("Cala \(v) needs macOS \(macOS) or later.", "Cala \(v) necesita macOS \(macOS) o posterior.")
         case .manualInstall:
-            return tx("This version must be installed by hand.", "Esta versión se instala a mano.")
+            return localize("This version must be installed by hand.", "Esta versión se instala a mano.")
         case .unsupported:
-            return tx("Updates work when Cala is in Applications.", "Las actualizaciones funcionan cuando Cala está en Aplicaciones.")
+            return localize("Updates work when Cala is in Applications.", "Las actualizaciones funcionan cuando Cala está en Aplicaciones.")
         case .unavailable:
-            return tx("This build can't update itself.", "Esta versión no puede actualizarse sola.")
+            return localize("This build can't update itself.", "Esta versión no puede actualizarse sola.")
         case .failed:
-            return tx("Cala couldn't install the update.", "Cala no pudo instalar la actualización.")
+            return localize("Cala couldn't install the update.", "Cala no pudo instalar la actualización.")
         case .restartFailed:
-            return tx("Cala couldn't restart to finish the update.", "Cala no pudo reiniciarse para terminar la actualización.")
+            return localize("Cala couldn't restart to finish the update.", "Cala no pudo reiniciarse para terminar la actualización.")
         }
     }
 }

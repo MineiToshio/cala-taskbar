@@ -130,6 +130,9 @@ final class UpdateService: ObservableObject {
     private var autoProbeInFlight = false
     private var nextAutoProbe = Date.distantPast
     private var windowOpen = false
+    #if CALA_UPDATE_TEST
+    private var updateTestHook: UpdateTestHook?
+    #endif
 
     private init() {}
 
@@ -197,6 +200,9 @@ final class UpdateService: ObservableObject {
                                          Self.checkDate(now: Date(), lastAttempt: loaded.lastAttempt, failures: loaded.failures))
                 }
                 self.restoreState(cached: cached)
+                #if CALA_UPDATE_TEST
+                if site.test, let store = self.store { self.updateTestHook = UpdateTestHook(service: self, store: store) }
+                #endif
                 self.persist()
                 let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
                 self.timer = timer
@@ -219,6 +225,9 @@ final class UpdateService: ObservableObject {
     }
 
     func stop() {
+        #if CALA_UPDATE_TEST
+        updateTestHook = nil
+        #endif
         store = nil
         timer?.invalidate()
         timer = nil
@@ -326,7 +335,11 @@ final class UpdateService: ObservableObject {
               activity == nil, !pendingRestart else { return }
         let now = Date()
         if manual {
+            #if CALA_UPDATE_TEST
+            guard site.test || now.timeIntervalSince(saved.lastManualAttempt ?? .distantPast) >= 60 else { return }
+            #else
             guard now.timeIntervalSince(saved.lastManualAttempt ?? .distantPast) >= 60 else { return }
+            #endif
             saved.lastManualAttempt = now
         }
         saved.lastAttempt = now

@@ -321,6 +321,26 @@ The rules: one Cala instance only, `build/Cala.app` is never opened, and only th
 
 Password prompts: three or four `sudo` prompts in all (E4, E12 once or twice, E16), plus logging into the second account. The in-app updates never ask.
 
+### Driving the updater from a test
+
+In the running fixture's login session, use `swift scripts/update-test-ctl.swift <command>`:
+
+| Command | Action |
+|---|---|
+| `check` | Check for updates. Fixture builds bypass the one-minute manual check limit. |
+| `install` | Download and install the offered version, including a skipped offer. |
+| `skip` | Skip this version. |
+| `later` | Close the update window. |
+| `dump` | Refresh the state file on demand. |
+
+The driver posts `local.cala.test.update` to the distributed notification center with `userInfo["command"]`. Tests can also send the command as the notification's string object. The observer is compiled under `#if CALA_UPDATE_TEST` and starts after updater initialization in a bundle with `CalaUpdateTest=true`. The first snapshot with the current PID signals readiness. Commands run the corresponding UI actions asynchronously.
+
+The hook atomically replaces `~/Library/Application Support/Cala/update-test-state.json` on startup, when the state or offer changes, and on `dump`. Poll for the expected `state` and verify the `pid`, `version` and `build` after a relaunch. Each snapshot includes:
+
+- `state` (the enum case name) and `stateDetail` (its associated values, such as `{"_0":42}` for `downloading`, or `null`).
+- `availableVersion` (the current offer, even after skipping, or `null`) and `indicatorVisible` (booleans `bar` and `statusItemBadge`, based on the running bar and status item configuration).
+- `settingsStatusTextEN` and `settingsStatusTextES` (the exact Settings caption in each language), `lastError` (the English caption for the current error or blocking state, or `null`) and `timestamp` (ISO 8601).
+
 ## 12. Implementation shards
 
 Three code shards plus docs, with disjoint files. Workers build and run checks only. They never run `install.sh`, launch Cala, run `--snapshot`, or open `build/Cala.app`.
