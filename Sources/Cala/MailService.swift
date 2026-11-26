@@ -61,10 +61,20 @@ struct MailKeychainGate {
     static let keyPrefix = "mailKeychainMigrated."
     let identity: String
     let defaults: UserDefaults
+    /// Reads a Keychain item's access list (never its password; see MailKeychainAccess). nil: no prediction, every
+    /// account not moved yet is announced as two windows.
+    let inspect: ((String) -> MailItemAccess?)?
 
-    init(identity: String = MailKeychain.helperIdentity ?? "helper-unknown", defaults: UserDefaults = .standard) {
+    init(identity: String = MailKeychain.helperIdentity ?? "helper-unknown", defaults: UserDefaults = .standard,
+         inspect: ((String) -> MailItemAccess?)? = nil) {
         self.identity = identity
         self.defaults = defaults
+        self.inspect = inspect
+    }
+
+    static func live() -> MailKeychainGate {
+        let hashes = MailKeychainAccess.helperCDHashes()
+        return MailKeychainGate(inspect: { MailKeychainAccess.inspect(account: $0, helperCDHashes: hashes) })
     }
 
     func isMigrated(_ id: String) -> Bool { defaults.string(forKey: Self.keyPrefix + id) == identity }
@@ -73,6 +83,43 @@ struct MailKeychainGate {
 
     /// How many macOS windows to announce before reading `ids`: up to two per account not moved yet.
     func expectedPrompts(for ids: [String]) -> Int { 2 * ids.filter { !isMigrated($0) }.count }
+
+    /// Windows one item will make macOS show: one for an access list that does not trust the helper, one for a
+    /// partition list without it. nil: cannot tell (part unknown and nothing known to be missing).
+    static func windows(for access: MailItemAccess) -> Int? {
+        let parts = [access.aclTrustsHelper, access.partitionTrustsHelper]
+        if parts.allSatisfy({ $0 == true }) { return 0 }
+        if parts.contains(false) { return parts.filter { $0 != true }.count }
+        return nil
+    }
+
+    /// Windows reading this account will show (pure, pinned by the checks). `own` and `old` are the helper's item
+    /// and the pre-helper item; nil when they could not be inspected. nil result: unknown.
+    static func expectedWindows(migrated: Bool, own: MailItemAccess?, old: MailItemAccess?) -> Int? {
+        if migrated { return 0 }
+        guard let own else { return nil }
+        if own.exists { return windows(for: own) }   // the read uses the helper's item
+        guard let old else { return nil }
+        return old.exists ? windows(for: old) : 0
+    }
+
+    /// What to do before sync: `windows` to announce now (blocking explanation) and accounts whose first read is
+    /// watched instead (the explanation appears only if that read is still waiting after a second: a window is up).
+    struct Plan: Equatable { var windows: Int; var watch: [String] }
+
+    func plan(for ids: [String]) -> Plan {
+        var plan = Plan(windows: 0, watch: [])
+        for id in ids where !isMigrated(id) {
+            guard let inspect else { plan.windows += 2; continue }
+            let own = inspect(MailCredentialStore.ownAccount(id))
+            let old = own?.exists == false ? inspect(id) : nil
+            switch Self.expectedWindows(migrated: false, own: own, old: old) {
+            case let n? where n > 0: plan.windows += n
+            default: plan.watch.append(id) // predicted silent, or unknown: watch the read as a backstop
+            }
+        }
+        return plan
+    }
 }
 
 /// Where an account's app password lives. Items saved before the Keychain helper (account = the email) trust only the
@@ -133,7 +180,7 @@ struct MailCredentialStore: @unchecked Sendable {
 
     static func live() -> MailCredentialStore {
         MailCredentialStore(get: { try MailKeychain.password(for: $0) }, set: { try MailKeychain.set($0, for: $1) },
-                            gate: MailKeychainGate())
+                            gate: MailKeychainGate.live())
     }
 
     func read(_ id: String) throws -> String? {
@@ -292,6 +339,11 @@ final class MailService: ObservableObject {
     /// the user's defaults).
     private var keychainGate: MailKeychainGate?
     private var keychainPresenter: ((_ prompts: Int, _ proceed: @escaping @MainActor () -> Void) -> Void)?
+    private var keychainDismiss: (() -> Void)?
+    /// Accounts whose first credential read shows the explanation only if it is still waiting after a second.
+    private var keychainWatch: Set<String> = []
+    private var watchedReads: Set<String> = []
+    private var watchNoticeShown = false
     private var accountsAwaitingNotice: Set<String> = []
 
     private let accountsURL: URL?
@@ -383,12 +435,37 @@ final class MailService: ObservableObject {
     /// closure to call once the person has read it). Nothing is read from the Keychain until then; when every enabled
     /// account was moved already, it starts at once. A copy that failed leaves the account unmoved, so the explanation
     /// comes back on the next launch.
-    func start(explainingKeychain present: @escaping (_ prompts: Int, _ proceed: @escaping @MainActor () -> Void) -> Void) {
+    func start(explainingKeychain present: @escaping (_ prompts: Int, _ proceed: @escaping @MainActor () -> Void) -> Void,
+               dismissing dismiss: (() -> Void)? = nil) {
         keychainPresenter = present
-        let prompts = keychainGate?.expectedPrompts(for: accounts.filter(\.enabled).map(\.id)) ?? 0
-        guard !running, prompts > 0 else { start(); return }
+        keychainDismiss = dismiss
+        guard !running, let keychainGate else { start(); return }
+        let plan = keychainGate.plan(for: accounts.filter(\.enabled).map(\.id))
+        keychainWatch = Set(plan.watch)
+        guard plan.windows > 0 else { start(); return }
         awaitingKeychainNotice = true
-        present(prompts) { [weak self] in self?.continueAfterKeychainNotice() }
+        present(plan.windows) { [weak self] in self?.continueAfterKeychainNotice() }
+    }
+
+    /// A watched read began: if it has not finished a second later, macOS is most likely showing its window, so the
+    /// explanation appears next to it (not blocking anything) and goes away when the read ends.
+    private func beginCredentialRead(_ id: String) {
+        guard keychainWatch.remove(id) != nil, keychainPresenter != nil else { return }
+        watchedReads.insert(id)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, self.watchedReads.contains(id), !self.watchNoticeShown, !self.awaitingKeychainNotice,
+                  let present = self.keychainPresenter else { return }
+            self.watchNoticeShown = true
+            log("mail: a Keychain read is waiting; explaining the macOS window")
+            present(2 * self.watchedReads.count) {}
+        }
+    }
+
+    private func endCredentialRead(_ id: String) {
+        guard watchedReads.remove(id) != nil, watchedReads.isEmpty, watchNoticeShown else { return }
+        watchNoticeShown = false
+        keychainDismiss?()
     }
 
     /// Called when the explanation is dismissed, or from the flyout when the window went unnoticed behind others.
@@ -398,6 +475,9 @@ final class MailService: ObservableObject {
         log("mail: Keychain explanation dismissed, starting sync")
         let waiting = accountsAwaitingNotice
         accountsAwaitingNotice.removeAll()
+        keychainWatch.removeAll()
+        watchedReads.removeAll()
+        if watchNoticeShown { watchNoticeShown = false; keychainDismiss?() }
         guard running else { start(); return }
         for id in waiting where accounts.contains(where: { $0.id == id && $0.enabled }) { launch(id) }
     }
@@ -719,7 +799,10 @@ final class MailService: ObservableObject {
     }
 
     private nonisolated func signIn(_ id: String, on connection: MailIMAP) async throws {
-        let stored = try readCredential(id)
+        await beginCredentialRead(id)
+        let stored: String?
+        do { stored = try readCredential(id) } catch { await endCredentialRead(id); throw error }
+        await endCredentialRead(id)
         guard let password = stored else { throw MailFailure.appPasswordRequired }
         try await connection.open(email: id, password: password)
     }

@@ -964,6 +964,51 @@ final class FakeKeychain: @unchecked Sendable {
 
 private func checkCredentialMigration() {
     typealias Store = MailCredentialStore
+    typealias Gate = MailKeychainGate
+    let trusted = MailItemAccess(exists: true, aclTrustsHelper: true, partitionTrustsHelper: true)
+    let neither = MailItemAccess(exists: true, aclTrustsHelper: false, partitionTrustsHelper: false)
+    let aclOnly = MailItemAccess(exists: true, aclTrustsHelper: true, partitionTrustsHelper: false)
+    let unknownPartition = MailItemAccess(exists: true, aclTrustsHelper: true, partitionTrustsHelper: nil)
+    let deniedUnknown = MailItemAccess(exists: true, aclTrustsHelper: false, partitionTrustsHelper: nil)
+    expect("Prediction: an old item that already trusts the helper (access list and partition) shows no window",
+           Gate.expectedWindows(migrated: false, own: .missing, old: trusted) == 0)
+    expect("Prediction: one window per missing trust (access list, partition), two when neither trusts the helper",
+           Gate.expectedWindows(migrated: false, own: .missing, old: aclOnly) == 1
+           && Gate.expectedWindows(migrated: false, own: .missing, old: neither) == 2
+           && Gate.expectedWindows(migrated: false, own: .missing, old: deniedUnknown) == 2)
+    expect("Prediction: unknown parts with nothing known missing, or an item that could not be inspected, are unknown",
+           Gate.expectedWindows(migrated: false, own: .missing, old: unknownPartition) == nil
+           && Gate.expectedWindows(migrated: false, own: nil, old: nil) == nil
+           && Gate.expectedWindows(migrated: false, own: .missing, old: nil) == nil)
+    expect("Prediction: a moved account, no old item, or an existing helper item that trusts the helper show nothing",
+           Gate.expectedWindows(migrated: true, own: nil, old: nil) == 0
+           && Gate.expectedWindows(migrated: false, own: .missing, old: .missing) == 0
+           && Gate.expectedWindows(migrated: false, own: trusted, old: neither) == 0)
+    expect("Prediction: an existing helper item that does not trust this helper (it was replaced) is judged on its own",
+           Gate.expectedWindows(migrated: false, own: neither, old: trusted) == 2)
+    expect("Partition entries decode from their hex JSON (or property list); anything else is unknown",
+           MailKeychainAccess.partitionIDs(Data(#"{"Partitions":["teamid:ABCD","cdhash:AA"]}"#.utf8)
+                .map { String(format: "%02X", $0) }.joined()) == ["teamid:abcd", "cdhash:aa"]
+           && MailKeychainAccess.partitionIDs(Data(#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Partitions</key><array><string>teamid:ABCD</string><string>cdhash:AA</string></array></dict></plist>"#.utf8)
+                .map { String(format: "%02x", $0) }.joined()) == ["teamid:abcd", "cdhash:aa"]
+           && MailKeychainAccess.partitionIDs("zz") == nil)
+    do {
+        let suite = "cala-mail-plan-\(UUID().uuidString)"
+        if let defaults = UserDefaults(suiteName: suite) {
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let items: [String: MailItemAccess] = ["silent@x.test": trusted, "asks@x.test": neither, "v2:fresh@x.test": trusted]
+            let gate = Gate(identity: "helper-P", defaults: defaults, inspect: { items[$0] ?? .missing })
+            gate.markMigrated("moved@x.test")
+            let plan = gate.plan(for: ["silent@x.test", "asks@x.test", "fresh@x.test", "moved@x.test", "gone@x.test"])
+            expect("Plan: only accounts whose read will show windows are announced up front; silent or new ones are watched",
+                   plan == Gate.Plan(windows: 2, watch: ["silent@x.test", "fresh@x.test", "gone@x.test"]))
+            let blind = Gate(identity: "helper-P", defaults: defaults, inspect: { _ in nil })
+            expect("Plan: items that cannot be inspected are watched (explained only if the read waits), not announced",
+                   blind.plan(for: ["asks@x.test"]) == Gate.Plan(windows: 0, watch: ["asks@x.test"]))
+            expect("Plan: without an inspector every account not moved is announced as two windows",
+                   Gate(identity: "helper-P", defaults: defaults).plan(for: ["asks@x.test", "moved@x.test"]) == Gate.Plan(windows: 2, watch: []))
+        }
+    }
     expect("Migration plan: own item found is used (moved or not); missing and not moved reads the old item and copies it",
            Store.next(after: .found, migrated: false) == .use && Store.next(after: .found, migrated: true) == .use
            && Store.next(after: .missing, migrated: false) == .readOldThenCopy)

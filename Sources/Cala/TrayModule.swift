@@ -81,7 +81,8 @@ final class TrayModule: CalaModule {
         UsagePace.shared.start(store: store)
         if visible { UsageService.shared.refresh() }
         MainActor.assumeIsolated {
-            MailService.shared.start(explainingKeychain: MailKeychainNoticeController.shared.show)
+            MailService.shared.start(explainingKeychain: MailKeychainNoticeController.shared.show,
+                                     dismissing: MailKeychainNoticeController.shared.dismiss)
         }
     }
 
