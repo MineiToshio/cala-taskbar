@@ -3,13 +3,14 @@
 # Signs the disk image too when CALA_SIGN_IDENTITY is a real identity.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-APP=build/Cala.app
+BUILD_DIR=${CALA_BUILD_DIR:-build}
+APP="$BUILD_DIR/Cala.app"
 [[ -d "$APP" ]] || { echo "Run ./build.sh first" >&2; exit 1; }
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
-DMG=build/Cala-$VERSION.dmg
+DMG="$BUILD_DIR/Cala-$VERSION.dmg"
 IDENTITY=${CALA_SIGN_IDENTITY:--}
 
-stage=$(mktemp -d)
+stage=$(mktemp -d "${TMPDIR:-/tmp}/cala-dmg.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 ditto "$APP" "$stage/Cala.app"
 ln -s /Applications "$stage/Applications"
