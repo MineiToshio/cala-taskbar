@@ -8,7 +8,7 @@ Status: implemented in the integration worktree. Release and multi-account accep
 
 The design below was red-teamed. Each finding is answered where it applies, with a code reference.
 
-Goal: about once a day Cala checks GitHub for a newer release and shows its version and notes. One click downloads it, verifies it, replaces `/Applications/Cala.app` and relaunches. No browser and no password are involved. A discreet indicator leads straight to the install. Nothing is touched until the download has passed verification. If the update fails at any step, or the new build crashes at launch, the previous Cala ends up installed and running.
+Goal: about once a day Cala checks GitHub for a newer release and shows its version and notes. One click downloads it, verifies it, replaces `/Applications/Cala.app` and relaunches. No browser and no password are involved. A discreet indicator leads straight to the install. Nothing is touched until the download has passed verification. The rollback helper restores the previous Cala if the new build fails its launch check. Section 6 describes the reboot window and manual replacement behavior.
 
 ## 1. Why a custom updater, not Sparkle 2
 
@@ -49,7 +49,7 @@ Manifest (signed):
 
 ```json
 {
-  "schema": 1, "bundleId": "local.cala", "version": "1.1.0", "build": 131,
+  "schema": 1, "commit": "<40 lowercase hex characters>", "bundleId": "local.cala", "version": "1.1.0", "build": 131,
   "minimumSystemVersion": "14.0", "publishedAt": "2026-12-01T10:00:00Z",
   "dmg": { "url": "https://github.com/MineiToshio/cala-taskbar/releases/download/v1.1.0/Cala-1.1.0.dmg",
            "size": 6123456, "sha256": "<64 hex>" },
@@ -118,7 +118,7 @@ The command refuses to overwrite an existing file. It prints the public key and 
 
 ## 5. Installing (in-process, background queue)
 
-All the work runs on `DispatchQueue(label: "Cala.update", qos: .utility)`. URLSession uses a background delegate queue, and subprocesses wait through their `terminationHandler` with timeouts (hdiutil 60 s, ditto 120 s). The main thread only receives state changes through `main.async`. It never waits. The Switcher's keyboard tap runs on the main run loop (`Switcher.swift:221-227`) and so does the SIGTERM handler (`main.swift:49-64`), so blocking main would stall Cmd/Option+Tab (finding 3).
+All the work runs on `DispatchQueue(label: "Cala.update", qos: .utility)`. URLSession uses a background delegate queue, and subprocesses wait through their `terminationHandler` with timeouts (hdiutil 60 s, ditto 120 s). The main thread receives state changes and supplies the run-loop health ping. An explicit quit records its transaction synchronously once AppKit commits to exiting. The Switcher's keyboard tap runs on the main run loop (`Switcher.swift:221-227`) and so does the SIGTERM handler (`main.swift:49-64`), so blocking main would stall Cmd/Option+Tab (finding 3).
 
 **Tools (finding 2).** `/usr/bin/lipo` is an `xcrun` shim (78 hard links to one binary) and fails on Macs without the Command Line Tools. The install path uses only:
 - **Real OS binaries:** `/usr/bin/hdiutil` and `/usr/bin/ditto`. Both are Mach-O with one link each (verified with `ls -l` and `file`). They run with an environment containing only `PATH=/usr/bin:/bin` and `DEVELOPER_DIR=/var/empty`.
@@ -177,15 +177,20 @@ The UI shows **Restart now** only when a blocker is open (step 9 below). Otherwi
 Before the exchange, the installer writes `~/Library/Application Support/Cala/update-pending.json` and syncs the file and its directory. The original identity comes from the installed bundle under the Applications lock.
 
 ```json
-{"from":"1.0.0+120","to":"1.1.0+131","previous":"<stage>/previous/Cala.app","transaction":"<UUID>"}
+{"from":"1.0.0+120","to":"1.1.0+131","previous":"<stage>/previous/Cala.app","transaction":"<UUID>","backupID":"<device>:<inode>","executableID":"<device>:<inode>"}
 ```
 
 1. The installer runs `cala-update arm --pending FILE --pid PID --target APP` from its verified copy of the installed bundle inside a per-user 0700 temporary directory. Standard input inherits the already-locked file description. The lock file stays at the same inode across transactions.
 2. The helper pins both bundle directories, checks their versions and the backup signature, reads the blocked list, and reserves the replacement block list and rollback sentinel. It acknowledges readiness over a pipe. A failed launch, negative preflight or missing acknowledgement leaves the running app in place.
-3. The helper waits for the old PID to exit, including while restart is deferred. Immediately before a requested restart Cala checks the recorded backup and helper. It can re-arm a helper that exited early. The test-only `after-swap` fault exits the installer process immediately after exchange, before the completion callback.
-4. The helper gives LaunchServices up to ten seconds to open the target. A successful open starts a fresh 120-second health interval (test builds can shorten it). After 20 seconds the new Cala’s **main run loop** checks its transaction and writes `update-up-<UUID>`. The receipt permits cleanup of the pinned private stage and pending record.
-5. On launch failure or health timeout, the helper publishes the reserved block list, checks the actual backup inode, signature and rollback directories, and publishes `update-rollback` before sending SIGTERM. It waits up to ten seconds for this user's target processes. It exchanges the bundles back, then reopens the installed app. A later failure also attempts to reopen the valid target. If LaunchServices fails, the production helper can start the verified executable after checking for an existing process.
-6. If block-list publication failed, the pre-swap journal survives restoration. Startup and the next installer reconcile under the same lock. A target matching `from` is conservatively treated as restored, even after an interrupted preparation. The failed identity must reach the durable blocked list before the rollback sentinel and pending record can be removed. An unreadable journal or block list prevents another swap. Legacy build-named receipts remain readable for in-flight updates.
+3. The helper holds the install lock while waiting for the old PID to exit, including a deferred restart. If the helper exits early, Cala opens the recorded backup directory, verifies its inode and copies the helper bytes from an open file descriptor to private storage. It checks the digest against the originally verified helper and checks the signing identifier before executing it.
+4. LaunchServices has ten seconds to open the new build. A successful open starts a fresh 120-second health interval. After 20 seconds the main run loop dispatches a ping to the update queue. That queue validates the journal, resolves the running bundle path against the transaction's install path, and compares the executable vnode mapped at the process's Mach header with the installed executable and the recorded device/inode pair. It writes `healthy <device>:<inode>` to `update-up-<UUID>`. A voluntary quit writes `quit <device>:<inode>` before exit using the same checks. Either receipt closes the transaction and discards its backup. A quit leaves Cala closed. The receipt writer and helper compete for the same transaction marker with an exclusive hard link. The first valid receipt or rollback claim wins even if the other process is suspended.
+5. On launch failure or timeout the helper validates the pinned backup, sets `update-rollback` and publishes the failed build. It sends SIGTERM to this user's processes running the target executable. A process still present after 15 seconds may receive SIGKILL during rollback only. The helper checks its PID, owner, executable and process start time again, waits for exit, then exchanges the bundles. Transient stop or swap errors retry with backoff while the same helper retains the install lock and rollback sentinel. Only the verified restored bundle is reopened. If LaunchServices fails, the helper can start its executable directly.
+6. Dock recovery depends on the bar setting. `DockControl.hide` saves the previous autohide and delay before applying Cala's override. With the bar disabled, `ModuleRegistry.launch` calls `DockControl.restoreAfterCrashIfNeeded`, which restores a pending override when the current values still match Cala's. With the bar enabled, `BarModule` calls `DockControl.applyOnLaunch` and preserves the backup for subsequent cleanup. These paths allow recovery when forced termination bypasses the failed process's quit handlers.
+7. The helper reserves an empty file in the private stage, then renames it to `<install parent>/.cala-blocked-<version>+<build>` on rollback. Every account reads those filenames under the shared install flock when evaluating a cached or fetched offer and preparing an install. The installer checks again under its exclusive lock. Each build gets a separate marker so permissions on a previous account's marker cannot prevent recording another build. The profile's `update-blocked.json` remains the source of its rollback history. If local publication fails, the restored build reconciles the surviving pending journal under the install lock.
+8. If another installer has replaced A→B with C, startup or the next install validates C's signature and bundle identity, checks the recorded private backup, closes the obsolete journal and discards its stage. C stays installed. Older journals derive their target from the backup path and can receive a fresh identity-bound receipt.
+9. Before AppKit, modules or cleanup start, every Cala process attempts an exclusive nonblocking flock in the Darwin per-user temporary directory keyed by the login security session. A contender exits immediately. The kernel releases the descriptor on exit. Normal relaunch waits for the old PID, so the new process can acquire the same lock.
+
+**RESIDUAL RISK.** A reboot after the swap removes the in-memory helper. If the new build then aborts before its first `UpdateService.start`, startup reconciliation never runs. The backup and journal remain on disk, but automatic rollback is unavailable in that window.
 
 ## 7. Schedule and deferral
 
@@ -384,7 +389,7 @@ Three code shards plus docs, with disjoint files. Workers build and run checks o
   - Info.plist keys from §4 and §10.
 - **Acceptance:**
   - `update-sign.swift selftest` passes. A feed it signs verifies with A's `UpdateSignature` (cross-check in `check-update-helper.sh`, once A is merged).
-  - The helper `watch` test, using fake bundles, a fake `open` (injected only under `-DCALA_UPDATE_TEST`) and short timeouts: the marker path deletes the stage; the timeout path swaps back, writes `update-blocked.json` and never sends SIGKILL.
+  - The helper `watch` test, using fake bundles, a fake `open` (injected only under `-DCALA_UPDATE_TEST`) and short timeouts: the marker path deletes the stage; the timeout path swaps back, writes `update-blocked.json` and publishes the install-wide block. A SIGTERM-resistant fixture verifies the rollback-only escalation. A transient swap failure still reopens the restored build exactly once.
   - A test build contains `Contents/Helpers/cala-update`, and `codesign --verify --deep --strict` passes.
   - The `cala-keychain` cdhash is unchanged.
   - `CALA_UPDATE_TEST=1 scripts/release.sh` exits non-zero before building. A key file with no keys gives an Info.plist with no `CalaUpdatePublicKeys`.

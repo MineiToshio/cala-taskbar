@@ -24,6 +24,7 @@ final class BlockItem: NSMenuItem {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let registry = ModuleRegistry.shared
     private let store = ConfigStore.shared
+    private var receivedTerminationSignal = false
     private var terminationSource: DispatchSourceSignal?
     private let updates = BundleUpdateMonitor()
     var bar: BarController? { registry.bar.controller }
@@ -35,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ n: Notification) {
+        if !receivedTerminationSignal { UpdateService.shared.recordVoluntaryQuit() }
         UpdateService.shared.stop()
         updates.stop()
         registry.shutdown()
@@ -55,7 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        source.setEventHandler {
+        source.setEventHandler { [weak self] in
+            self?.receivedTerminationSignal = true
             // A sheet or a modal alert makes AppKit refuse to quit, which left Cala running after a SIGTERM (an
             // installer, a logout script, `pkill`). Close them first, then quit normally so Dock and menu bar are restored.
             log("signal: SIGTERM, quitting")
@@ -267,6 +270,8 @@ func openAppLauncher() {
     NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications", isDirectory: true))
 }
 
+// Keep the raw descriptor open until kernel process teardown.
+guard CalaSessionLock.acquireForCurrentLogin() != nil else { exit(0) }
 let app = NSApplication.shared
 if let index = CommandLine.arguments.firstIndex(of: "--snapshot"), index + 1 < CommandLine.arguments.count {
     // Snapshots need AppKit layout, but can render before Launch Services starts the application lifecycle.

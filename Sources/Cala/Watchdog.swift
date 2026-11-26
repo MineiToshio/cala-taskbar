@@ -1,5 +1,28 @@
 import Foundation
 import Darwin
+import Security
+
+// The audit session is shared by Finder, LaunchServices and direct exec in a login.
+// CLOEXEC and process exit release the flock without a cleanup or unlink race.
+enum CalaSessionLock {
+    static func acquire(in directory: URL, session: SecuritySessionId) -> Int32? {
+        let file = directory.appendingPathComponent("local.cala.\(getuid()).\(session).lock")
+        let fd = open(file.path, O_RDONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { return nil }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_uid == getuid(), info.st_mode & S_IFMT == S_IFREG,
+              info.st_nlink == 1, flock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); return nil }
+        return fd
+    }
+
+    static func acquireForCurrentLogin() -> Int32? {
+        var session: SecuritySessionId = 0
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard SessionGetInfo(SecuritySessionId(callerSecuritySession), &session, nil) == errSecSuccess,
+              confstr(_CS_DARWIN_USER_TEMP_DIR, &path, path.count) > 0 else { return nil }
+        return acquire(in: URL(fileURLWithPath: String(cString: path)), session: session)
+    }
+}
 
 /// Reopens Cala by itself if it crashes or is force-quit, so nobody is left without a taskbar.
 ///

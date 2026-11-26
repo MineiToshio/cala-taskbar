@@ -98,11 +98,11 @@ final class UpdateService: ObservableObject {
                                            parentWritable: access(target.deletingLastPathComponent().path, W_OK) == 0)
         }
 
-        func evaluate(_ manifest: UpdateManifest, saved: Saved) -> UpdateEvaluation {
-            guard let running = running.parsed else { return .upToDate }
+        func evaluate(_ manifest: UpdateManifest, saved: Saved, sharedBlocks: Set<String>?) -> UpdateEvaluation {
+            guard let sharedBlocks, let running = running.parsed else { return .upToDate }
             return UpdateRules.evaluate(manifest, running: running, bundleId: bundleId, os: os,
                                         highestSeen: saved.highestSeen?.parsed, skipped: saved.skippedVersion,
-                                        blocked: saved.blockedBuilds, testURLs: test)
+                                        blocked: saved.blockedBuilds.union(sharedBlocks), testURLs: test)
         }
     }
 
@@ -111,6 +111,8 @@ final class UpdateService: ObservableObject {
     private let work = DispatchQueue(label: "Cala.update", qos: .utility)
     private weak var store: ConfigStore?
     private var site: Site?
+    private var sharedBlocks: Set<String>?
+    private var nextBlockRefresh = Date.distantPast
     private var saved = Saved()
     private var activity: Activity?
     private var transfer: URLSessionTask?
@@ -181,11 +183,13 @@ final class UpdateService: ObservableObject {
             }
             let cached = saved.envelope.flatMap { try? UpdateSignature.verify(feed: $0, publicKeys: site.keys).manifest }
             if cached == nil { saved.envelope = nil }
+            let shared = try? UpdateJournal.sharedBlocks(target: site.target)
             let loaded = saved
             DispatchQueue.main.async {
                 guard self.store != nil else { return }
                 self.site = site
                 self.saved = loaded
+                self.sharedBlocks = shared
                 self.installPath = path
                 self.nextCheck = Self.checkDate(now: launched, lastAttempt: nil, failures: 0)
                 if loaded.failures > 0 {
@@ -200,6 +204,18 @@ final class UpdateService: ObservableObject {
                 self.tick()
             }
         }
+    }
+
+    // AppKit has committed to quitting. Persist before returning to its exit path,
+    // including a quit that arrived before the asynchronous startup read finished.
+    func recordVoluntaryQuit() {
+        let support = AppPaths.supportDirectory
+        do {
+            if let pending = try UpdateJournal.read(in: support) {
+                try pending.record("quit", in: support, runningBundle: Bundle.main.bundleURL,
+                                   runningID: UpdateJournal.runningExecutableID())
+            }
+        } catch { log("update: quit receipt failed: \(error)") }
     }
 
     func stop() {
@@ -252,7 +268,33 @@ final class UpdateService: ObservableObject {
             tryRestart()
             return
         }
-        guard store.config.updateChecks, site.isEnabled, installPath != .unsupported, activity == nil else { return }
+        guard site.isEnabled, installPath != .unsupported, activity == nil else { return }
+        // A second account can roll back after we cached or displayed this offer.
+        if (offer != nil || sharedBlocks == nil), Date() >= nextBlockRefresh {
+            nextBlockRefresh = Date().addingTimeInterval(15)
+            let envelope = saved.envelope
+            let retryCached = sharedBlocks == nil
+            work.async {
+                let blocks = try? UpdateJournal.sharedBlocks(target: site.target)
+                let cached = retryCached && blocks != nil ? envelope.flatMap { try? UpdateSignature.verify(feed: $0, publicKeys: site.keys).manifest } : nil
+                DispatchQueue.main.async {
+                    guard self.store != nil, self.activity == nil, !self.pendingRestart,
+                          self.saved.envelope == envelope, blocks != self.sharedBlocks else { return }
+                    self.sharedBlocks = blocks
+                    if let offer = self.offer, let candidate = Build(offer).parsed,
+                       let blocks, UpdateRules.isBlocked(candidate, by: blocks) {
+                        self.apply(.upToDate, manifest: offer, checked: Date())
+                    } else if blocks == nil {
+                        self.offer = nil
+                        self.available = nil
+                        self.state = .busy
+                    } else if retryCached {
+                        self.restoreState(cached: cached)
+                    }
+                }
+            }
+        }
+        guard store.config.updateChecks else { return }
         if Date() >= nextCheck { check(manual: false); return }
         guard store.config.updateAutoInstall, installPath == .ready, available != nil, !retryInstall,
               Date() >= nextAutoProbe, !autoProbeInFlight,
@@ -299,7 +341,11 @@ final class UpdateService: ObservableObject {
                     let manifest = try? UpdateSignature.verify(feed: payload, publicKeys: site.keys).manifest
                     return (payload, manifest)
                 }
-                DispatchQueue.main.async { self?.finishCheck(verified) }
+                let shared = try? UpdateJournal.sharedBlocks(target: site.target)
+                DispatchQueue.main.async {
+                    self?.sharedBlocks = shared
+                    self?.finishCheck(verified)
+                }
             }
     }
 
@@ -308,10 +354,17 @@ final class UpdateService: ObservableObject {
         transfer = nil
         activity = nil
         let now = Date()
+        guard sharedBlocks != nil else {
+            offer = nil
+            available = nil
+            setResult(.busy)
+            nextCheck = now.addingTimeInterval(15)
+            return
+        }
         var retryAfter: TimeInterval?
         switch result {
         case let .success((envelope, manifest?)):
-            let evaluation = site.evaluate(manifest, saved: saved)
+            let evaluation = site.evaluate(manifest, saved: saved, sharedBlocks: sharedBlocks)
             // Only a recognized, eligible release can advance the replay floor.
             switch evaluation {
             case .available, .skipped, .needsNewerMacOS:
@@ -325,7 +378,7 @@ final class UpdateService: ObservableObject {
             saved.failures = 0
             if let candidate = Build(manifest).parsed, let highest = saved.highestSeen?.parsed, candidate < highest {
                 // A replay doesn't replace a newer signed offer already on this Mac.
-                if let offer { apply(site.evaluate(offer, saved: saved), manifest: offer, checked: now) }
+                if let offer { apply(site.evaluate(offer, saved: saved, sharedBlocks: sharedBlocks), manifest: offer, checked: now) }
                 else { apply(evaluation, manifest: manifest, checked: now) }
             } else {
                 saved.envelope = envelope
@@ -365,9 +418,10 @@ final class UpdateService: ObservableObject {
         guard let site else { return }
         guard installPath != .unsupported else { state = .unsupported; return }
         guard site.isEnabled else { state = .unavailable; return }
+        guard sharedBlocks != nil else { state = .busy; return }
         let lastResult = saved.lastResult
         if let cached, let checked = saved.lastSuccess {
-            apply(site.evaluate(cached, saved: saved), manifest: cached, checked: checked, remember: false)
+            apply(site.evaluate(cached, saved: saved, sharedBlocks: sharedBlocks), manifest: cached, checked: checked, remember: false)
         }
         retryInstall = saved.installFailed == true && offer != nil && installPath == .ready
         guard let lastResult else { return }
@@ -413,12 +467,11 @@ final class UpdateService: ObservableObject {
     private func beginInstall(userStarted: Bool) {
         guard let site, let manifest = offer, let envelope = saved.envelope,
               activity == nil, !pendingRestart, installPath == .ready else { return }
-        switch site.evaluate(manifest, saved: saved) {
+        switch site.evaluate(manifest, saved: saved, sharedBlocks: sharedBlocks) {
         case .available: break
         case .skipped where userStarted: break
         default: return
         }
-        let build = Build(manifest).identity
         let cached = saved.downloaded
         let blocked = saved.blockedBuilds
         activity = .preparing
@@ -431,8 +484,19 @@ final class UpdateService: ObservableObject {
                 DispatchQueue.main.async { self.failInstall(.failed) }
                 return
             }
-            guard !(blocked.contains(build) || Self.readBlocked().contains(build)),
-                  (try? UpdateSignature.verify(feed: envelope, publicKeys: site.keys).manifest) == manifest else {
+            guard let shared = try? UpdateJournal.sharedBlocks(target: site.target) else {
+                DispatchQueue.main.async { self.failInstall(.busy) }
+                return
+            }
+            if let candidate = Build(manifest).parsed, UpdateRules.isBlocked(candidate, by: shared.union(blocked).union(Self.readBlocked())) {
+                DispatchQueue.main.async {
+                    self.sharedBlocks = shared
+                    self.activity = nil
+                    self.apply(.upToDate, manifest: manifest, checked: Date())
+                }
+                return
+            }
+            guard (try? UpdateSignature.verify(feed: envelope, publicKeys: site.keys).manifest) == manifest else {
                 DispatchQueue.main.async { self.failInstall(.verificationFailed) }
                 return
             }
@@ -492,7 +556,7 @@ final class UpdateService: ObservableObject {
                         if case .failure(let failure) = result, let data = failure.resume { self.resume = (build, data) }
                         self.activity = nil
                         self.nextAutoProbe = Date().addingTimeInterval(600)
-                        self.apply(site.evaluate(manifest, saved: self.saved), manifest: manifest,
+                        self.apply(site.evaluate(manifest, saved: self.saved, sharedBlocks: self.sharedBlocks), manifest: manifest,
                                    checked: self.saved.lastSuccess ?? Date())
                         return
                     }
@@ -551,7 +615,7 @@ final class UpdateService: ObservableObject {
             case .deferred:
                 self.activity = nil
                 self.nextAutoProbe = Date().addingTimeInterval(15)
-                self.apply(site.evaluate(manifest, saved: self.saved), manifest: manifest, checked: self.saved.lastSuccess ?? Date())
+                self.apply(site.evaluate(manifest, saved: self.saved, sharedBlocks: self.sharedBlocks), manifest: manifest, checked: self.saved.lastSuccess ?? Date())
             case .upToDate:
                 self.clearDownload(dmg)
                 self.activity = nil
@@ -604,6 +668,16 @@ final class UpdateService: ObservableObject {
             do {
                 try installer.confirmWatch(previous: restart.previous)
                 ready = true
+            } catch InstallResult.upToDate {
+                DispatchQueue.main.async {
+                    self.checkingRestart = false
+                    self.pendingRestart = false
+                    self.restart = nil
+                    self.installer = nil
+                    self.offer = nil
+                    self.setResult(.upToDate(Date()))
+                }
+                return
             } catch {
                 log("update: restart handoff failed: \(error)")
                 ready = false
@@ -635,9 +709,11 @@ final class UpdateService: ObservableObject {
             }
             return
         }
+        guard pending.target.path == site.target.path else { return }
         if pending.to == site.running.identity {
-            pending.scheduleHealth(in: support, target: site.target, delay: max(0, 20 - Date().timeIntervalSince(launched))) {
-                self.work.async { self.recover(pending, site: site) }
+            pending.scheduleHealth(in: support, runningBundle: site.target, delay: max(0, 20 - Date().timeIntervalSince(launched)),
+                                   work: work) {
+                self.recover(pending, site: site)
             }
         } else {
             recover(pending, site: site)
@@ -661,7 +737,8 @@ final class UpdateService: ObservableObject {
                 try UpdateJournal.reconcileRestored(in: support, target: site.target)
                 return
             }
-            if try UpdateJournal.identity(at: site.target) == pending.from {
+            let disk = try pending.diskState(at: site.target)
+            if disk == .original {
                 try UpdateJournal.reconcileRestored(in: support, target: site.target)
                 DispatchQueue.main.async {
                     guard self.site != nil else { return } // start() imports the list before setting site.
@@ -669,8 +746,9 @@ final class UpdateService: ObservableObject {
                     if self.offer.map(Build.init)?.identity == pending.to { self.offer = nil; self.available = nil }
                     self.setResult(.rolledBack(Self.marketingVersion(pending.to), site.running.version))
                 }
-            } else if pending.to == site.running.identity,
-                      FileManager.default.fileExists(atPath: support.appendingPathComponent(pending.marker).path),
+            } else if disk == .superseded {
+                try UpdateJournal.reconcileRestored(in: support, target: site.target)
+            } else if pending.to == site.running.identity, try pending.acceptsReceipt(in: support),
                       !Self.readBlocked().contains(pending.to) {
                 try pending.cleanStage(for: site.target)
                 try UpdateJournal.remove("update-rollback", in: support)

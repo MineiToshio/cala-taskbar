@@ -161,6 +161,7 @@ final class UpdateInstaller {
     private let faults: InstallerFaults
     private(set) var watcher: Process?
     private var backupIdentity: stat?
+    private var verifiedHelperDigest: String?
     private var resume: (url: URL, data: Data)?
 
     init(target: URL, tools: InstallerTools = .system, faults: InstallerFaults = .none) {
@@ -203,12 +204,28 @@ final class UpdateInstaller {
 
     func confirmWatch(previous: URL) throws {
         let support = tools.supportDirectory()
-        var actual = stat()
-        guard let backupIdentity, lstat(previous.path, &actual) == 0, actual.st_dev == backupIdentity.st_dev,
+        guard let pending = try UpdateJournal.read(in: support), pending.previous == previous.path else {
+            throw InstallResult.failed("missing handoff")
+        }
+        let parent = try descriptor(open(target.deletingLastPathComponent().path, directoryFlags))
+        if try pending.diskState(at: target) == .superseded {
+            let lock = try descriptor(openat(parent.fileDescriptor, ".cala-update.lock", readFlags))
+            try withExtendedLifetime(lock) {
+                guard flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0,
+                      try UpdateJournal.read(in: support) == pending, try pending.diskState(at: target) == .superseded
+                else { throw InstallResult.busy }
+                try UpdateJournal.reconcileRestored(in: support, target: target)
+            }
+            throw InstallResult.upToDate
+        }
+        let stage = previous.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+        let pinned = try descriptor(openat(parent.fileDescriptor, stage + "/previous/Cala.app",
+                                           O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC))
+        let actual = try status(pinned)
+        guard let backupIdentity, actual.st_dev == backupIdentity.st_dev,
               actual.st_ino == backupIdentity.st_ino,
-              let pending = try UpdateJournal.read(in: support), pending.previous == previous.path,
-              try UpdateJournal.identity(at: previous) == pending.from,
-              try UpdateJournal.identity(at: target) == pending.to else { throw InstallResult.failed("backup changed") }
+              try UpdateJournal.identity(at: volumeURL(actual)) == pending.from,
+              try pending.diskState(at: target) == .incoming else { throw InstallResult.failed("backup changed") }
         if watcher?.isRunning == true { return }
         let lock = try descriptor(open(target.deletingLastPathComponent().appendingPathComponent(".cala-update.lock").path, readFlags))
         guard flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else { throw InstallResult.busy }
@@ -216,10 +233,17 @@ final class UpdateInstaller {
         guard mkdtemp(&template) != nil else { throw posixError() }
         let work = URL(fileURLWithPath: String(cString: template))
         defer { try? FileManager.default.removeItem(at: work) }
-        let backup = work.appendingPathComponent("Cala.app")
-        try FileManager.default.copyItem(at: previous, to: backup)
-        _ = try tools.identity(backup)
-        watcher = try tools.arm(backup.appendingPathComponent("Contents/Helpers/cala-update"), lock, support, target)
+        let helperPath = "Contents/Helpers/cala-update"
+        let source = try descriptor(openat(pinned.fileDescriptor, helperPath, O_RDONLY | O_NOFOLLOW_ANY | O_CLOEXEC))
+        let privateHelper = work.appendingPathComponent(helperPath)
+        try FileManager.default.createDirectory(at: privateHelper.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let output = try descriptor(open(privateHelper.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o500))
+        let digest = try UpdateSignature.hash(source, limit: Int64.max, copyingTo: output).1
+        try output.close()
+        guard digest == verifiedHelperDigest, try tools.identity(privateHelper).identifier == "local.cala.update" else {
+            throw InstallResult.verificationFailed("rollback helper identity")
+        }
+        watcher = try tools.arm(privateHelper, lock, support, target)
     }
 
     private func checkBlocked(_ candidate: AppVersion) throws {
@@ -241,6 +265,10 @@ final class UpdateInstaller {
         guard lockInfo.st_mode & S_IFMT == S_IFREG, lockInfo.st_nlink == 1,
               flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0,
               sameEntry(parent, lockName, lockInfo) else { throw InstallResult.busy }
+        // flock only requires read access. Ignore the creating admin's restrictive umask.
+        if lockInfo.st_uid == geteuid(), lockInfo.st_mode & 0o444 != 0o444 {
+            guard fchmod(lock.fileDescriptor, 0o644) == 0 else { throw posixError() }
+        }
         // The lock inode is permanent. The watcher inherits this open file description.
         guard sameEntry(parent, "Cala.app", original) else { throw InstallResult.busy }
 
@@ -249,11 +277,14 @@ final class UpdateInstaller {
         guard info["CFBundleIdentifier"] as? String == m.bundleId,
               let version = info["CFBundleShortVersionString"] as? String, let build = info["CFBundleVersion"] as? String,
               let current = AppVersion(version: version, build: build) else { throw InstallResult.verificationFailed("installed Info.plist") }
-        guard current < candidate else { return .upToDate }
 
         let support = tools.supportDirectory()
         try UpdateJournal.reconcileRestored(in: support, target: target)
+        guard current < candidate else { return .upToDate }
         guard try UpdateJournal.read(in: support) == nil else { throw InstallResult.busy }
+        if try UpdateRules.isBlocked(candidate, by: UpdateJournal.sharedBlocksUnderLock(target: target)) {
+            throw InstallResult.verificationFailed("blocked")
+        }
         try checkBlocked(candidate)
 
         var template = Array(".cala-update.XXXXXXXX".utf8CString)
@@ -371,8 +402,12 @@ final class UpdateInstaller {
         #endif
         let backupURL = parentURL.appendingPathComponent(name).appendingPathComponent("previous/Cala.app")
         let journal = UpdateJournal(from: version + "+" + build, to: m.version + "+" + String(m.build),
-                                    previous: backupURL.path, transaction: UUID())
+                                    previous: backupURL.path, transaction: UUID(),
+                                    executableID: try UpdateJournal.executableID(in: ready),
+                                    backupID: UpdateJournal.fileID(original))
         let helper = oldCopy.appendingPathComponent("Contents/Helpers/cala-update")
+        let trustedHelper = try descriptor(open(helper.path, readFlags))
+        verifiedHelperDigest = try UpdateSignature.hash(trustedHelper, limit: Int64.max).1
         try journal.write(in: support)
         defer {
             if !committed { try? UpdateJournal.remove("update-pending.json", in: support) }
@@ -422,7 +457,7 @@ final class UpdateInstaller {
         return .installed(previous: backupURL)
     }
 
-    private static func plist(_ bundle: FileHandle) throws -> [String: Any] {
+    fileprivate static func plist(_ bundle: FileHandle) throws -> [String: Any] {
         let file = try descriptor(openat(bundle.fileDescriptor, "Contents/Info.plist", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW_ANY))
         let info = try status(file)
         guard info.st_mode & S_IFMT == S_IFREG, info.st_size <= 1024 * 1024,
@@ -585,6 +620,50 @@ struct UpdateJournal: Codable, Equatable {
     let to: String
     let previous: String
     let transaction: UUID? // nil for an update started by the original watcher
+    var executableID: String? = nil
+    var backupID: String? = nil
+
+    var target: URL {
+        URL(fileURLWithPath: previous).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Cala.app").resolvingSymlinksInPath()
+    }
+
+    static func fileID(_ info: stat) -> String { "\(UInt32(bitPattern: info.st_dev)):\(info.st_ino)" }
+
+    static func executableID(in bundle: FileHandle) throws -> String {
+        let file = try descriptor(openat(bundle.fileDescriptor, "Contents/MacOS/Cala", O_RDONLY | O_NONBLOCK | O_NOFOLLOW_ANY | O_CLOEXEC))
+        let info = try status(file)
+        guard info.st_mode & S_IFMT == S_IFREG else { throw InstallResult.failed("invalid executable") }
+        return fileID(info)
+    }
+
+    // The vnode mapped at this executable's Mach header survives a rename or exchange.
+    static func runningExecutableID() -> String? {
+        var region = proc_regionwithpathinfo()
+        let size = Int32(MemoryLayout.size(ofValue: region))
+        let address = UInt64(UInt(bitPattern: #dsohandle))
+        guard proc_pidinfo(getpid(), PROC_PIDREGIONPATHINFO, address, &region, size) == size else { return nil }
+        let info = region.prp_vip.vip_vi.vi_stat
+        return "\(info.vst_dev):\(info.vst_ino)"
+    }
+
+    static let blockPrefix = ".cala-blocked-"
+    static func sharedBlocksUnderLock(target: URL) throws -> Set<String> {
+        let names = try FileManager.default.contentsOfDirectory(atPath: target.deletingLastPathComponent().path)
+        return Set(names.filter { $0.hasPrefix(blockPrefix) }.map { String($0.dropFirst(blockPrefix.count)) })
+    }
+
+    static func sharedBlocks(target: URL) throws -> Set<String> {
+        let path = target.deletingLastPathComponent().appendingPathComponent(".cala-update.lock")
+        let fd = open(path.path, readFlags)
+        if fd < 0 && errno == ENOENT { return [] } // No installer has prepared a transaction yet.
+        let lock = try descriptor(fd)
+        return try withExtendedLifetime(lock) {
+            guard flock(fd, LOCK_SH | LOCK_NB) == 0 else { throw InstallResult.busy }
+            return try sharedBlocksUnderLock(target: target)
+        }
+    }
+
     var marker: String { "update-up-" + (transaction?.uuidString ?? to) }
 
     static func read(in support: URL) throws -> Self? {
@@ -615,14 +694,15 @@ struct UpdateJournal: Codable, Equatable {
         return stage
     }
 
-    func cleanStage(for target: URL) throws {
+    func cleanStage(for target: URL, expectedStage: stat? = nil) throws {
         let stage = try stage(for: target)
         let parent = try descriptor(open(target.deletingLastPathComponent().path, directoryFlags))
         let fd = openat(parent.fileDescriptor, stage.lastPathComponent, directoryFlags)
         if fd < 0 && errno == ENOENT { return }
         let dir = try descriptor(fd)
         let info = try status(dir)
-        guard info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700 else { throw InstallResult.busy }
+        guard expectedStage.map({ $0.st_dev == info.st_dev && $0.st_ino == info.st_ino }) ?? true,
+              info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700 else { throw InstallResult.busy }
         let root = try volumeURL(info)
         for child in try FileManager.default.contentsOfDirectory(atPath: root.path) {
             try FileManager.default.removeItem(at: root.appendingPathComponent(child))
@@ -639,6 +719,18 @@ struct UpdateJournal: Codable, Equatable {
         return v + "+" + b
     }
 
+    enum DiskState { case original, incoming, superseded }
+    func diskState(at url: URL) throws -> DiskState {
+        let bundle = try descriptor(open(url.path, directoryFlags))
+        let info = try status(bundle)
+        let build = try Self.identity(at: volumeURL(info))
+        if build == from, backupID.map({ $0 == Self.fileID(info) }) ?? true { return .original }
+        if build == to, let executableID {
+            return try Self.executableID(in: bundle) == executableID ? .incoming : .superseded
+        }
+        return build == to ? .incoming : .superseded
+    }
+
     // Called under flock. Even if the volume filled up during rollback, the
     // original pending record survives until the failed identity is durable.
     static func reconcileRestored(in support: URL, target: URL) throws {
@@ -647,8 +739,25 @@ struct UpdateJournal: Codable, Equatable {
             try remove("update-rollback", in: support)
             return
         }
-        guard try identity(at: target) == pending.from else { return }
         _ = try pending.stage(for: target)
+        let disk = try pending.diskState(at: target)
+        if disk == .incoming { return }
+        if disk == .superseded {
+            try pending.closeSuperseded(in: support, target: target)
+            return
+        }
+        let parts = pending.to.components(separatedBy: "+")
+        guard parts.count == 2, AppVersion(version: parts[0], build: parts[1]) != nil else {
+            throw InstallResult.failed("invalid blocked build")
+        }
+        let parent = try descriptor(open(target.deletingLastPathComponent().path, directoryFlags))
+        let name = blockPrefix + pending.to
+        let shared = openat(parent.fileDescriptor, name, readFlags | O_CREAT | O_EXCL, 0o644)
+        if shared >= 0 { close(shared) }
+        else if errno != EEXIST { throw posixError() }
+        var entry = stat()
+        guard fstatat(parent.fileDescriptor, name, &entry, AT_SYMLINK_NOFOLLOW) == 0,
+              entry.st_mode & S_IFMT == S_IFREG, fsync(parent.fileDescriptor) == 0 else { throw posixError() }
         let file = support.appendingPathComponent("update-blocked.json")
         var blocked: Set<String>
         do { blocked = try JSONDecoder().decode(Set<String>.self, from: Data(contentsOf: file)) }
@@ -667,23 +776,80 @@ struct UpdateJournal: Codable, Equatable {
         try remove("update-pending.json", in: support)
     }
 
-    func scheduleHealth(in support: URL, target: URL, delay: TimeInterval, completion: @escaping () -> Void) {
+    private func closeSuperseded(in support: URL, target: URL) throws {
+        let parent = try descriptor(open(target.deletingLastPathComponent().path, directoryFlags))
+        let installed = try descriptor(openat(parent.fileDescriptor, "Cala.app", directoryFlags))
+        let original = try status(installed)
+        let current = try InstallerTools.system.identity(target)
+        let plist = try UpdateInstaller.plist(installed)
+        guard current.identifier == "local.cala", plist["CFBundleIdentifier"] as? String == current.identifier,
+              plist["CFBundleExecutable"] as? String == "Cala", sameEntry(parent, "Cala.app", original) else { throw InstallResult.busy }
+        // Cleanup may already have finished before a crash. If the stage still exists,
+        // authenticate its backup before removing anything.
+        let stage = try stage(for: target)
+        var exists = stat()
+        if lstat(stage.path, &exists) == 0 {
+            guard exists.st_mode & S_IFMT == S_IFDIR, exists.st_uid == geteuid(),
+                  exists.st_mode & 0o777 == 0o700 else { throw InstallResult.busy }
+            let backup = URL(fileURLWithPath: previous)
+            let backupName = stage.lastPathComponent + "/" + backup.deletingLastPathComponent().lastPathComponent + "/Cala.app"
+            let pinned = try descriptor(openat(parent.fileDescriptor, backupName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC))
+            let backupInfo = try status(pinned)
+            let old = try InstallerTools.system.identity(backup)
+            guard old.identifier == current.identifier, sameEntry(parent, backupName, backupInfo),
+                  try diskState(at: volumeURL(backupInfo)) != .superseded,
+                  sameEntry(parent, "Cala.app", original) else { throw InstallResult.busy }
+        } else if errno != ENOENT { throw posixError() }
+        try Self.remove(marker, in: support)
+        try Self.remove("update-rollback", in: support)
+        try Self.remove("update-pending.json", in: support)
+        // A crash during disposal can leave an orphan stage, but cannot strand the journal.
+        if exists.st_ino != 0 { try cleanStage(for: target, expectedStage: exists) }
+    }
+
+    // Publish a complete verdict with an exclusive hard link. A suspended receipt
+    // writer cannot hold up rollback. A late writer cannot replace its decision.
+    func record(_ outcome: String, in support: URL, runningBundle: URL, runningID: String?) throws {
+        guard let runningID, runningBundle.resolvingSymlinksInPath().path == target.path else { return }
+        _ = try stage(for: target)
+        guard try Self.read(in: support) == self, try Self.identity(at: target) == to,
+              !FileManager.default.fileExists(atPath: support.appendingPathComponent("update-rollback").path)
+        else { return }
+        let bundle = try descriptor(open(target.path, directoryFlags))
+        let diskID = try Self.executableID(in: bundle)
+        guard diskID == runningID, executableID.map({ $0 == diskID }) ?? true else { return }
+        let temp = support.appendingPathComponent("update-receipt-" + UUID().uuidString)
+        try Data((outcome + " " + diskID).utf8).write(to: temp, options: .withoutOverwriting)
+        defer { unlink(temp.path) }
+        if link(temp.path, support.appendingPathComponent(marker).path) != 0, errno != EEXIST { throw posixError() }
+    }
+
+    func acceptsReceipt(in support: URL) throws -> Bool {
+        let bundle = try descriptor(open(target.path, directoryFlags))
+        let diskID = try Self.executableID(in: bundle)
+        guard executableID.map({ $0 == diskID }) ?? true,
+              let data = try? Data(contentsOf: support.appendingPathComponent(marker)) else { return false }
+        let body = String(decoding: data, as: UTF8.self)
+        return body == "healthy " + diskID || body == "quit " + diskID
+    }
+
+    func scheduleHealth(in support: URL, runningBundle: URL, delay: TimeInterval, work: DispatchQueue,
+                        runningID: @escaping () -> String? = UpdateJournal.runningExecutableID,
+                        completion: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            do {
-                guard try Self.read(in: support) == self, try Self.identity(at: target) == to,
-                      !FileManager.default.fileExists(atPath: support.appendingPathComponent("update-rollback").path)
-                else { return }
-                try Data().write(to: support.appendingPathComponent(marker), options: .atomic)
+            work.async {
+                do { try self.record("healthy", in: support, runningBundle: runningBundle, runningID: runningID()) }
+                catch { log("update: launch receipt failed: \(error)") }
                 completion()
-            } catch { log("update: launch receipt failed: \(error)") }
+            }
         }
     }
 }
 
 enum UpdateWatch {
     static func start(helper: URL, lock: FileHandle, support: URL, target: URL) throws -> Process {
-        // The enclosing installed/Cala.app snapshot was strictly verified under
-        // a private mkdtemp parent. Execute only its sealed, verified helper.
+        // Both the original verified snapshot and a rearmed copy are private.
+        // Verify the named executable still identifies the descriptor before exec.
         let snapshot = helper.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let bundle = try descriptor(open(snapshot.path, directoryFlags))
         let executable = try descriptor(openat(bundle.fileDescriptor, "Contents/Helpers/cala-update",
@@ -700,6 +866,7 @@ enum UpdateWatch {
         p.standardError = FileHandle.nullDevice
         p.arguments = ["arm", "--pending", support.appendingPathComponent("update-pending.json").path,
                        "--pid", String(getpid()), "--target", target.path]
+        guard sameEntry(bundle, "Contents/Helpers/cala-update", try status(executable)) else { throw InstallResult.busy }
         try p.run()
         let fd = pipe.fileHandleForReading.fileDescriptor
         var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)

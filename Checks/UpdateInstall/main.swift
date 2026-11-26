@@ -2,6 +2,12 @@ import Foundation
 import Darwin
 import CryptoKit
 
+// Watchdog dependencies. Lock tests never start the watchdog or an app.
+final class ConfigStore {
+    struct Config { let relaunchOnCrash = false }
+    let config = Config()
+}
+
 let fm = FileManager.default
 let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 var passed = 0
@@ -33,6 +39,10 @@ func sign(_ path: URL, id: String, requirement: String? = nil) throws {
     p.waitUntilExit()
     check(p.terminationStatus == 0, "real ad-hoc signing \(path.lastPathComponent)")
 }
+if CommandLine.arguments.last == "--probe-session" {
+    exit(CalaSessionLock.acquire(in: root, session: 7) == nil ? 1 : 0)
+}
+
 let helperPath = "Contents/Helpers/cala-keychain"
 let executable = "Contents/MacOS/Cala"
 let resource = "Contents/Resources/release"
@@ -244,6 +254,18 @@ func suite() throws {
         check(previous.path.hasSuffix("/previous/Cala.app"), "rollback path")
         if scenario == "swap" {
             try f.installer!.confirmWatch(previous: previous)
+            f.child?.terminate()
+            f.child?.waitUntilExit()
+            try f.installer!.confirmWatch(previous: previous)
+            check(f.installer!.watcher?.isRunning == true, "rearmed from pinned backup")
+            f.child?.terminate()
+            f.child?.waitUntilExit()
+            let changedHelper = previous.appendingPathComponent("Contents/Helpers/cala-update")
+            let originalHelper = try Data(contentsOf: changedHelper)
+            try Data("different helper".utf8).write(to: changedHelper)
+            do { try f.installer!.confirmWatch(previous: previous); check(false, "untrusted helper rejected before exec") }
+            catch { check(f.installer!.watcher?.isRunning != true, "changed helper never armed") }
+            try originalHelper.write(to: changedHelper)
             let copy = previous.deletingLastPathComponent().appendingPathComponent("displaced")
             try fm.moveItem(at: previous, to: copy)
             try fm.copyItem(at: old, to: previous)
@@ -312,18 +334,85 @@ func suite() throws {
     let backup = live.dir.appendingPathComponent(".cala-update.fixture/previous/Cala.app")
     let journal = UpdateJournal(from: "0.9.0+5", to: "1.0.0+99999", previous: backup.path, transaction: UUID())
     try journal.write(in: support)
-    journal.scheduleHealth(in: support, target: live.target, delay: 0.01) {}
+    let worker = DispatchQueue(label: "receipt.test")
+    var executableStat = stat()
+    check(stat(live.target.appendingPathComponent(executable).path, &executableStat) == 0, "fixture executable")
+    let runningID = UpdateJournal.fileID(executableStat)
+    var mappedStat = stat()
+    check(stat(CommandLine.arguments[0], &mappedStat) == 0 && UpdateJournal.runningExecutableID() == UpdateJournal.fileID(mappedStat),
+          "kernel mapped executable identity")
+    func ping() {
+        journal.scheduleHealth(in: support, runningBundle: live.target, delay: 0.01, work: worker, runningID: {
+            dispatchPrecondition(condition: .onQueue(worker))
+            return runningID
+        }) {}
+    }
+    ping()
     Thread.sleep(forTimeInterval: 0.1)
     let receipt = support.appendingPathComponent(journal.marker)
     check(!fm.fileExists(atPath: receipt.path), "frozen main loop cannot acknowledge")
     RunLoop.current.run(until: Date().addingTimeInterval(0.1))
     check(fm.fileExists(atPath: receipt.path), "live main loop acknowledges transaction")
     try fm.removeItem(at: receipt)
-    journal.scheduleHealth(in: support, target: live.target, delay: 0.01) {}
+    try journal.record("healthy", in: support, runningBundle: old, runningID: runningID)
+    try journal.record("healthy", in: support, runningBundle: live.target, runningID: "0:0")
+    check(!fm.fileExists(atPath: receipt.path), "same build at other path or different mapped inode cannot acknowledge")
+    try journal.record("quit", in: support, runningBundle: live.target, runningID: runningID)
+    check(try String(contentsOf: receipt, encoding: .utf8) == "quit " + runningID, "voluntary quit identifies installed transaction")
+    try fm.removeItem(at: receipt)
+    try Data("rollback".utf8).write(to: receipt)
+    try journal.record("quit", in: support, runningBundle: live.target, runningID: runningID)
+    check(try !journal.acceptsReceipt(in: support), "late quit cannot overwrite rollback claim")
+    try fm.removeItem(at: receipt)
+    ping()
     let other = UpdateJournal(from: journal.from, to: journal.to, previous: journal.previous, transaction: UUID())
     try other.write(in: support)
     RunLoop.current.run(until: Date().addingTimeInterval(0.1))
     check(!fm.fileExists(atPath: receipt.path), "stale transaction cannot acknowledge")
+
+    func contender() throws -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        p.arguments = [live.dir.path, "--probe-session"]
+        try p.run()
+        p.waitUntilExit()
+        return p.terminationStatus
+    }
+    let held = CalaSessionLock.acquire(in: live.dir, session: 7)!
+    check(try contender() == 1, "duplicate process exits before startup")
+    let secondLogin = CalaSessionLock.acquire(in: live.dir, session: 8)
+    check(secondLogin != nil && fcntl(held, F_GETFD) & FD_CLOEXEC != 0, "independent session and close on exec")
+    close(held)
+    close(secondLogin!)
+    check(try contender() == 0, "fresh process starts after predecessor exits")
+    let relaunch = CalaSessionLock.acquire(in: live.dir, session: 7)
+    check(relaunch != nil, "session reacquired after exit")
+    close(relaunch!)
+
+    let displaced = try Fixture()
+    guard case let .installed(previous) = displaced.run() else { check(false, "superseded install setup"); return }
+    let manual = try makeApp("manual", version: "1.3.0", build: 4)
+    try fm.removeItem(at: displaced.target)
+    try fm.copyItem(at: manual, to: displaced.target)
+    let installedInode = try inode(displaced.target)
+    check(displaced.run() == .upToDate, "superseded install reconciled even on older offer")
+    check(try UpdateJournal.read(in: displaced.tools.supportDirectory()) == nil && !fm.fileExists(atPath: previous.path)
+          && inode(displaced.target) == installedInode, "C preserved and superseded journal and stage closed")
+
+    let active = try Fixture()
+    guard case let .installed(activeBackup) = active.run() else { check(false, "live supersession setup"); return }
+    try fm.removeItem(at: active.target)
+    try fm.copyItem(at: new, to: active.target) // Same build string, different installed executable.
+    try Data("unsealed".utf8).write(to: active.target.appendingPathComponent(resource))
+    do { try active.installer!.confirmWatch(previous: activeBackup); check(false, "invalid replacement accepted") }
+    catch { check(fm.fileExists(atPath: activeBackup.path), "keep backup while replacement is invalid") }
+    try fm.removeItem(at: active.target)
+    try fm.copyItem(at: new, to: active.target)
+    do { try active.installer!.confirmWatch(previous: activeBackup); check(false, "obsolete handoff was armed") }
+    catch InstallResult.upToDate {
+        check(try UpdateJournal.read(in: active.tools.supportDirectory()) == nil && !fm.fileExists(atPath: activeBackup.path),
+              "deferred restart released after verified same-version replacement")
+    }
 
     let diskFull = try Fixture()
     let diskSupport = diskFull.tools.supportDirectory()
@@ -336,6 +425,17 @@ func suite() throws {
     check(try UpdateJournal.read(in: diskSupport) == nil && !fm.fileExists(atPath: diskSupport.appendingPathComponent("update-rollback").path),
           "restored pending and rollback markers removed together")
 
+    let otherProfile = diskFull.dir.appendingPathComponent("second-account")
+    try mkdir(otherProfile)
+    diskFull.tools.supportDirectory = { otherProfile }
+    diskFull.tools.blocked = { [] }
+    check(try UpdateJournal.sharedBlocks(target: diskFull.target).contains("1.1.0+2"), "second account reads shared block")
+    let secondAccountBlocks = try UpdateJournal.sharedBlocks(target: diskFull.target)
+    check(UpdateRules.evaluate(base, running: AppVersion(version: "1.0.0", build: "99999")!, bundleId: base.bundleId,
+                               os: ProcessInfo.processInfo.operatingSystemVersion, highestSeen: nil, skipped: nil,
+                               blocked: secondAccountBlocks, testURLs: true) == .upToDate, "no offer in fresh account")
+    check(verification(diskFull.run()), "shared block stops installer with a fresh profile")
+    diskFull.tools.supportDirectory = { diskSupport }
     try Data().write(to: diskSupport.appendingPathComponent("update-rollback"))
     // The old build could clear only pending at startup. A later install cleans the orphan under flock.
     diskFull.manifest.version = "1.2.0"

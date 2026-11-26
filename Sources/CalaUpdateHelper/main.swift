@@ -11,6 +11,7 @@ private struct Pending: Decodable {
     let from: String
     let to: String
     let previous: String
+    let executableID: String?
     let transaction: UUID?
 }
 
@@ -53,12 +54,6 @@ private struct Watch {
     }
 
     func run() throws {
-        var prepared = false
-        defer {
-            if !arm && !prepared && wait(seconds: 120, until: { kill(oldPID, 0) != 0 && errno == ESRCH }) {
-                try? reopen()
-            }
-        }
         let parent = target.deletingLastPathComponent()
         let parentFD = try descriptor(open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), "open app parent")
         defer { close(parentFD) }
@@ -104,6 +99,12 @@ private struct Watch {
             guard fstat(fd, &s) == 0, let named = try? bundleStat(directory) else { return false }
             return s.st_dev == named.st_dev && s.st_ino == named.st_ino
         }
+        let executable = try descriptor(openat(new, "Contents/MacOS/Cala", O_RDONLY | O_CLOEXEC | O_NOFOLLOW_ANY), "pin executable")
+        defer { close(executable) }
+        var image = stat()
+        guard fstat(executable, &image) == 0, image.st_mode & S_IFMT == S_IFREG else { throw Failure("Invalid target executable") }
+        let executableID = "\(UInt32(bitPattern: image.st_dev)):\(image.st_ino)"
+        guard pending.executableID.map({ $0 == executableID }) ?? true else { throw Failure("Incoming executable changed") }
         let oldURL = try pinned(old)
         let oldInfo = try infoPlist(oldURL)
         let newInfo = try infoPlist(pinned(new))
@@ -146,6 +147,12 @@ private struct Watch {
         let sentinelReserve = support.appendingPathComponent("update-rollback-reserve")
         try Data(String(getpid()).utf8).write(to: sentinelReserve, options: .atomic)
         defer { unlink(sentinelReserve.path) }
+        // Reserve the shared block on the install volume while preparation can still fail safely.
+        let sharedReserve = "block-" + UUID().uuidString
+        let sharedFD = try descriptor(openat(stageFD, sharedReserve, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o644),
+                                      "reserve shared blocked build")
+        close(sharedFD)
+        defer { unlinkat(stageFD, sharedReserve, 0) }
         let stageRoot = try pinned(stageFD)
         func clean() throws {
             for child in try FileManager.default.contentsOfDirectory(atPath: stageRoot.path) {
@@ -161,55 +168,93 @@ private struct Watch {
             var byte: UInt8 = 1
             guard write(STDOUT_FILENO, &byte, 1) == 1 else { throw Failure("Could not confirm helper ready") }
         }
-        prepared = true
         while kill(oldPID, 0) == 0 || errno == EPERM {
             if !FileManager.default.fileExists(atPath: pendingURL.path) { return }
+            // Let A reconcile a manual C even if A is still deferring its restart.
+            if !matchesEntry(old, in: parentFD) && !matchesEntry(new, in: parentFD) { return }
             Thread.sleep(forTimeInterval: 0.1)
         }
         guard matchesEntry(new, in: parentFD), matchesEntry(old, in: previousFD) else {
-            try reopen()
+            // An interrupted preparation may still have A installed. Only reopen the pinned A.
+            if matchesEntry(old, in: parentFD) { try validateOld(in: parentFD); try reopen() }
             return
         }
-        let launched = launch()
-        if launched && wait(seconds: upTimeout(oldInfo), until: { FileManager.default.fileExists(atPath: marker.path) }) {
+        func accepted() -> Bool {
+            var installedImage = stat()
+            guard let data = try? Data(contentsOf: marker), matchesEntry(new, in: parentFD),
+                  fstatat(new, "Contents/MacOS/Cala", &installedImage, AT_SYMLINK_NOFOLLOW) == 0,
+                  installedImage.st_dev == image.st_dev, installedImage.st_ino == image.st_ino else { return false }
+            let body = String(decoding: data, as: UTF8.self)
+            return body == "healthy " + executableID || body == "quit " + executableID
+        }
+        func finishAccepted() throws {
             try clean()
             try FileManager.default.removeItem(at: pendingURL)
             unlink(marker.path)
-            return
         }
+        if accepted() { try finishAccepted(); return }
+        let launched = launch()
+        if launched && wait(seconds: upTimeout(oldInfo), until: accepted) { try finishAccepted(); return }
 
-        // All allocation for the block list happened before the handoff. The
-        // pending record also fails closed if even this rename cannot be saved.
+        guard matchesEntry(new, in: parentFD) else { return } // a manual installation superseded this one
+        try validateOld(in: previousFD)
+        // Atomic first verdict wins even if the app is suspended halfway through
+        // preparing a receipt. A receipt naming another executable cannot win.
+        if link(sentinelReserve.path, marker.path) != 0 {
+            guard errno == EEXIST else { throw posixFailure("claim rollback") }
+            if accepted() { try finishAccepted(); return }
+        }
+        guard rename(sentinelReserve.path, rollback.path) == 0 else { throw posixFailure("begin rollback") }
+
         let recorded = rename(reserve.path, blockedURL.path) == 0 && fsync(supportFD) == 0
-        do {
-            guard matchesEntry(new, in: parentFD), matchesEntry(old, in: previousFD),
-                  access(try pinned(previousFD).path, W_OK | X_OK) == 0, access(parent.path, W_OK | X_OK) == 0
-            else { throw Failure("Rollback directories changed or became unwritable") }
+        let sharedName = ".cala-blocked-" + pending.to
+        var sharedPublished = false
+        func saveSharedBlock() -> Bool {
+            if !sharedPublished {
+                sharedPublished = renameat(stageFD, sharedReserve, parentFD, sharedName) == 0
+            }
+            return sharedPublished && fsync(parentFD) == 0
+        }
+        var sharedRecorded = saveSharedBlock()
+        var attempts = 0
+        while true {
+            guard matchesEntry(new, in: parentFD), matchesEntry(old, in: previousFD) else {
+                throw Failure("Rollback bundle changed")
+            }
             try validateOld(in: previousFD)
-            // A full volume may prevent a new sentinel. Restore under the lock
-            // anyway when the failed build is already gone.
-            if rename(sentinelReserve.path, rollback.path) != 0 {
-                let failure = posixFailure("publish rollback sentinel")
-                guard try matchingProcesses(target.appendingPathComponent("Contents/MacOS/Cala").path).isEmpty else { throw failure }
+            do {
+                try stopTarget { matchesEntry(new, in: parentFD) && matchesEntry(old, in: previousFD) }
+                guard matchesEntry(new, in: parentFD), matchesEntry(old, in: previousFD) else {
+                    throw Failure("Rollback bundle changed")
+                }
+                #if CALA_UPDATE_TEST
+                if attempts == 0, ProcessInfo.processInfo.environment["CALA_UPDATE_TEST_RESTORE_ERROR"] == "1" {
+                    throw Failure("Injected transient restore failure")
+                }
+                #endif
+                guard renameatx_np(previousFD, "Cala.app", parentFD, "Cala.app", UInt32(RENAME_SWAP)) == 0
+                else { throw posixFailure("restore previous Cala") }
+                break
+            } catch {
+                attempts += 1
+                if attempts == 1 { log("will retry rollback: \(error)", in: support) }
+                Thread.sleep(forTimeInterval: min(5, Double(attempts)))
             }
-            try stopTarget()
-            #if CALA_UPDATE_TEST
-            if ProcessInfo.processInfo.environment["CALA_UPDATE_TEST_RESTORE_ERROR"] == "1" {
-                throw Failure("Injected restore failure")
-            }
-            #endif
-            guard matchesEntry(new, in: parentFD), matchesEntry(old, in: previousFD),
-                  renameatx_np(previousFD, "Cala.app", parentFD, "Cala.app", UInt32(RENAME_SWAP)) == 0
-            else { throw posixFailure("restore previous Cala") }
-        } catch {
-            unlink(rollback.path)
-            try reopen()
-            throw error
+        }
+        guard matchesEntry(old, in: parentFD), matchesEntry(new, in: previousFD) else {
+            throw Failure("Unexpected bundle after rollback")
         }
         log("rolled back \(pending.to) to \(pending.from)", in: support)
         try reopen()
+        // A second account has no access to this profile's pending record.
+        // Keep the install lock until the install-wide block is durable.
+        while !sharedRecorded {
+            Thread.sleep(forTimeInterval: 2)
+            sharedRecorded = saveSharedBlock()
+        }
         if recorded {
             try clean()
+            unlink(marker.path)
             if unlink(rollback.path) != 0 && errno != ENOENT { throw posixFailure("remove rollback marker") }
             try FileManager.default.removeItem(at: pendingURL)
         }
@@ -280,20 +325,36 @@ private struct Watch {
         return info
     }
 
-    private func stopTarget() throws {
-        let executable = target.resolvingSymlinksInPath().appendingPathComponent("Contents/MacOS/Cala").path
-        let processes = try matchingProcesses(executable)
-        for pid in processes where matches(pid, executable: executable) {
-            if kill(pid, SIGTERM) != 0, errno != ESRCH { throw posixFailure("terminate Cala") }
+    private func stopTarget(stillInstalled: () -> Bool) throws {
+        var executable = target.resolvingSymlinksInPath().appendingPathComponent("Contents/MacOS/Cala").path
+        var grace = 15.0
+        #if CALA_UPDATE_TEST
+        if let fixture = ProcessInfo.processInfo.environment["CALA_UPDATE_TEST_STUB"],
+           fixture == support.appendingPathComponent("stubborn-stub").path {
+            executable = fixture
+            grace = 0.35
         }
-        let deadline = ProcessInfo.processInfo.systemUptime + 10
-        repeat {
-            if try matchingProcesses(executable).isEmpty { return }
+        #endif
+        // Track this incarnation of each PID. Recheck uid, executable path and birth
+        // time before escalation so a replacement process gets its own grace period.
+        var deadlines: [ProcessIdentity: TimeInterval] = [:]
+        while true {
+            let pids = try matchingProcesses(executable)
+            if pids.isEmpty { return }
+            for pid in pids {
+                guard let identity = processIdentity(pid, executable: executable) else { continue }
+                guard stillInstalled() else { throw Failure("Rollback bundle changed") }
+                let now = ProcessInfo.processInfo.systemUptime
+                if let deadline = deadlines[identity] {
+                    if now >= deadline, kill(pid, SIGKILL) != 0, errno != ESRCH { throw posixFailure("stop frozen Cala") }
+                } else {
+                    if kill(pid, SIGTERM) != 0, errno != ESRCH { throw posixFailure("terminate Cala") }
+                    deadlines[identity] = now + grace
+                }
+            }
             Thread.sleep(forTimeInterval: 0.1)
-        } while ProcessInfo.processInfo.systemUptime < deadline
-        throw Failure("Cala did not quit after SIGTERM; leaving both apps in place")
+        }
     }
-
 
 }
 
@@ -304,17 +365,25 @@ private func matchingProcesses(_ executable: String) throws -> [pid_t] {
     let size = Int32(pids.count * MemoryLayout<pid_t>.stride)
     let listed = proc_listallpids(&pids, size)
     guard listed > 0, listed < pids.count else { throw Failure("Could not read the process list") }
-    return pids.prefix(Int(listed)).filter { matches($0, executable: executable) }
+    return pids.prefix(Int(listed)).filter { processIdentity($0, executable: executable) != nil }
 }
 
-private func matches(_ pid: pid_t, executable: String) -> Bool {
-    guard pid > 1 else { return false }
+private struct ProcessIdentity: Hashable {
+    let pid: pid_t
+    let seconds: UInt64
+    let microseconds: UInt64
+}
+
+private func processIdentity(_ pid: pid_t, executable: String) -> ProcessIdentity? {
+    guard pid > 1 else { return nil }
     var info = proc_bsdinfo()
     let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_uid == getuid() else { return false }
+    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_uid == getuid() else { return nil }
     var path = [CChar](repeating: 0, count: 4096)
     let length = UInt32(path.count)
-    return proc_pidpath(pid, &path, length) > 0 && String(cString: path) == executable
+    guard proc_pidpath(pid, &path, length) > 0, String(cString: path) == executable,
+          info.pbi_status != UInt32(SZOMB) else { return nil }
+    return ProcessIdentity(pid: pid, seconds: info.pbi_start_tvsec, microseconds: info.pbi_start_tvusec)
 }
 
 private func infoPlist(_ app: URL) throws -> [String: Any] {
