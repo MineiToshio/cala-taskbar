@@ -230,15 +230,16 @@ enum WindowService {
     /// Fixes windows restored off-screen: either outside every connected display (a display was unplugged)
     /// or out of sync between the app and the WindowServer (the app's AX frame differs from where the
     /// WindowServer keeps it, which happens after displays are rearranged and leaves the window invisible).
-    static func ensureOnScreen(_ ax: AXUIElement, id: CGWindowID) {
+    @discardableResult
+    static func ensureOnScreen(_ ax: AXUIElement, id: CGWindowID) -> Bool {
         guard (attr(ax, kAXMinimizedAttribute) as? Bool) != true, !isFullScreen(ax),
-              let axFrame = frame(ax), axFrame.width > 0 else { return }
+              let axFrame = frame(ax), axFrame.width > 0 else { return false }
         let screens = cgScreens()
-        guard !screens.isEmpty else { return }
+        guard !screens.isEmpty else { return false }
         let server = windowServerBounds(id)
         let desynced = server.map { abs($0.minX - axFrame.minX) > 2 || abs($0.minY - axFrame.minY) > 2 } ?? false
         let offscreen = !isVisible(axFrame, on: screens) || (server.map { !isVisible($0, on: screens) } ?? false)
-        guard desynced || offscreen else { return }
+        guard desynced || offscreen else { return false }
 
         // Target: the screen the app believes it is on, if valid; otherwise the screen under the mouse.
         let mouse = NSEvent.mouseLocation
@@ -266,6 +267,7 @@ enum WindowService {
         // Setting the same position the app already holds is a no-op; nudge first to force a real move.
         if origin == axFrame.origin { setPos(CGPoint(x: origin.x + 1, y: origin.y + 1)) }
         setPos(origin)
+        return true
     }
 
     private static func closeTarget(_ w: WinRef, run: ModuleCancellation) -> WinRef? {
@@ -335,6 +337,12 @@ enum WindowService {
                 NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
             }
             return true
+        }
+        // A window that counts as open but is lost (off every screen, or out of sync with the WindowServer after
+        // displays changed) would otherwise be minimized or left alone by this click: bring it back and show it.
+        if let lost = wins.first(where: { w in !w.minimized && w.ax.map { ensureOnScreen($0, id: w.id) } == true }) {
+            raise(lost)
+            return false
         }
         if app.isActive, let visible = wins.first(where: { !$0.minimized }) {
             if wins.filter({ !$0.minimized }).count == 1 { minimize(visible, run: run) } else { bringFront(app) }
