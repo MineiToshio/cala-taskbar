@@ -82,24 +82,54 @@ struct MailKeychainGate {
 /// copy can never lose the password.
 struct MailCredentialStore: @unchecked Sendable {
     /// Result of reading the helper's own item.
-    enum OwnItem: Equatable { case found, missing, unreadable, refused }
+    enum OwnItem: Equatable { case found, missing, denied, broken, refused }
     /// What happens next (pure, pinned by the checks).
-    enum Next: Equatable { case use, readOldThenCopy, readOldOnly, fail }
+    enum Next: Equatable { case use, readOldThenCopy, readOldOnly, forgetAndExplain, fail }
 
-    static func next(after own: OwnItem) -> Next {
+    /// `migrated`: this account's password was already copied into the helper's item (MailKeychainGate). Once it was,
+    /// the old item is never read again.
+    static func next(after own: OwnItem, migrated: Bool) -> Next {
         switch own {
         case .found: return .use
-        case .missing: return .readOldThenCopy
-        case .unreadable: return .readOldOnly   // denied or broken: keep mail working from the old item, copy nothing
-        case .refused: return .fail             // the helper refused this Cala (77/78): the old item would fail too
+        case .missing: return migrated ? .forgetAndExplain : .readOldThenCopy // the copy vanished: explain first
+        case .denied, .refused: return .fail       // the person said no, or the helper refused this Cala (77/78)
+        case .broken: return migrated ? .fail : .readOldOnly // keep mail working from the old item, copy nothing
         }
     }
 
-    static func ownAccount(_ id: String) -> String { "v2:" + id }
+    static let reservedPrefix = "v2:"
+    static func ownAccount(_ id: String) -> String { reservedPrefix + id }
+    /// Account ids that would collide with the helper's own items.
+    static func isReserved(_ id: String) -> Bool { id.lowercased().hasPrefix(reservedPrefix) }
+
+    /// Per-account generation, bumped by every write: a copy captured before a write (or removal) must not land after
+    /// it. `state` also makes "compare, then copy" atomic with respect to writes.
+    final class Generations: @unchecked Sendable {
+        private var values: [String: UInt64] = [:]
+        let state = NSLock()
+        /// One account's old-item read and copy at a time, so macOS windows for several accounts do not stack.
+        let migration = NSLock()
+        func current(_ id: String) -> UInt64 { state.lock(); defer { state.unlock() }; return values[id, default: 0] }
+        /// Caller holds `state`.
+        func bumpLocked(_ id: String) { values[id, default: 0] &+= 1 }
+        func valueLocked(_ id: String) -> UInt64 { values[id, default: 0] }
+    }
 
     let get: (String) throws -> String?
     let set: (String?, String) throws -> Void
     let gate: MailKeychainGate
+    let generations: Generations
+    /// Test hook: runs after the old item was read, before the copy (simulates a slow macOS dialog).
+    var afterOldRead: ((String) -> Void)?
+
+    init(get: @escaping (String) throws -> String?, set: @escaping (String?, String) throws -> Void,
+         gate: MailKeychainGate, generations: Generations = Generations(), afterOldRead: ((String) -> Void)? = nil) {
+        self.get = get
+        self.set = set
+        self.gate = gate
+        self.generations = generations
+        self.afterOldRead = afterOldRead
+    }
 
     static func live() -> MailCredentialStore {
         MailCredentialStore(get: { try MailKeychain.password(for: $0) }, set: { try MailKeychain.set($0, for: $1) },
@@ -107,6 +137,9 @@ struct MailCredentialStore: @unchecked Sendable {
     }
 
     func read(_ id: String) throws -> String? {
+        // Before anything else: a write that lands while this read waits (for the helper or for another account's
+        // migration) must make the copy below stale.
+        let generation = generations.current(id)
         var own: OwnItem
         var value: String?
         var failure: Error?
@@ -116,20 +149,42 @@ struct MailCredentialStore: @unchecked Sendable {
         } catch let error as MailFailure where error == .keychainRestart || error == .keychainUnverified {
             own = .refused
             failure = error
+        } catch let error as MailFailure where error == .keychainDenied {
+            own = .denied
+            failure = error
         } catch {
-            own = .unreadable
-            log("mail: the helper's own Keychain item could not be read (\(MailFailure.from(error).logCode)); using the old one")
+            own = .broken
+            failure = error
         }
-        switch Self.next(after: own) {
+        let next = Self.next(after: own, migrated: gate.isMigrated(id))
+        switch next {
         case .use:
             gate.markMigrated(id)
             return value
         case .fail:
             throw failure ?? MailFailure.keychain
+        case .forgetAndExplain:
+            log("mail: the helper's own Keychain item is gone; explaining before reading the old one")
+            gate.clearMigrated(id)
+            throw MailFailure.keychainNeedsNotice
         case .readOldOnly:
+            log("mail: the helper's own Keychain item could not be read (\(MailFailure.from(failure ?? MailFailure.keychain).logCode)); using the old one")
             return try get(id)
         case .readOldThenCopy:
+            generations.migration.lock()
+            defer { generations.migration.unlock() }
+            // Settings saved or removed this account while we waited, or sync was cancelled: the helper's own item is
+            // now the answer, without touching (or asking about) the old one.
+            if generations.current(id) != generation || Task.isCancelled { return try get(Self.ownAccount(id)) }
             guard let old = try get(id) else { return nil }
+            afterOldRead?(id)
+            generations.state.lock()
+            defer { generations.state.unlock() }
+            // Settings wrote or removed this account while macOS was asking: its value wins, copy nothing.
+            guard generations.valueLocked(id) == generation else {
+                log("mail: app password changed while copying; keeping the newer one")
+                return old
+            }
             do {
                 try set(old, Self.ownAccount(id))
                 gate.markMigrated(id)
@@ -146,6 +201,9 @@ struct MailCredentialStore: @unchecked Sendable {
 
     /// New and changed passwords go to the helper's own item only; removing deletes that item (the old one stays).
     func write(_ password: String?, _ id: String) throws {
+        generations.state.lock()
+        defer { generations.state.unlock() }
+        generations.bumpLocked(id)
         try set(password, Self.ownAccount(id))
         if password != nil { gate.markMigrated(id) } else { gate.clearMigrated(id) }
     }
@@ -233,6 +291,8 @@ final class MailService: ObservableObject {
     /// Only the shared service tracks the build (the checks inject their own credential closures and must not touch
     /// the user's defaults).
     private var keychainGate: MailKeychainGate?
+    private var keychainPresenter: ((_ prompts: Int, _ proceed: @escaping @MainActor () -> Void) -> Void)?
+    private var accountsAwaitingNotice: Set<String> = []
 
     private let accountsURL: URL?
     private let makeConnection: (MailProvider) -> MailIMAP
@@ -286,6 +346,10 @@ final class MailService: ObservableObject {
         var seen: Set<String> = []
         let loaded = decoded.compactMap { account -> MailAccount? in
             let id = Self.normalize(account.id)
+            if MailCredentialStore.isReserved(id) {
+                log("mail: ignored a saved account whose id starts with \"\(MailCredentialStore.reservedPrefix)\" (reserved)")
+                return nil
+            }
             guard MailCredentialCheck.isEmail(id), seen.insert(id).inserted else { return nil }
             return MailAccount(id: id, label: account.label, colorIndex: Self.clampedColor(account.colorIndex),
                                enabled: account.enabled, provider: account.provider)
@@ -319,7 +383,8 @@ final class MailService: ObservableObject {
     /// closure to call once the person has read it). Nothing is read from the Keychain until then; when every enabled
     /// account was moved already, it starts at once. A copy that failed leaves the account unmoved, so the explanation
     /// comes back on the next launch.
-    func start(explainingKeychain present: (_ prompts: Int, _ proceed: @escaping @MainActor () -> Void) -> Void) {
+    func start(explainingKeychain present: @escaping (_ prompts: Int, _ proceed: @escaping @MainActor () -> Void) -> Void) {
+        keychainPresenter = present
         let prompts = keychainGate?.expectedPrompts(for: accounts.filter(\.enabled).map(\.id)) ?? 0
         guard !running, prompts > 0 else { start(); return }
         awaitingKeychainNotice = true
@@ -331,7 +396,29 @@ final class MailService: ObservableObject {
         guard awaitingKeychainNotice else { return }
         awaitingKeychainNotice = false
         log("mail: Keychain explanation dismissed, starting sync")
-        start()
+        let waiting = accountsAwaitingNotice
+        accountsAwaitingNotice.removeAll()
+        guard running else { start(); return }
+        for id in waiting where accounts.contains(where: { $0.id == id && $0.enabled }) { launch(id) }
+    }
+
+    /// A moved account lost its own Keychain item mid-run: its flag was cleared, so the next read goes to the old item
+    /// and macOS will ask. Explain first (as at launch), then read again.
+    private func explainKeychainAgain(for id: String) {
+        accountsAwaitingNotice.insert(id)
+        status[id] = .paused
+        guard !awaitingKeychainNotice else { return }
+        guard let present = keychainPresenter else {
+            Task { @MainActor [weak self] in self?.continueWithoutNotice() }
+            return
+        }
+        awaitingKeychainNotice = true
+        present(2 * accountsAwaitingNotice.count) { [weak self] in self?.continueAfterKeychainNotice() }
+    }
+
+    private func continueWithoutNotice() {
+        awaitingKeychainNotice = true
+        continueAfterKeychainNotice()
     }
 
     func stop() {
@@ -339,6 +426,7 @@ final class MailService: ObservableObject {
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
         awaitingKeychainNotice = false
+        accountsAwaitingNotice.removeAll()
         for connection in pendingSignIns.values { connection.close() }
         pendingSignIns.removeAll()
         guard running else { return }
@@ -364,6 +452,7 @@ final class MailService: ObservableObject {
         guard !accountsLoadFailed else { throw MailFailure.accountsFile }
         let id = Self.normalize(email)
         guard MailCredentialCheck.isEmail(id) else { throw MailFailure.invalidEmail }
+        guard !MailCredentialStore.isReserved(id) else { throw MailFailure.reservedEmail }
         guard provider.looksLikeAppPassword(appPassword) else { throw MailFailure.invalidAppPassword }
         let password = provider.passwordForLogin(provider.normalizeAppPassword(appPassword))
 
@@ -602,6 +691,11 @@ final class MailService: ObservableObject {
                 run.connection = nil
                 guard runs[id] === run, !Task.isCancelled else { return }
                 let failure = MailFailure.from(error)
+                if failure == .keychainNeedsNotice {
+                    failOperations(in: run, with: .unavailable)
+                    explainKeychainAgain(for: id)
+                    return
+                }
                 log("mail: \(logName(id)) sync failed \(failure.logCode) retry=\(!failure.requiresUserAction)")
                 status[id] = failure.status
                 failOperations(in: run, with: failure, afterDisconnect: !failure.requiresUserAction)
@@ -825,6 +919,10 @@ enum MailFailure: LocalizedError {
     case keychainRestart
     /// The Keychain helper could not confirm who called it (an OS check failed; Developer ID builds only).
     case keychainUnverified
+    /// The helper's own item vanished for an account already moved: explain the coming macOS windows, then read again.
+    case keychainNeedsNotice
+    /// An address starting with "v2:", which Cala reserves for its own Keychain entries.
+    case reservedEmail
     case accountsFile, keychain, keychainDenied, unavailable, staleMessage, missingMailbox, moveUnsupported, rejected, responseTooLarge, messageTooLarge, cancelled
 
     static func from(_ error: Error) -> Self {
@@ -893,6 +991,11 @@ enum MailFailure: LocalizedError {
                       "macOS no dejó que Cala leyera la contraseña de aplicación del Llavero. Pulsa Actualizar y elige «Permitir siempre».")
         case .keychainRestart:
             return tx("Restart Cala to refresh its Keychain access.", "Reinicia Cala para actualizar el acceso al llavero.")
+        case .keychainNeedsNotice:
+            return tx("macOS will ask for Keychain access again.", "macOS volverá a pedir acceso al Llavero.")
+        case .reservedEmail:
+            return tx("Addresses that start with “v2:” can’t be used: Cala reserves that prefix for its Keychain entries.",
+                      "No se pueden usar direcciones que empiecen por «v2:»: Cala reserva ese prefijo para sus entradas del Llavero.")
         case .keychainUnverified:
             return tx("macOS couldn’t confirm that the Keychain request came from Cala. Restart your Mac; if it keeps happening, reinstall Cala.",
                       "macOS no pudo confirmar que la petición al Llavero venía de Cala. Reinicia tu Mac; si se repite, reinstala Cala.")

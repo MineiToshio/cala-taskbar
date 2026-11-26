@@ -948,8 +948,10 @@ final class FakeKeychain: @unchecked Sendable {
     var reads: [String: Int] = [:]
     var failRead: [String: MailFailure] = [:]
     var failWrite: [String: MailFailure] = [:]
+    var onGet: ((String) -> Void)?
     init(_ items: [String: String] = [:]) { self.items = items }
     func get(_ account: String) throws -> String? {
+        onGet?(account)
         reads[account, default: 0] += 1
         if let failure = failRead[account] { throw failure }
         return items[account]
@@ -962,10 +964,19 @@ final class FakeKeychain: @unchecked Sendable {
 
 private func checkCredentialMigration() {
     typealias Store = MailCredentialStore
-    expect("Migration plan: own item found is used; missing reads the old item and copies it",
-           Store.next(after: .found) == .use && Store.next(after: .missing) == .readOldThenCopy)
-    expect("Migration plan: an unreadable own item falls back to the old one without copying; a refused helper fails",
-           Store.next(after: .unreadable) == .readOldOnly && Store.next(after: .refused) == .fail)
+    expect("Migration plan: own item found is used (moved or not); missing and not moved reads the old item and copies it",
+           Store.next(after: .found, migrated: false) == .use && Store.next(after: .found, migrated: true) == .use
+           && Store.next(after: .missing, migrated: false) == .readOldThenCopy)
+    expect("Migration plan: a moved account whose own item vanished clears the flag and explains first (never reads the old item silently)",
+           Store.next(after: .missing, migrated: true) == .forgetAndExplain)
+    expect("Migration plan: a denied own item always fails (no old-item read); so does a refused helper",
+           Store.next(after: .denied, migrated: false) == .fail && Store.next(after: .denied, migrated: true) == .fail
+           && Store.next(after: .refused, migrated: false) == .fail && Store.next(after: .refused, migrated: true) == .fail)
+    expect("Migration plan: a broken own item falls back to the old one only while not moved",
+           Store.next(after: .broken, migrated: false) == .readOldOnly && Store.next(after: .broken, migrated: true) == .fail)
+    expect("Account ids starting with \"v2:\" are reserved and rejected with their own message",
+           Store.isReserved("v2:a@b.test") && Store.isReserved("V2:a@b.test") && !Store.isReserved("av2:a@b.test")
+           && MailFailure.reservedEmail.localizedDescription != MailFailure.invalidEmail.localizedDescription)
 
     let suite = "cala-mail-migration-\(UUID().uuidString)"
     guard let defaults = UserDefaults(suiteName: suite) else { expect("migration defaults", false); return }
@@ -989,16 +1000,71 @@ private func checkCredentialMigration() {
     expect("Migration: once moved, only the helper's own item is read (the old item is not touched)",
            third == "secret" && keychain.reads[old] == oldReads)
 
+    func failure(_ body: () throws -> Any?) -> MailFailure? {
+        do { _ = try body(); return nil } catch { return error as? MailFailure }
+    }
     keychain.failRead[own] = .keychainDenied
-    let denied = try? store.read(old)
-    expect("Migration: an own item that cannot be read falls back to the old item, copying nothing",
-           denied == "secret" && keychain.reads[old] == (oldReads ?? 0) + 1)
+    expect("Migration: a denied own item is reported and the old item is not read",
+           failure { try store.read(old) } == .keychainDenied && keychain.reads[old] == oldReads)
+    keychain.failRead[own] = .keychain
+    expect("Migration: a broken own item of a moved account fails without touching the old item",
+           failure { try store.read(old) } == .keychain && keychain.reads[old] == oldReads)
     keychain.failRead[own] = .keychainRestart
-    var refused: MailFailure?
-    do { _ = try store.read(old) } catch { refused = error as? MailFailure }
     expect("Migration: a helper that refuses Cala is reported, without trying the old item",
-           refused == .keychainRestart && keychain.reads[old] == (oldReads ?? 0) + 1)
+           failure { try store.read(old) } == .keychainRestart && keychain.reads[old] == oldReads)
     keychain.failRead[own] = nil
+
+    let broken = "broken@example.test"
+    keychain.items[broken] = "legacy"
+    keychain.failRead[Store.ownAccount(broken)] = .keychain
+    expect("Migration: a broken own item of an account not moved yet falls back to the old item, copying nothing",
+           (try? store.read(broken)) == "legacy" && keychain.items[Store.ownAccount(broken)] == nil && !gate.isMigrated(broken))
+    keychain.failRead[Store.ownAccount(broken)] = nil
+
+    keychain.items[own] = nil   // the person deleted the helper's item (or restored an old Keychain)
+    let readsBefore = keychain.reads[old]
+    expect("Migration: a moved account whose own item vanished asks for the explanation and forgets the flag",
+           failure { try store.read(old) } == .keychainNeedsNotice && !gate.isMigrated(old) && keychain.reads[old] == readsBefore
+           && gate.expectedPrompts(for: [old]) == 2)
+    expect("Migration: after that explanation the next read copies from the old item again",
+           (try? store.read(old)) == "secret" && keychain.items[own] == "secret" && gate.isMigrated(old))
+
+    // Race: Settings changes or removes the account while macOS is asking about the old item.
+    let racing = "race@example.test"
+    keychain.items[racing] = "stale"
+    var raced = Store(get: keychain.get, set: keychain.set, gate: gate, generations: store.generations)
+    raced.afterOldRead = { id in try? store.write("newer", id) }
+    let racedValue = try? raced.read(racing)
+    expect("Migration race: a password written during the old-item read is kept; the stale copy is skipped",
+           racedValue == "stale" && keychain.items[Store.ownAccount(racing)] == "newer" && gate.isMigrated(racing))
+    let removed = "removed@example.test"
+    keychain.items[removed] = "stale"
+    raced.afterOldRead = { id in try? store.write(nil, id) }
+    _ = try? raced.read(removed)
+    expect("Migration race: an account removed during the old-item read is not recreated or marked moved",
+           keychain.items[Store.ownAccount(removed)] == nil && !gate.isMigrated(removed))
+
+    // Race: account A waits for the migration lock (another account's macOS window is open) and Settings saves A's
+    // new password meanwhile. A must not read its old item and must not overwrite the new password.
+    let waiting = "waiting@example.test"
+    keychain.items[waiting] = "OLD-A"
+    let reachedOwnItem = DispatchSemaphore(value: 0), finished = DispatchSemaphore(value: 0)
+    keychain.onGet = { account in if account == Store.ownAccount(waiting) { reachedOwnItem.signal() } }
+    store.generations.migration.lock()           // "account B's dialog is open"
+    nonisolated(unsafe) var waitingResult: String?
+    Thread.detachNewThread {
+        waitingResult = try? store.read(waiting)
+        finished.signal()
+    }
+    reachedOwnItem.wait()
+    keychain.onGet = nil
+    Thread.sleep(forTimeInterval: 0.05)          // A is now blocked on the migration lock
+    try? store.write("NEW-A", waiting)           // Settings saves while A waits
+    store.generations.migration.unlock()         // B's dialog closes
+    finished.wait()
+    expect("Migration race: a password saved while the account waited for another migration wins; the old item is not read",
+           waitingResult == "NEW-A" && keychain.items[Store.ownAccount(waiting)] == "NEW-A" && keychain.reads[waiting] == nil
+           && gate.isMigrated(waiting))
 
     let fresh = "new@example.test"
     try? store.write("brand-new", fresh)

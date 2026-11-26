@@ -1019,8 +1019,8 @@ private struct MailKeychainNote: View {
                 Text(tx("Cala saves this app password in the macOS Keychain, your Mac’s password safe.",
                         "Cala guarda esta contraseña en el Llavero de macOS, la caja fuerte de contraseñas de tu Mac."))
                     .fontWeight(.medium)
-                Text(tx("If you saved this account with an older Cala, macOS may show up to two windows for “cala-keychain” once. Type your Mac password if asked and choose “Always Allow” in both.",
-                        "Si guardaste esta cuenta con una Cala anterior, macOS puede mostrar una vez hasta dos ventanas para «cala-keychain». Escribe la contraseña de tu Mac si te la pide y elige «Permitir siempre» en ambas."))
+                Text(tx("If you saved this account with an older Cala, macOS may show up to two windows for “cala-keychain” once. Type your Mac password if asked and click “Always Allow” in both (Enter only allows it this once).",
+                        "Si guardaste esta cuenta con una Cala anterior, macOS puede mostrar una vez hasta dos ventanas para «cala-keychain». Escribe la contraseña de tu Mac si te la pide y haz clic en «Permitir siempre» en ambas (Intro solo lo permite esta vez)."))
                 Text(tx("Only macOS receives it; Cala never sees it.",
                         "Solo macOS la recibe; Cala nunca la ve."))
                 Button {
@@ -1117,8 +1117,8 @@ private struct MailKeychainNoticeView: View {
                         .accessibilityAddTraits(.isHeader)
                     Text(tx("Cala’s Keychain helper, “cala-keychain”, copies your saved app passwords once into its own Keychain entries. Until then macOS asks before letting it read them. Later launches and updates won’t ask.",
                             "El ayudante de Llavero de Cala, «cala-keychain», copia una vez tus contraseñas de aplicación guardadas a sus propias entradas del Llavero. Hasta entonces macOS pregunta antes de dejarle leerlas. Los próximos arranques y actualizaciones no preguntarán."))
-                    Text("\(howMany) " + tx("Type your Mac password if asked and choose “Always Allow” in both.",
-                                           "Escribe la contraseña de tu Mac si te la pide y elige «Permitir siempre» en ambas."))
+                    Text("\(howMany) " + tx("Type your Mac password if asked, then click “Always Allow” in both: pressing Enter chooses “Allow”, which only works this once.",
+                                           "Escribe la contraseña de tu Mac si te la pide y haz clic en «Permitir siempre» en ambas: pulsar Intro elige «Permitir», que solo vale esta vez."))
                     Text(tx("Only macOS receives your Mac password. Cala never sees it.",
                             "Tu contraseña de Mac la recibe solo macOS. Cala nunca la ve."))
                         .foregroundStyle(.secondary)
