@@ -76,6 +76,7 @@ for (name, seed, pub, message, sig) in vectors {
 
 let signedBytes = Data(#"""
  { "notesURL":null, "schema":1, "bundleId":"local.cala", "version":"1.10.0", "build":2,
+   "commit":"0123456789abcdef0123456789abcdef01234567",
    "minimumSystemVersion":"14.0", "publishedAt":"2026-11-22T10:00:00Z",
    "dmg":{"size":100,"url":"https://github.com/MineiToshio/cala-taskbar/releases/download/v1.10.0/Cala.dmg",
           "sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
@@ -95,6 +96,14 @@ let verified = try UpdateSignature.verify(feed: feed, publicKeys: [other, pub])
 let m = verified.manifest
 check(verified.bytes == signedBytes && m.build == 2 && m.notes["es"] == "¡Hola!", "exact bytes, recovery key, ISO date")
 func rejects(_ data: Data, keys: [Data] = [pub]) -> Bool { (try? UpdateSignature.verify(feed: data, publicKeys: keys)) == nil }
+check(m.commit == "0123456789abcdef0123456789abcdef01234567", "signed commit SHA")
+var manifestObject = try JSONSerialization.jsonObject(with: signedBytes) as! [String: Any]
+manifestObject.removeValue(forKey: "commit")
+check(rejects(try envelope(JSONSerialization.data(withJSONObject: manifestObject))), "schema 1 requires commit")
+manifestObject["commit"] = "0123456"
+check(rejects(try envelope(JSONSerialization.data(withJSONObject: manifestObject))), "reject abbreviated commit")
+manifestObject["commit"] = String(repeating: "a", count: 40)
+check(rejects(try envelope(JSONSerialization.data(withJSONObject: manifestObject), signing: signedBytes)), "reject changed commit with old signature")
 var flipped = signedBytes
 flipped[flipped.startIndex] ^= 1
 check(rejects(try envelope(flipped, signing: signedBytes)), "flipped byte")

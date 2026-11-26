@@ -81,12 +81,22 @@ private struct ReleaseManifest: Decodable {
     struct DMG: Decodable { let url: String }
     struct App: Decodable { let keychainHelperSHA256: String }
     let schema: Int
+    let commit: String
     let bundleId: String
     let version: String
     let build: Int
     let minimumSystemVersion: String
     let dmg: DMG
     let app: App
+
+    static func decode(_ data: Data) throws -> Self {
+        guard let manifest = try? JSONDecoder().decode(Self.self, from: data), manifest.schema == 1,
+              manifest.commit.utf8.count == 40,
+              manifest.commit.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw Failure("Invalid schema 1 manifest. Expected release metadata and a full lowercase commit SHA.")
+        }
+        return manifest
+    }
 }
 
 private func randomBytes(_ count: Int) throws -> Data {
@@ -223,10 +233,13 @@ private func verifiedManifest(keys: URL, feed: URL, dmg: URL?) throws -> (Data, 
     return (manifest, publicKeys)
 }
 
-private func verifyRelease(keys: URL, feed: URL, dmg: URL, app: URL, tag: String) throws {
+private func verifyRelease(keys: URL, feed: URL, dmg: URL, app: URL, tag: String, commit: String) throws {
     let (manifestBytes, publicKeys) = try verifiedManifest(keys: keys, feed: feed, dmg: dmg)
-    let manifest = try JSONDecoder().decode(ReleaseManifest.self, from: manifestBytes)
-    guard manifest.schema == 1, manifest.build > 0,
+    let manifest = try ReleaseManifest.decode(manifestBytes)
+    guard manifest.commit == commit else {
+        throw Failure("Signed manifest commit differs from the commit for release tag \(tag)")
+    }
+    guard manifest.build > 0,
           manifest.version.range(of: #"^[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil,
           tag == "v\(manifest.version)" else {
         throw Failure("Manifest version or build is invalid for release tag \(tag)")
@@ -272,7 +285,7 @@ private func verifyRelease(keys: URL, feed: URL, dmg: URL, app: URL, tag: String
     guard hash == manifest.app.keychainHelperSHA256 else {
         throw Failure("Keychain helper SHA-256 differs from the manifest")
     }
-    print("PASS release signature, DMG, tag and bundled Info.plist")
+    print("PASS release signature, DMG, tag commit and bundled Info.plist")
 }
 
 private func makeTestKey(_ directory: URL) throws {
@@ -319,14 +332,15 @@ private func run(_ args: [String]) throws {
         try generate(url(args[2]))
     case "sign" where args.count == 7 && args[1] == "--key" && args[3] == "--manifest" && args[5] == "--out":
         let manifest = try Data(contentsOf: url(args[4]))
+        _ = try ReleaseManifest.decode(manifest)
         try sign(manifest, with: loadKey(url(args[2]))).write(to: url(args[6]), options: .atomic)
     case "verify" where (args.count == 5 || (args.count == 7 && args[5] == "--dmg"))
                         && args[1] == "--keys" && args[3] == "--feed":
         _ = try verifiedManifest(keys: url(args[2]), feed: url(args[4]), dmg: args.count == 7 ? url(args[6]) : nil)
         print("PASS update signature" + (args.count == 7 ? " and DMG" : ""))
-    case "verify-release" where args.count == 11 && args[1] == "--keys" && args[3] == "--feed"
-                                && args[5] == "--dmg" && args[7] == "--app" && args[9] == "--tag":
-        try verifyRelease(keys: url(args[2]), feed: url(args[4]), dmg: url(args[6]), app: url(args[8]), tag: args[10])
+    case "verify-release" where args.count == 13 && args[1] == "--keys" && args[3] == "--feed"
+                                && args[5] == "--dmg" && args[7] == "--app" && args[9] == "--tag" && args[11] == "--commit":
+        try verifyRelease(keys: url(args[2]), feed: url(args[4]), dmg: url(args[6]), app: url(args[8]), tag: args[10], commit: args[12])
     case "testkey" where args.count == 2:
         try makeTestKey(url(args[1]))
     case "selftest" where args.count == 1:
@@ -336,7 +350,7 @@ private func run(_ args: [String]) throws {
         Usage: update-sign.swift generate --out FILE
                update-sign.swift sign --key FILE --manifest M --out FEED
                update-sign.swift verify --keys KEYS --feed FEED [--dmg D]
-               update-sign.swift verify-release --keys KEYS --feed FEED --dmg D --app APP --tag TAG
+               update-sign.swift verify-release --keys KEYS --feed FEED --dmg D --app APP --tag TAG --commit SHA
                update-sign.swift testkey DIR
                update-sign.swift selftest
         """)

@@ -41,6 +41,7 @@ print(out)
 PY
 )
 cd "$repo"
+commit=$(git rev-parse --verify HEAD)
 public_key=$(<"$keys/public")
 [[ -f "$keys/private.json" && "$public_key" =~ '^[A-Za-z0-9+/]{43}=$' ]] ||
   { echo "Expected a throwaway key pair created by update-sign.swift testkey" >&2; exit 1; }
@@ -59,7 +60,7 @@ dmg="$out/${dmg:t}"
 work=$(mktemp -d "${TMPDIR:-/tmp}/cala-fixture.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-python3 - "$CALA_BUILD_DIR/Cala.app" "$dmg" "$corrupt" "$work/manifest.json" <<'PY'
+python3 - "$CALA_BUILD_DIR/Cala.app" "$dmg" "$corrupt" "$work/manifest.json" "$commit" <<'PY'
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -67,12 +68,13 @@ from pathlib import Path
 import plistlib
 import sys
 
-app, dmg, corrupt, output = sys.argv[1:]
+app, dmg, corrupt, output, commit = sys.argv[1:]
 app, dmg = Path(app), Path(dmg)
 with (app / "Contents/Info.plist").open("rb") as source:
     info = plistlib.load(source)
 manifest = {
     "schema": 1,
+    "commit": commit,
     "bundleId": info["CFBundleIdentifier"],
     "version": info["CFBundleShortVersionString"],
     "build": int(info["CFBundleVersion"]),
