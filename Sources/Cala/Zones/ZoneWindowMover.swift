@@ -71,7 +71,7 @@ final class ZoneWindowMover: @unchecked Sendable {
             guard let window = Self.windowUnder(point, in: windows) else { return }
             var initialTabWindowIDs: Set<CGWindowID>?
             if window.key.pid != ownPID,
-               ZoneDragCandidate.mayDetachTab(at: point, in: window.frame, bundleID: Self.bundleID(for: window.key.pid)) {
+               ZoneDragCandidate.mayDetachTab(at: point, in: window.frame) {
                 initialTabWindowIDs = Set(windows.compactMap { info -> CGWindowID? in
                     guard (info[kCGWindowOwnerPID as String] as? pid_t) == window.key.pid else { return nil }
                     return info[kCGWindowNumber as String] as? CGWindowID

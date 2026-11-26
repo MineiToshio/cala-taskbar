@@ -163,11 +163,8 @@ struct ZoneDragCandidate {
 
     private static let recheckInterval: TimeInterval = 0.04
     private static let cursorSlack: CGFloat = 20
-    private static let tabBandHeight: CGFloat = 64
-    private static let tabDetachBundles: Set<String> = [
-        "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary",
-        "org.chromium.Chromium",
-    ]
+    /// Tall enough for a tab bar under a toolbar (Safari, Finder, Terminal), not only Chromium's top strip.
+    private static let tabBandHeight: CGFloat = 100
 
     let original: Window
     private let initialTabWindowIDs: Set<CGWindowID>?
@@ -181,9 +178,11 @@ struct ZoneDragCandidate {
         self.lastPoint = point
     }
 
-    /// Estimate the tab strip without querying AX during a drag. Look up the app only inside this band.
-    static func mayDetachTab(at point: CGPoint, in frame: CGRect, bundleID: @autoclosure () -> String) -> Bool {
-        tabBand(of: frame).contains(point) && tabDetachBundles.contains(bundleID())
+    /// Estimate the tab strip without querying AX during a drag. Any app qualifies (Chrome, Brave, Edge, Arc,
+    /// Vivaldi, Opera, Electron apps...): adoption itself only accepts a single new window of the same process
+    /// that follows the pointer, so a press here that is not a tab drag just never adopts anything.
+    static func mayDetachTab(at point: CGPoint, in frame: CGRect) -> Bool {
+        tabBand(of: frame).contains(point)
     }
 
     private static func tabBand(of frame: CGRect) -> CGRect {

@@ -840,11 +840,10 @@ do {
         ZoneDragCandidate.Window(key: .init(pid: pid, windowID: id), frame: frame)
     }
 
-    expect("Tab detach: scans require a supported browser and a press near the top edge",
-           ZoneDragCandidate.mayDetachTab(at: press, in: original.frame, bundleID: "com.google.Chrome")
-               && !ZoneDragCandidate.mayDetachTab(at: press, in: original.frame, bundleID: "com.apple.TextEdit")
-               && !ZoneDragCandidate.mayDetachTab(at: CGPoint(x: 160, y: 220), in: original.frame,
-                                                  bundleID: "com.google.Chrome"))
+    expect("Tab detach: scans require a press in the tab band near the top edge, in any app (Chrome, Brave, ...)",
+           ZoneDragCandidate.mayDetachTab(at: press, in: original.frame)
+               && ZoneDragCandidate.mayDetachTab(at: CGPoint(x: 160, y: 190), in: original.frame)
+               && !ZoneDragCandidate.mayDetachTab(at: CGPoint(x: 160, y: 220), in: original.frame))
     let ordinary = ZoneDragCandidate(original: original, point: press)
     expect("Tab detach: an ordinary content drag never requests a full scan",
            !ordinary.shouldRecheck(at: first, time: 10))
