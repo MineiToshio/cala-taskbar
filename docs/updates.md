@@ -1,6 +1,6 @@
 # In-app updates: design (v1)
 
-Status: design, not implemented. Decided:
+Status: implemented in the integration worktree. Release and multi-account acceptance are covered by the fixture ladder below.
 - The repository is public.
 - The installed bundle belongs to the user (group `admin`, group-writable). Cala never asks for elevated privileges.
 - The release key is an encrypted file on the maintainer's Mac.
@@ -22,13 +22,13 @@ Now that installs need no privileges, the custom version is small. It verifies o
   - `install.sh` keeps using `sudo` for its publish step. Moving an existing root-owned `Cala.app` into a staging folder needs write access to that directory (for `..`), and so does deleting the old root-owned tree. A user can do neither.
   - From the second install on, everything is group-writable.
 - `/Applications` is `root:admin` 775 with no sticky bit (verified with `ls -ld`). So any admin account can rename entries in it, and with group write on the bundle any admin account's Cala can update the shared copy.
-  - After every in-app install, the updater sets the new bundle to `<self>:admin`, `g+w`, `o-w`.
+  - The updater sets group write only on entries whose effective group is `admin`. In a standard account’s `~/Applications`, a retained `staff` group receives read and directory traversal permissions.
   - A DMG drag or `get-cala.sh` produces `<user>:admin` 755: new entries take the group of their parent folder. Updating such a copy works for its owner, and the update then adds `g+w`.
 - **Install path** (`UpdateRules.installPath`, pure):
   - `.ready`: the bundle is in `/Applications` or `~/Applications`, not translocated, not running from the disk image (`AppLocation`, `Lifecycle.swift:107-121`). The user can write the bundle folder, its `Contents` and the parent folder (`access(W_OK)`).
   - `.needsAdmin`: anything else, for example a standard account or a copy owned by another user without group write. The UI says "Ask an administrator to install this update, or install it by hand" and links to the release page. Cala never escalates.
   - `.unsupported`: not in an Applications folder.
-- **Other accounts.** When one account installs, another account's Cala that is still running sees a higher build on disk. The existing `BundleUpdateMonitor` relaunches it when its session becomes active (`BundleUpdateMonitor.swift:60-118`). This is unchanged.
+- **Other accounts.** When one account installs, another account's Cala that is still running compares the on-disk marketing version and then the numeric build with the running copy. The existing `BundleUpdateMonitor` relaunches it when its session becomes active (`BundleUpdateMonitor.swift:60-118`).
 
 ## 3. Feed
 
@@ -130,7 +130,7 @@ All the work runs on `DispatchQueue(label: "Cala.update", qos: .utility)`. URLSe
 - The `lipo` in `build.sh` is build-time, on the maintainer's machine, and stays.
 
 **Steps** (`UpdateInstaller`):
-1. **Download.** `URLSessionDownloadTask` into `~/Library/Caches/local.cala/Updates/<version>-<build>/`.
+1. **Download.** `URLSessionDownloadTask` into an exclusive UUID-named DMG under `~/Library/Caches/local.cala/Updates/<version>-<build>/`. Each cache component is opened relative to its parent without following links. The transfer writes through its open file descriptor and cleanup unlinks only the original inode.
    - Before starting, `volumeAvailableCapacityForImportantUsage` of the target volume must be at least `size + 2 × unpackedSize + 100 MB`, else `.diskFull`.
    - If the connection drops, `resumeData` is kept in memory for **Try again**.
    - The timeout is 300 s.
@@ -142,8 +142,8 @@ All the work runs on `DispatchQueue(label: "Cala.update", qos: .utility)`. URLSe
    - Lock: `openat(dirfd, ".cala-update.lock", O_CREAT | O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0664)` plus `flock(LOCK_EX | LOCK_NB)`. If another account is installing, the result is `.busy`.
    - Under the lock, re-read the installed version and build. If they are already at or above the manifest, the result is `.upToDate` (a success).
 4. **Mount and copy.**
-   - `hdiutil attach -nobrowse -readonly -noautoopen -mountpoint <stage>/mnt <verified file>`
-   - `ditto <stage>/mnt/Cala.app <stage>/new/Cala.app`
+   - `hdiutil attach -nobrowse -readonly -noautoopen -mountpoint <private-work>/mnt <verified file>`
+   - `ditto <private-work>/mnt/Cala.app <private-work>/Cala.app`
    - Detach, with a forced detach on timeout. `ENOSPC` gives `.diskFull`.
 5. **Check the staged app:**
    - The code signature is valid (the Security calls above).
@@ -156,53 +156,36 @@ All the work runs on `DispatchQueue(label: "Cala.update", qos: .utility)`. URLSe
      - Team ID: same Team ID and identifier `local.cala.keychain`.
 6. **Normalize.**
    - `removexattr("com.apple.quarantine")` recursively. URLSession files are not quarantined anyway ([Eclectic Light](https://eclecticlight.co/2020/10/29/quarantine-and-the-quarantine-flag/)).
-   - Set the group to `admin` when this user belongs to it, then `chmod u+rwX,g+rwX,o-w` recursively.
+   - Set the group to `admin` when this user belongs to it, then normalize each entry. Group write requires the admin GID.
    - `fsync` the stage folder.
    - In test builds, `CalaUpdateTestFault=before-swap` aborts here.
 7. **Swap.**
+   - Place the validated incoming bundle directly in `<stage>/previous/Cala.app`. Write and synchronize the pending record and wait for the verified private helper to acknowledge the inherited lock (§6). For an automatic install, sample the current policy again.
    - Check the target's `(st_dev, st_ino)` again; if it changed, `.busy`.
-   - `renameatx_np(stagefd, "new/Cala.app", dirfd, "Cala.app", RENAME_SWAP)`. It is atomic: there is always a complete bundle at the path. `EPERM` or `EACCES` gives `.blockedByMacOS` (App Management) and leaves the target as it was.
-   - The previous bundle is now at `<stage>/new/Cala.app`. Rename it to `<stage>/previous/Cala.app` and keep it for the rollback (§6).
+   - `renameatx_np(previousFD, "Cala.app", parentFD, "Cala.app", RENAME_SWAP)`. It is atomic: there is always a complete bundle at the path. `EPERM` or `EACCES` gives `.blockedByMacOS` (App Management) and leaves the target as it was.
+   - The old inode is now at the recorded backup location. Confirm its identity before reporting success.
    - In test builds, `CalaUpdateTestFault=after-swap` aborts here.
 8. **After the swap (finding 14).** Failures here are warnings in `debug.log`. The result is still `.installed`, for example if the mount can't be removed or the cache can't be cleaned.
 
 The UI shows **Restart now** only when a blocker is open (step 9 below). Otherwise the app relaunches:
-- If the user started the install and the only blocker is Settings, the update window or the updater itself, Cala runs `Relaunch.open` right away. This is the existing `NSApp.terminate` path (`Lifecycle.swift:165-193`), with the clean-exit marker and the Dock and menu bar restored. Never `kill`.
-- If the Zones editor, onboarding or a modal is open, the UI says "Installed. Cala restarts when you close <x>." It relaunches when that blocker clears, through a call from `UpdateService`. This cannot go through `BundleUpdateMonitor`: with a developer build number it may never see the release as newer.
+- If the user started the install and the only blocker is Settings, the update window or the updater itself, Cala validates the backup and live helper and calls `NSApp.terminate`, with the clean-exit marker and the Dock and menu bar restored. Never `kill`.
+- If the Zones editor, onboarding or a modal is open, the UI says "Installed. Cala restarts when you close <x>." It relaunches when that blocker clears, through a call from `UpdateService`. The updater owns this restart while its transaction is pending.
 - Between the swap and the relaunch, the Keychain helper refuses the old process with exit 77 (`MailService.swift:142,920`). While `UpdateService.pendingRestart` is set, Mail shows "Restarting to finish the update" instead of an error.
 
 ## 6. Crash at launch: rollback, blocked builds, skip (findings 7, 8)
 
-The old process writes `~/Library/Application Support/Cala/update-pending.json` before relaunching:
+Before the exchange, the installer writes `~/Library/Application Support/Cala/update-pending.json` and syncs the file and its directory. The original identity comes from the installed bundle under the Applications lock.
 
 ```json
-{"from":"1.0.0+120","to":"1.1.0+131","previous":"<stage>/previous/Cala.app","deadline":"<now+120 s>"}
+{"from":"1.0.0+120","to":"1.1.0+131","previous":"<stage>/previous/Cala.app","transaction":"<UUID>"}
 ```
 
-`Relaunch.openAfterTermination` then starts the **previous** bundle's helper, which is known to work, instead of the plain `open` script:
-
-```
-<stage>/previous/Cala.app/Contents/Helpers/cala-update watch --pending <file> --pid <old pid> --target /Applications/Cala.app
-```
-
-`cala-update` is a tiny standalone CLI. It has no NSApplication and never touches the Dock, so it is not a second Cala.
-1. It waits for the old process to exit.
-2. It runs `/usr/bin/open -g <target>`.
-3. It waits up to 120 s (test builds: `CalaUpdateTestUpTimeout`) for `update-up-<version>+<build>`. The new Cala writes that file 20 s after `applicationDidFinishLaunching` has started its modules, and only if `update-pending.json` names its own version and build.
-4. **If the marker appears:** it deletes `<stage>` and `update-pending.json`. Done.
-5. **If the deadline passes:**
-   - Create `update-rollback`. The watchdog script exits without relaunching while that file exists; that check is a new line in `Watchdog.swift`'s script.
-   - If a Cala from the target path is still running for this user, send it SIGTERM. Cala turns that into `NSApp.terminate` (`main.swift:49-64`). Wait up to 10 s. **It never uses SIGKILL**: if Cala is still alive it gives up, logs, and leaves things as they are.
-   - Check that `previous` has the expected bundle id and a valid signature.
-   - `renameatx_np(..., RENAME_SWAP)` it back into place.
-   - Add `"1.1.0+131"` to `update-blocked.json`.
-   - `open` the previous Cala, remove `update-rollback`, and record the failure for the UI ("Cala 1.1.0 didn't start, so 1.0.0 was restored. It won't be offered again.").
-   - The previous Cala adopts the Dock again through its normal launch path (`DockControl.swift:63-94`).
-6. **If the helper itself is killed** (for example at logout): on the next launch, Cala finds `update-pending.json`.
-   - If it names Cala's own version, the update worked: Cala writes the marker and deletes the stage itself.
-   - Otherwise Cala deletes the stale file.
-
-Cala merges `update-blocked.json` into `blockedBuilds` at launch. The installer refuses those builds too, not only the checker.
+1. The installer runs `cala-update arm --pending FILE --pid PID --target APP` from its verified copy of the installed bundle inside a per-user 0700 temporary directory. Standard input inherits the already-locked file description. The lock file stays at the same inode across transactions.
+2. The helper pins both bundle directories, checks their versions and the backup signature, reads the blocked list, and reserves the replacement block list and rollback sentinel. It acknowledges readiness over a pipe. A failed launch, negative preflight or missing acknowledgement leaves the running app in place.
+3. The helper waits for the old PID to exit, including while restart is deferred. Immediately before a requested restart Cala checks the recorded backup and helper. It can re-arm a helper that exited early. The test-only `after-swap` fault exits the installer process immediately after exchange, before the completion callback.
+4. The helper gives LaunchServices up to ten seconds to open the target. A successful open starts a fresh 120-second health interval (test builds can shorten it). After 20 seconds the new Cala’s **main run loop** checks its transaction and writes `update-up-<UUID>`. The receipt permits cleanup of the pinned private stage and pending record.
+5. On launch failure or health timeout, the helper publishes the reserved block list, checks the actual backup inode, signature and rollback directories, and publishes `update-rollback` before sending SIGTERM. It waits up to ten seconds for this user's target processes. It exchanges the bundles back, then reopens the installed app. A later failure also attempts to reopen the valid target. If LaunchServices fails, the production helper can start the verified executable after checking for an existing process.
+6. If block-list publication failed, the pre-swap journal survives restoration. Startup and the next installer reconcile under the same lock. A target matching `from` is conservatively treated as restored, even after an interrupted preparation. The failed identity must reach the durable blocked list before the rollback sentinel and pending record can be removed. An unreadable journal or block list prevents another swap. Legacy build-named receipts remain readable for in-flight updates.
 
 ## 7. Schedule and deferral
 
@@ -215,7 +198,7 @@ Cala merges `update-blocked.json` into `blockedBuilds` at launch. The installer 
   - Every `UpdatePolicy` blocker clear.
   - Idle for at least 10 minutes: `CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: kCGAnyInputEventType)`.
   - No `PreventUserIdleDisplaySleep` assertion held by another process (`IOPMCopyAssertionsStatus`), which means no video or presentation running.
-  - Then it downloads, installs and relaunches through §5 and §6.
+  - The same preference, idle, presentation and blocker checks run immediately before exchange and again before an automatic restart. An explicit Restart now remains available.
 
 ## 8. UI (all strings `tx("en","es")`)
 
@@ -325,7 +308,7 @@ The rules: one Cala instance only, `build/Cala.app` is never opened, and only th
 | E9 | owner | Serve f2, Download and install | **No password dialog.** Relaunch as 0.0.2. One process (`pgrep -x Cala \| wc -l` = 1). Group admin, g+w. `codesign -d -r- /Applications/Cala.app` gives `identifier "local.cala"`. `scripts/verify-keychain-helper.sh /Applications/Cala.app/Contents/Helpers/cala-keychain --cdhash` passes. Dock autohide-delay is unchanged. Stage folder gone after the marker appears. This is the **App Management gate**: if the swap returns blockedByMacOS, stop and report |
 | E10 | owner | Serve f3, install | f3 aborts at launch, before modules start. Within the test timeout 0.0.2 is back. Settings shows rolledBack. `update-blocked.json` contains 0.0.3. Check again: not offered. Dock autohide-delay unchanged |
 | E11 | owner | Serve f7, press Skip this version | Indicator gone, Settings shows skipped, and the install from Settings still works → 0.0.7 |
-| E12 | owner **[sudo]** | Faults: reinstall an old build as in E4, adding `CALA_UPDATE_TEST_FAULT=before-swap` (build.sh bakes it into the plist). Install f2: target inode unchanged. Repeat with `after-swap`: new build in place, its stage removed at the next launch | As stated |
+| E12 | owner **[sudo]** | Faults: reinstall an old build as in E4, adding `CALA_UPDATE_TEST_FAULT=before-swap` (build.sh bakes it into the plist). Install f2: target inode unchanged. Repeat with `after-swap`: the old process exits at exchange. Its already-armed helper opens the new build and restores the old build on a missing health receipt | As stated |
 | E13 | owner | Auto-install: in the E12 build, also set `CALA_UPDATE_TEST_IDLE_SECONDS=30`. Turn **Install updates automatically** on, serve f7, leave the Mac idle. Repeat with a video playing, and with the Zones editor open | It installs while idle, and waits while the video plays or the editor is open |
 | E14 | owner | Second admin account: log into the other admin account while the first one's Cala is on 0.0.2. Serve f7 there and install | Works without a password. Back in the first session, its Cala relaunches as 0.0.7 once the session is active |
 | E15 | owner | **Permissions and Keychain after each install** (E9, E11, E14): `grep 'launch:' ~/Library/Application\ Support/Cala/debug.log \| tail -1`. This needs a new log line, `launch: version=… accessibility=… screenRecording=…`, from `AXIsProcessTrusted()` and `CGPreflightScreenCaptureAccess()`. Settings → Permissions is all green. A hover preview shows a thumbnail. Option+Tab works. In Mail, Refresh shows **no** "cala-keychain wants to access" dialog, and `debug.log` has no `keychainDenied` or `(77)` after the relaunch | Accessibility and Screen Recording both `true`. No Keychain dialog |
@@ -382,7 +365,7 @@ Three code shards plus docs, with disjoint files. Workers build and run checks o
   - The RFC 8032 §7.1 vectors are copied from the RFC (https://www.rfc-editor.org/rfc/rfc8032#section-7.1). Tests also cover a flipped byte, a missing prefix and a wrong key.
   - Version-first comparison, including "developer build number above the release".
   - 404, 401 and 403 give `feedUnavailable`. 429 and 403 with rate-limit headers give `rateLimited`.
-  - Installer, on fake bundles in a temp folder, with real ad-hoc `codesign --sign -` at test time: the swap works. `before-swap` and `after-swap` leave a target that is byte-identical or fully new. A symlinked target is refused, a changed inode gives `busy`, a held lock gives `busy`, and a changed keychain helper gives `verificationFailed`. No `.cala-update.*` is left after a failure. Cleanup errors after the swap still return `installed`.
+  - Installer, on fake bundles in a temp folder, with real ad-hoc `codesign --sign -` at test time: the swap works. `before-swap` and `after-swap` leave a target that is byte-identical or fully new. A symlinked target is refused, a changed inode gives `busy`, a held lock gives `busy`, and a changed keychain helper gives `verificationFailed`. Pre-swap failures clean their staging directories. The permanent lock file remains. Cleanup errors after the swap still return `installed`.
   - No `/usr/bin/lipo`, `xcrun` or PlistBuddy in the sources (grep in the check).
 - **Check:** `scripts/check-update.sh`
 
@@ -422,7 +405,7 @@ Three code shards plus docs, with disjoint files. Workers build and run checks o
   - `Sources/Cala/Config.swift`, `scripts/check-settings.sh`, `Sources/Cala/Settings/SupportSettings.swift`
   - `Sources/Cala/StatusItem.swift`, `Sources/Cala/BarView.swift`, `Sources/Cala/BarModule.swift`, `Sources/Cala/SettingsWindow.swift`
   - `Sources/Cala/main.swift`: start and stop the service, the `launch:` log line, the crash fault, Snapshots fixtures for every state.
-  - `Sources/Cala/Lifecycle.swift`: the pending-update relaunch through the helper.
+  - `Sources/Cala/Lifecycle.swift`: ordinary relaunches. UpdateService terminates only after verifying its armed helper.
   - `Sources/Cala/Watchdog.swift`: the `update-rollback` check.
   - `Sources/Cala/MailService.swift`: exit 77 while `pendingRestart`.
 - **Contract:**

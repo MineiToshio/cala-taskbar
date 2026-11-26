@@ -11,7 +11,7 @@ private struct Pending: Decodable {
     let from: String
     let to: String
     let previous: String
-    let deadline: Date
+    let transaction: UUID?
 }
 
 private struct Watch {
@@ -21,27 +21,21 @@ private struct Watch {
     let previous: URL
     let stage: URL
     let oldPID: pid_t
+    let arm: Bool
     let pending: Pending
 
     init(_ args: [String]) throws {
-        guard args.count == 7, args[0] == "watch", args[1] == "--pending", args[3] == "--pid",
+        guard args.count == 7, ["arm", "watch"].contains(args[0]), args[1] == "--pending", args[3] == "--pid",
               let pid = pid_t(args[4]), pid > 1, args[5] == "--target",
               args[2].hasPrefix("/"), args[6].hasPrefix("/") else {
             throw Failure("Usage: cala-update watch --pending FILE --pid PID --target APP")
         }
+        arm = args[0] == "arm"
         pendingURL = URL(fileURLWithPath: args[2]).standardizedFileURL
         support = pendingURL.deletingLastPathComponent()
         target = URL(fileURLWithPath: args[6]).standardizedFileURL
         oldPID = pid
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { value in
-            let text = try value.singleValueContainer().decode(String.self)
-            let iso = ISO8601DateFormatter()
-            if let date = iso.date(from: text) { return date }
-            iso.formatOptions.insert(.withFractionalSeconds)
-            guard let date = iso.date(from: text) else { throw Failure("Invalid update deadline") }
-            return date
-        }
         pending = try decoder.decode(Pending.self, from: Data(contentsOf: pendingURL))
         previous = URL(fileURLWithPath: pending.previous).standardizedFileURL
         let previousDirectory = previous.deletingLastPathComponent()
@@ -59,13 +53,23 @@ private struct Watch {
     }
 
     func run() throws {
+        var prepared = false
+        defer {
+            if !arm && !prepared && wait(seconds: 120, until: { kill(oldPID, 0) != 0 && errno == ESRCH }) {
+                try? reopen()
+            }
+        }
         let parent = target.deletingLastPathComponent()
         let parentFD = try descriptor(open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), "open app parent")
         defer { close(parentFD) }
-        let lock = try descriptor(openat(parentFD, ".cala-update.lock", O_CREAT | O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0o664),
-                                  "open update lock")
+        let lock = try descriptor(arm ? dup(STDIN_FILENO) :
+            openat(parentFD, ".cala-update.lock", O_CREAT | O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0o664), "open update lock")
         defer { close(lock) }
-        guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw Failure("Another update is in progress") }
+        var held = stat(), named = stat()
+        guard fstat(lock, &held) == 0, held.st_mode & S_IFMT == S_IFREG,
+              fstatat(parentFD, ".cala-update.lock", &named, AT_SYMLINK_NOFOLLOW) == 0,
+              held.st_dev == named.st_dev, held.st_ino == named.st_ino,
+              flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw Failure("Missing update lock") }
         let stageFD = try descriptor(openat(parentFD, stage.lastPathComponent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
                                      "open update stage")
         defer { close(stageFD) }
@@ -76,72 +80,167 @@ private struct Watch {
         let previousFD = try descriptor(openat(stageFD, "previous", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
                                         "open previous app directory")
         defer { close(previousFD) }
-        let before = try bundleStat(parentFD)
-        let installedInfo = try infoPlist(target)
-        let previousInfo = try infoPlist(previous)
-        guard bundleBuild(installedInfo) == pending.to, bundleBuild(previousInfo) == pending.from else {
-            throw Failure("Installed or previous app is no longer the expected build")
+        let oldDir: Int32, newDir: Int32
+        if try bundleBuild(infoPlist(target)) == pending.from {
+            guard arm else { throw Failure("Unexpected installed version") }
+            oldDir = parentFD
+            newDir = previousFD
+        } else {
+            oldDir = previousFD
+            newDir = parentFD
         }
-
-        guard wait(seconds: 120, until: { kill(oldPID, 0) != 0 && errno == ESRCH }) else {
-            throw Failure("Old Cala did not quit")
+        // Pin both bundle identities from preparation until rollback.
+        let old = try descriptor(openat(oldDir, "Cala.app", O_RDONLY | O_DIRECTORY | O_NOFOLLOW), "open backup")
+        defer { close(old) }
+        let new = try descriptor(openat(newDir, "Cala.app", O_RDONLY | O_DIRECTORY | O_NOFOLLOW), "open incoming")
+        defer { close(new) }
+        func pinned(_ fd: Int32) throws -> URL {
+            var s = stat()
+            guard fstat(fd, &s) == 0 else { throw posixFailure("stat pinned directory") }
+            return URL(fileURLWithPath: "/.vol/\(UInt32(bitPattern: s.st_dev))/\(s.st_ino)", isDirectory: true)
         }
-        let marker = support.appendingPathComponent("update-up-\(pending.to)")
-        let timeout = upTimeout(previousInfo)
+        func matchesEntry(_ fd: Int32, in directory: Int32) -> Bool {
+            var s = stat()
+            guard fstat(fd, &s) == 0, let named = try? bundleStat(directory) else { return false }
+            return s.st_dev == named.st_dev && s.st_ino == named.st_ino
+        }
+        let oldURL = try pinned(old)
+        let oldInfo = try infoPlist(oldURL)
+        let newInfo = try infoPlist(pinned(new))
+        guard bundleBuild(oldInfo) == pending.from, bundleBuild(newInfo) == pending.to,
+              let id = oldInfo["CFBundleIdentifier"] as? String, id == newInfo["CFBundleIdentifier"] as? String else {
+            throw Failure("Unexpected installed or rollback bundle")
+        }
+        func validateOld(in directory: Int32) throws {
+            guard matchesEntry(old, in: directory) else { throw Failure("Rollback inode changed") }
+            // Security canonicalizes paths and cannot verify Darwin volume-ID
+            // URLs. Resolve the still-open bundle, then compare both identities.
+            var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            guard fcntl(old, F_GETPATH, &path) == 0 else { throw posixFailure("resolve rollback bundle") }
+            let app = URL(fileURLWithPath: String(cString: path))
+            try validateSignature(app)
+            var verified = stat(), expected = stat()
+            guard lstat(app.path, &verified) == 0, fstat(old, &expected) == 0,
+                  verified.st_dev == expected.st_dev, verified.st_ino == expected.st_ino else {
+                throw Failure("Validated rollback bundle changed")
+            }
+            guard matchesEntry(old, in: directory) else { throw Failure("Rollback inode changed") }
+        }
+        try validateOld(in: oldDir)
+        let blockedURL = support.appendingPathComponent("update-blocked.json")
+        var blocks: Set<String>
+        do { blocks = try JSONDecoder().decode(Set<String>.self, from: Data(contentsOf: blockedURL)) }
+        catch let e as CocoaError where e.code == .fileReadNoSuchFile { blocks = [] }
+        guard blocks.insert(pending.to).inserted else { throw Failure("Build already blocked") }
+        let reserve = support.appendingPathComponent("update-block-reserve")
+        try JSONEncoder().encode(blocks.sorted()).write(to: reserve, options: .atomic)
+        defer { unlink(reserve.path) }
+        let saved = try descriptor(open(reserve.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC), "open reserved block list")
+        defer { close(saved) }
+        guard fsync(saved) == 0 else { throw posixFailure("sync reserved block list") }
+        let supportFD = try descriptor(open(support.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), "open support")
+        defer { close(supportFD) }
+        let token = pending.transaction?.uuidString ?? pending.to
+        let marker = support.appendingPathComponent("update-up-" + token)
+        let rollback = support.appendingPathComponent("update-rollback")
+        let sentinelReserve = support.appendingPathComponent("update-rollback-reserve")
+        try Data(String(getpid()).utf8).write(to: sentinelReserve, options: .atomic)
+        defer { unlink(sentinelReserve.path) }
+        let stageRoot = try pinned(stageFD)
+        func clean() throws {
+            for child in try FileManager.default.contentsOfDirectory(atPath: stageRoot.path) {
+                try FileManager.default.removeItem(at: stageRoot.appendingPathComponent(child))
+            }
+            var entry = stat()
+            if fstatat(parentFD, stage.lastPathComponent, &entry, AT_SYMLINK_NOFOLLOW) == 0,
+               entry.st_dev == stageInfo.st_dev, entry.st_ino == stageInfo.st_ino {
+                guard unlinkat(parentFD, stage.lastPathComponent, AT_REMOVEDIR) == 0 else { throw posixFailure("remove stage") }
+            }
+        }
+        if arm {
+            var byte: UInt8 = 1
+            guard write(STDOUT_FILENO, &byte, 1) == 1 else { throw Failure("Could not confirm helper ready") }
+        }
+        prepared = true
+        while kill(oldPID, 0) == 0 || errno == EPERM {
+            if !FileManager.default.fileExists(atPath: pendingURL.path) { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard matchesEntry(new, in: parentFD), matchesEntry(old, in: previousFD) else {
+            try reopen()
+            return
+        }
         let launched = launch()
-        // A failed open needs no startup grace period.
-        if launched && wait(seconds: timeout, until: { FileManager.default.fileExists(atPath: marker.path) }) {
+        if launched && wait(seconds: upTimeout(oldInfo), until: { FileManager.default.fileExists(atPath: marker.path) }) {
+            try clean()
             try FileManager.default.removeItem(at: pendingURL)
-            remove(stage)
-            remove(marker)
+            unlink(marker.path)
             return
         }
 
-        let rollback = support.appendingPathComponent("update-rollback")
-        try Data().write(to: rollback, options: .atomic)
-        defer { remove(rollback) }
-        guard let bundleID = installedInfo["CFBundleIdentifier"] as? String,
-              previousInfo["CFBundleIdentifier"] as? String == bundleID else {
-            throw Failure("Previous app has the wrong bundle identifier")
-        }
-        try validateSignature(previous)
-        try stopTarget()
-
-        let after = try bundleStat(parentFD)
-        guard before.st_dev == after.st_dev, before.st_ino == after.st_ino else {
-            throw Failure("Installed Cala changed before rollback")
-        }
-        let blockedURL = support.appendingPathComponent("update-blocked.json")
-        var blocked: Set<String> = []
-        if FileManager.default.fileExists(atPath: blockedURL.path) {
-            blocked = try JSONDecoder().decode(Set<String>.self, from: Data(contentsOf: blockedURL))
-        }
-        blocked.insert(pending.to)
-        let blockedData = try JSONEncoder().encode(blocked.sorted())
-        guard renameatx_np(previousFD, "Cala.app", parentFD, "Cala.app", UInt32(RENAME_SWAP)) == 0 else {
-            throw posixFailure("restore previous Cala")
-        }
-
-        // The restored app consumes the pending record and the blocked list to report the rollback.
+        // All allocation for the block list happened before the handoff. The
+        // pending record also fails closed if even this rename cannot be saved.
+        let recorded = rename(reserve.path, blockedURL.path) == 0 && fsync(supportFD) == 0
         do {
-            try blockedData.write(to: blockedURL, options: .atomic)
+            guard matchesEntry(new, in: parentFD), matchesEntry(old, in: previousFD),
+                  access(try pinned(previousFD).path, W_OK | X_OK) == 0, access(parent.path, W_OK | X_OK) == 0
+            else { throw Failure("Rollback directories changed or became unwritable") }
+            try validateOld(in: previousFD)
+            // A full volume may prevent a new sentinel. Restore under the lock
+            // anyway when the failed build is already gone.
+            if rename(sentinelReserve.path, rollback.path) != 0 {
+                let failure = posixFailure("publish rollback sentinel")
+                guard try matchingProcesses(target.appendingPathComponent("Contents/MacOS/Cala").path).isEmpty else { throw failure }
+            }
+            try stopTarget()
+            #if CALA_UPDATE_TEST
+            if ProcessInfo.processInfo.environment["CALA_UPDATE_TEST_RESTORE_ERROR"] == "1" {
+                throw Failure("Injected restore failure")
+            }
+            #endif
+            guard matchesEntry(new, in: parentFD), matchesEntry(old, in: previousFD),
+                  renameatx_np(previousFD, "Cala.app", parentFD, "Cala.app", UInt32(RENAME_SWAP)) == 0
+            else { throw posixFailure("restore previous Cala") }
         } catch {
-            log("could not save blocked build: \(error.localizedDescription)", in: support)
+            unlink(rollback.path)
+            try reopen()
+            throw error
         }
         log("rolled back \(pending.to) to \(pending.from)", in: support)
-        let restored = launch()
-        remove(stage)
-        guard restored else { throw Failure("Cala was restored but could not reopen") }
+        try reopen()
+        if recorded {
+            try clean()
+            if unlink(rollback.path) != 0 && errno != ENOENT { throw posixFailure("remove rollback marker") }
+            try FileManager.default.removeItem(at: pendingURL)
+        }
     }
 
     private func upTimeout(_ info: [String: Any]) -> TimeInterval {
         #if CALA_UPDATE_TEST
         if info["CalaUpdateTest"] as? Bool == true,
-           let seconds = info["CalaUpdateTestUpTimeout"] as? Double, seconds.isFinite, seconds > 0 {
-            return seconds
-        }
+           let seconds = info["CalaUpdateTestUpTimeout"] as? Double, seconds.isFinite, seconds > 0 { return seconds }
         #endif
-        return max(0, min(120, pending.deadline.timeIntervalSinceNow))
+        return 120
+    }
+
+    private func reopen() throws {
+        if launch() { return }
+        // LaunchServices may itself be unresponsive. Only start the validated
+        // installed executable directly if the session has no such process.
+        let executable = target.appendingPathComponent("Contents/MacOS/Cala")
+        do {
+            try validateSignature(target)
+            guard try matchingProcesses(executable.path).isEmpty else { return }
+            #if CALA_UPDATE_TEST
+            if ProcessInfo.processInfo.environment["CALA_UPDATE_TEST_OPEN"] != nil { throw Failure("Test opener failed") }
+            #endif
+            let app = Process()
+            app.executableURL = executable
+            app.standardInput = FileHandle.nullDevice
+            app.standardOutput = FileHandle.nullDevice
+            app.standardError = FileHandle.nullDevice
+            try app.run()
+        } catch { throw Failure("Could not reopen Cala: \(error)") }
     }
 
     private func launch() -> Bool {
@@ -159,7 +258,14 @@ private struct Watch {
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
-            process.waitUntilExit()
+            var limit = 10.0
+            #if CALA_UPDATE_TEST
+            if ProcessInfo.processInfo.environment["CALA_UPDATE_TEST_OPEN"] != nil { limit = 1 }
+            #endif
+            guard wait(seconds: limit, until: { !process.isRunning }) else {
+                if process.isRunning { process.terminate() }
+                return false
+            }
             return process.terminationStatus == 0
         } catch {
             log("could not open Cala: \(error.localizedDescription)", in: support)
@@ -188,11 +294,7 @@ private struct Watch {
         throw Failure("Cala did not quit after SIGTERM; leaving both apps in place")
     }
 
-    private func remove(_ url: URL) {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        do { try FileManager.default.removeItem(at: url) }
-        catch { log("could not remove \(url.lastPathComponent): \(error.localizedDescription)", in: support) }
-    }
+
 }
 
 private func matchingProcesses(_ executable: String) throws -> [pid_t] {

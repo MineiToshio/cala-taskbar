@@ -8,19 +8,33 @@ func check<T: Equatable>(_ name: String, _ actual: T, _ expected: T) {
     print("PASS \(name)")
 }
 
-check("higher numeric build", UpdatePolicy.decide(running: "9", disk: "10", blockers: []), .relaunch)
-check("same build after relaunch", UpdatePolicy.decide(running: "10", disk: "10", blockers: []), .none)
-check("older build", UpdatePolicy.decide(running: "10", disk: "9", blockers: []), .none)
-check("dotted build", UpdatePolicy.decide(running: "10.1.9", disk: "10.2", blockers: []), .relaunch)
-check("equivalent dotted build", UpdatePolicy.decide(running: "10", disk: "010.0.0", blockers: []), .none)
-check("invalid disk build", UpdatePolicy.decide(running: "10", disk: "11..2", blockers: []), .none)
-check("invalid running build", UpdatePolicy.decide(running: "+10", disk: "11", blockers: []), .none)
-check("missing or incomplete bundle", UpdatePolicy.decide(running: "10", disk: nil, blockers: []), .none)
+func version(_ marketing: String, _ build: String) -> AppVersion? {
+    UpdatePolicy.version(["CFBundleShortVersionString": marketing, "CFBundleVersion": build])
+}
+let running = version("1.0.0", "999")
+let next = version("1.1.0", "2")
+check("marketing version outranks developer build", UpdatePolicy.decide(running: running, disk: next, blockers: []), .relaunch)
+check("build tie breaker", UpdatePolicy.decide(running: running, disk: version("1.0.0", "1000"), blockers: []), .relaunch)
+check("same build", UpdatePolicy.decide(running: next, disk: next, blockers: []), .none)
+check("older marketing version", UpdatePolicy.decide(running: next, disk: running, blockers: []), .none)
+check("invalid disk build", UpdatePolicy.decide(running: running, disk: version("1.1.0", "x"), blockers: []), .none)
+check("incomplete bundle", UpdatePolicy.decide(running: running, disk: nil, blockers: []), .none)
 let blockers: [UpdatePolicy.Blocker] = [.inactiveSession, .drag, .zonesEditor, .settings, .onboarding, .modal, .updater]
 for blocker in blockers {
-    check(blocker.rawValue, UpdatePolicy.decide(running: "10", disk: "11", blockers: [blocker]), .deferred(blocker))
+    check(blocker.rawValue, UpdatePolicy.decide(running: running, disk: next, blockers: [blocker]), .deferred(blocker))
 }
-check("idle after deferral", UpdatePolicy.decide(running: "10", disk: "11", blockers: []), .relaunch)
+
+var eligible = true
+func restartGate() -> UpdatePolicy.Decision {
+    UpdatePolicy.restart(force: false, userStarted: false, blockers: [.updater], autoAllowed: eligible)
+}
+check("automatic restart initially eligible", restartGate(), .relaunch)
+eligible = false
+check("automatic restart rechecks current eligibility after swap", restartGate(), .deferred(.inactiveSession))
+check("late presentation or settings defers restart",
+      UpdatePolicy.restart(force: false, userStarted: false, blockers: [.settings], autoAllowed: true), .deferred(.settings))
+check("explicit restart while automatic installation is off",
+      UpdatePolicy.restart(force: true, userStarted: false, blockers: [], autoAllowed: false), .relaunch)
 
 let legacy = "/Users/example/Applications/Cala.app"
 let shared = "/Applications/Cala.app"

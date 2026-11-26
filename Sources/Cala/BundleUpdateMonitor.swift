@@ -3,13 +3,13 @@ import AppKit
 /// Checks the installed bundle directly, since Bundle.main caches the running build's Info.plist.
 final class BundleUpdateMonitor: NSObject {
     private let bundleURL = Bundle.main.bundleURL
-    private let runningVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    private let runningVersion = UpdatePolicy.version(Bundle.main.infoDictionary)
     private let bundleID = Bundle.main.bundleIdentifier
     private var poll: Timer?
     private var retry: Timer?
     private var retryNotBefore: TimeInterval = 0
     private var lastBlocker: UpdatePolicy.Blocker?
-    private var candidate: (version: String, seenAt: TimeInterval)?
+    private var candidate: (version: AppVersion, seenAt: TimeInterval)?
     private var sessionActive = true
 
     func start() {
@@ -47,7 +47,7 @@ final class BundleUpdateMonitor: NSObject {
         DispatchQueue.main.async { self.check() }
     }
 
-    private func diskVersion() -> String? {
+    private func diskVersion() -> AppVersion? {
         let contents = bundleURL.appendingPathComponent("Contents")
         guard let bundleID, let data = try? Data(contentsOf: contents.appendingPathComponent("Info.plist")),
               let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any],
@@ -56,7 +56,7 @@ final class BundleUpdateMonitor: NSObject {
               executable == Bundle.main.executableURL?.lastPathComponent,
               FileManager.default.isExecutableFile(atPath: contents.appendingPathComponent("MacOS")
                   .appendingPathComponent(executable).path) else { return nil }
-        return plist["CFBundleVersion"] as? String
+        return UpdatePolicy.version(plist)
     }
 
     private func check() {

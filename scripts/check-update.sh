@@ -29,9 +29,11 @@ fi
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 compile=(swiftc -O -module-cache-path "$out/modules")
-"${compile[@]}" -o "$out/cala-update" "$policy" Checks/Update/main.swift
+"${compile[@]}" -o "$out/cala-update" "$policy" "$src/UpdateVersion.swift" Checks/Update/main.swift
 "$out/cala-update"
 "${compile[@]}" -o "$out/core" "${core[@]}" Checks/UpdateCore/main.swift
 "$out/core"
 "${compile[@]}" -D CALA_UPDATE_TEST -o "$out/install" "${core[@]}" "$installer" "$src/AppPaths.swift" Checks/UpdateInstall/main.swift
-"$out/install" "$out/fixtures"
+"${compile[@]}" -D CALA_UPDATE_TEST -o "$out/fixture-helper" Sources/CalaUpdateHelper/main.swift
+codesign --force --sign - --identifier local.cala.update "$out/fixture-helper"
+"$out/install" "$out/fixtures" "$out/fixture-helper"

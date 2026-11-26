@@ -3,7 +3,7 @@ import Darwin
 import Security
 
 enum InstallResult: Error, Equatable {
-    case installed(previous: URL), upToDate, verificationFailed(String), diskFull(Int64), busy, blockedByMacOS, failed(String)
+    case installed(previous: URL), upToDate, deferred, verificationFailed(String), diskFull(Int64), busy, blockedByMacOS, failed(String)
 }
 
 enum InstallerFaults: String {
@@ -39,7 +39,7 @@ private func sameEntry(_ parent: FileHandle, _ name: String, _ expected: stat) -
 
 // Darwin's volume-ID paths let path-only APIs address an open directory even
 // if another account renames its entry in the shared Applications directory.
-private func pinnedURL(_ info: stat) throws -> URL {
+private func volumeURL(_ info: stat) throws -> URL {
     let url = URL(fileURLWithPath: "/.vol/\(UInt32(bitPattern: info.st_dev))/\(info.st_ino)", isDirectory: true)
     var actual = stat()
     guard lstat(url.path, &actual) == 0, actual.st_dev == info.st_dev, actual.st_ino == info.st_ino
@@ -64,6 +64,8 @@ struct InstallerTools {
     var cleanup: (URL) throws -> Void
     var cacheDirectory: URL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
     var downloadConfiguration = { (version: String) in UpdateFeed.configuration(version: version, background: true) }
+    var supportDirectory: () -> URL = { AppPaths.supportDirectory }
+    var arm: (URL, FileHandle, URL, URL) throws -> Process = UpdateWatch.start
     var beforeSwap: () throws -> Void = {}
     var swap: (Int32, Int32) -> Int32 = { new, parent in
         renameatx_np(new, "Cala.app", parent, "Cala.app", UInt32(RENAME_SWAP))
@@ -157,6 +159,8 @@ final class UpdateInstaller {
     private let target: URL
     private let tools: InstallerTools
     private let faults: InstallerFaults
+    private(set) var watcher: Process?
+    private var backupIdentity: stat?
     private var resume: (url: URL, data: Data)?
 
     init(target: URL, tools: InstallerTools = .system, faults: InstallerFaults = .none) {
@@ -197,6 +201,27 @@ final class UpdateInstaller {
         }
     }
 
+    func confirmWatch(previous: URL) throws {
+        let support = tools.supportDirectory()
+        var actual = stat()
+        guard let backupIdentity, lstat(previous.path, &actual) == 0, actual.st_dev == backupIdentity.st_dev,
+              actual.st_ino == backupIdentity.st_ino,
+              let pending = try UpdateJournal.read(in: support), pending.previous == previous.path,
+              try UpdateJournal.identity(at: previous) == pending.from,
+              try UpdateJournal.identity(at: target) == pending.to else { throw InstallResult.failed("backup changed") }
+        if watcher?.isRunning == true { return }
+        let lock = try descriptor(open(target.deletingLastPathComponent().appendingPathComponent(".cala-update.lock").path, readFlags))
+        guard flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else { throw InstallResult.busy }
+        var template = Array((NSTemporaryDirectory() + "/cala-watch.XXXXXXXX").utf8CString)
+        guard mkdtemp(&template) != nil else { throw posixError() }
+        let work = URL(fileURLWithPath: String(cString: template))
+        defer { try? FileManager.default.removeItem(at: work) }
+        let backup = work.appendingPathComponent("Cala.app")
+        try FileManager.default.copyItem(at: previous, to: backup)
+        _ = try tools.identity(backup)
+        watcher = try tools.arm(backup.appendingPathComponent("Contents/Helpers/cala-update"), lock, support, target)
+    }
+
     private func checkBlocked(_ candidate: AppVersion) throws {
         if try UpdateRules.isBlocked(candidate, by: tools.blocked()) { throw InstallResult.verificationFailed("blocked") }
     }
@@ -216,21 +241,20 @@ final class UpdateInstaller {
         guard lockInfo.st_mode & S_IFMT == S_IFREG, lockInfo.st_nlink == 1,
               flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0,
               sameEntry(parent, lockName, lockInfo) else { throw InstallResult.busy }
-        defer {
-            // This is the last action inside the critical section. A waiter that
-            // opened the old inode has to validate its name AFTER acquiring flock.
-            if sameEntry(parent, lockName, lockInfo), unlinkat(parent.fileDescriptor, lockName, 0) != 0 {
-                log("update: lock cleanup \(errno)")
-            }
-        }
+        // The lock inode is permanent. The watcher inherits this open file description.
         guard sameEntry(parent, "Cala.app", original) else { throw InstallResult.busy }
 
-        let oldURL = try pinnedURL(original)
+        let oldURL = try volumeURL(original)
         let info = try Self.plist(installed)
         guard info["CFBundleIdentifier"] as? String == m.bundleId,
               let version = info["CFBundleShortVersionString"] as? String, let build = info["CFBundleVersion"] as? String,
               let current = AppVersion(version: version, build: build) else { throw InstallResult.verificationFailed("installed Info.plist") }
         guard current < candidate else { return .upToDate }
+
+        let support = tools.supportDirectory()
+        try UpdateJournal.reconcileRestored(in: support, target: target)
+        guard try UpdateJournal.read(in: support) == nil else { throw InstallResult.busy }
+        try checkBlocked(candidate)
 
         var template = Array(".cala-update.XXXXXXXX".utf8CString)
         guard mkdtempat_np(parent.fileDescriptor, &template) != nil else { throw posixError() }
@@ -244,7 +268,7 @@ final class UpdateInstaller {
                 if unlinkat(parent.fileDescriptor, name, AT_REMOVEDIR) != 0 { log("update: stage cleanup \(errno)") }
             }
         }
-        let root = try pinnedURL(stageInfo)
+        let root = try volumeURL(stageInfo)
         // hdiutil, ditto and Security canonicalize paths. Use a second 0700
         // directory under the user's private temp directory for those APIs;
         // no lookup they perform traverses the shared Applications parent.
@@ -253,6 +277,7 @@ final class UpdateInstaller {
         let work = URL(fileURLWithPath: String(cString: workTemplate), isDirectory: true)
         let mount = work.appendingPathComponent("mnt")
         let verified = work.appendingPathComponent("verified.dmg")
+        var workRemoved = false
         var mountMayExist = false
         var children: [String] = []
         defer {
@@ -261,7 +286,7 @@ final class UpdateInstaller {
                 catch { log("update: force detach: \(error)") }
             }
             // If even a forced detach failed, leave the mount alone.
-            if !mountMayExist {
+            if !mountMayExist && !workRemoved {
                 do { try fm.removeItem(at: work) } catch { log("update: temporary cleanup: \(error)") }
             }
             if !committed {
@@ -296,7 +321,7 @@ final class UpdateInstaller {
         } catch let error as InstallResult { discardDownload(); throw error }
         catch is FeedFailure { discardDownload(); throw InstallResult.verificationFailed("size") }
 
-        for child in ["new", "previous"] {
+        for child in ["previous"] {
             guard mkdirat(stage.fileDescriptor, child, 0o700) == 0 else { throw posixError() }
             children.append(child)
         }
@@ -329,14 +354,13 @@ final class UpdateInstaller {
         try fm.copyItem(at: oldURL, to: oldCopy)
         try verify(m, staged: staged, at: new, installed: installed, at: oldCopy)
         try Self.normalize(new)
-        let incoming = try descriptor(openat(stage.fileDescriptor, "new", directoryFlags))
-        let previous = try descriptor(openat(stage.fileDescriptor, "previous", directoryFlags))
+        let incoming = try descriptor(openat(stage.fileDescriptor, "previous", directoryFlags))
         let workFD = try descriptor(open(work.path, directoryFlags))
         // Transfer the validated tree without resolving the public stage name.
         // An external home directory can put the private temp on another volume.
         if renameat(workFD.fileDescriptor, "Cala.app", incoming.fileDescriptor, "Cala.app") != 0 {
             guard errno == EXDEV else { throw posixError() }
-            let destination = root.appendingPathComponent("new/Cala.app")
+            let destination = root.appendingPathComponent("previous/Cala.app")
             try fm.copyItem(at: new, to: destination)
             try Self.normalize(destination)
         }
@@ -345,8 +369,24 @@ final class UpdateInstaller {
         #if CALA_UPDATE_TEST
         if faults == .beforeSwap { throw InstallResult.failed("before-swap") }
         #endif
-        try tools.beforeSwap()
+        let backupURL = parentURL.appendingPathComponent(name).appendingPathComponent("previous/Cala.app")
+        let journal = UpdateJournal(from: version + "+" + build, to: m.version + "+" + String(m.build),
+                                    previous: backupURL.path, transaction: UUID())
+        let helper = oldCopy.appendingPathComponent("Contents/Helpers/cala-update")
+        try journal.write(in: support)
+        defer {
+            if !committed { try? UpdateJournal.remove("update-pending.json", in: support) }
+        }
+        watcher = try tools.arm(helper, lock, support, target)
+        defer { if !committed, let watcher, watcher.isRunning { watcher.terminate() } }
+        for file in [verified, mount] {
+            do { try tools.cleanup(file) } catch { log("update: cleanup: \(error)") }
+        }
+        try fm.removeItem(at: work)
+        workRemoved = true
         try checkBlocked(candidate)
+        try tools.beforeSwap()
+        guard watcher?.isRunning == true else { throw InstallResult.failed("rollback helper exited") }
         let readyInfo = try status(ready)
         var currentParent = stat()
         guard lstat(parentURL.path, &currentParent) == 0,
@@ -371,21 +411,12 @@ final class UpdateInstaller {
             throw InstallResult.busy
         }
         committed = true
-        var backup = "previous/Cala.app"
-        if renameat(incoming.fileDescriptor, "Cala.app", previous.fileDescriptor, "Cala.app") != 0 {
-            log("update: previous bundle remains in new/ (\(errno))")
-            backup = "new/Cala.app"
-        }
-        for directory in [incoming, previous, stage, parent] where fsync(directory.fileDescriptor) != 0 {
-            log("update: post-swap directory sync \(errno)")
-        }
-        let backupRoot = sameEntry(parent, name, stageInfo) ? parentURL.appendingPathComponent(name) : root
-        let backupURL = backupRoot.appendingPathComponent(backup)
+        backupIdentity = original
         #if CALA_UPDATE_TEST
-        if faults == .afterSwap { return .installed(previous: backupURL) }
+        if faults == .afterSwap { _exit(86) }
         #endif
-        for file in [verified, mount] {
-            do { try tools.cleanup(file) } catch { log("update: cleanup: \(error)") }
+        for directory in [incoming, stage, parent] where fsync(directory.fileDescriptor) != 0 {
+            log("update: post-swap directory sync \(errno)")
         }
         discardDownload()
         return .installed(previous: backupURL)
@@ -449,7 +480,12 @@ final class UpdateInstaller {
         try action(url, info)
     }
 
+    static func normalizedMode(_ mode: mode_t, executable: Bool, group: gid_t, admin: gid_t?) -> mode_t {
+        (mode & 0o005) | (executable ? 0o750 : 0o640) | (group == admin ? 0o020 : 0)
+    }
+
     private static func normalize(_ url: URL) throws {
+        let adminGroup = getgrnam("admin")?.pointee.gr_gid
         var admin: gid_t?
         if let group = getgrnam("admin") {
             let gid = group.pointee.gr_gid
@@ -463,7 +499,7 @@ final class UpdateInstaller {
             if removexattr(item.path, "com.apple.quarantine", XATTR_NOFOLLOW) != 0 && errno != ENOATTR { throw posixError() }
             if let admin, chown(item.path, uid_t.max, admin) != 0 { throw posixError() }
             let executable = info.st_mode & S_IFMT == S_IFDIR || info.st_mode & 0o111 != 0
-            let mode = (info.st_mode & 0o005) | (executable ? 0o770 : 0o660)
+            let mode = normalizedMode(info.st_mode, executable: executable, group: admin ?? info.st_gid, admin: adminGroup)
             guard chmod(item.path, mode) == 0 else { throw posixError() }
         }
     }
@@ -471,20 +507,14 @@ final class UpdateInstaller {
 
 private extension UpdateInstaller {
     func openCache(for m: UpdateManifest, create: Bool) throws -> FileHandle {
-        var dir = try descriptor(open(tools.cacheDirectory.path, directoryFlags))
-        for component in ["local.cala", "Updates", "\(m.version)-\(m.build)"] {
-            if create, mkdirat(dir.fileDescriptor, component, 0o700) != 0, errno != EEXIST { throw posixError() }
-            dir = try descriptor(openat(dir.fileDescriptor, component, directoryFlags))
-            guard try status(dir).st_uid == geteuid() else { throw posixError(EACCES) }
-        }
-        return dir
+        try DownloadFile.directory(tools.cacheDirectory, m, create: create)
     }
 
     func download(_ m: UpdateManifest, from url: URL) throws -> URL {
         guard m.dmg.url == url else { throw InstallResult.verificationFailed("download URL") }
         let cache = try openCache(for: m, create: true)
         defer { withExtendedLifetime(cache) {} }
-        let file = try pinnedURL(status(cache)).appendingPathComponent(UUID().uuidString + ".dmg")
+        let file = try volumeURL(status(cache)).appendingPathComponent(UUID().uuidString + ".dmg")
         let delegate = ImageDownload(destination: file, size: m.dmg.size)
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
         let config = tools.downloadConfiguration(version)
@@ -545,5 +575,197 @@ private final class ImageDownload: NSObject, URLSessionDownloadDelegate, @unchec
             result = .failure(error)
         }
         done.signal()
+    }
+}
+
+// This journal is shared with the standalone watcher. Mutations and recovery
+// use the permanent Applications lock, except for the transaction-specific health receipt.
+struct UpdateJournal: Codable, Equatable {
+    let from: String
+    let to: String
+    let previous: String
+    let transaction: UUID? // nil for an update started by the original watcher
+    var marker: String { "update-up-" + (transaction?.uuidString ?? to) }
+
+    static func read(in support: URL) throws -> Self? {
+        do { return try JSONDecoder().decode(Self.self, from: Data(contentsOf: support.appendingPathComponent("update-pending.json"))) }
+        catch let e as CocoaError where e.code == .fileReadNoSuchFile { return nil }
+    }
+
+    func write(in support: URL) throws {
+        let file = support.appendingPathComponent("update-pending.json")
+        try JSONEncoder().encode(self).write(to: file, options: .atomic)
+        let journal = try descriptor(open(file.path, readFlags))
+        let dir = try descriptor(open(support.path, directoryFlags))
+        guard fsync(journal.fileDescriptor) == 0, fsync(dir.fileDescriptor) == 0 else { throw posixError() }
+    }
+
+    static func remove(_ name: String, in dir: URL) throws {
+        if unlink(dir.appendingPathComponent(name).path) != 0 && errno != ENOENT { throw posixError() }
+    }
+
+    func stage(for target: URL) throws -> URL {
+        let backup = URL(fileURLWithPath: previous).standardizedFileURL
+        let stage = backup.deletingLastPathComponent().deletingLastPathComponent()
+        guard backup.lastPathComponent == "Cala.app", stage.lastPathComponent.hasPrefix(".cala-update."),
+              stage.deletingLastPathComponent().path == target.deletingLastPathComponent().standardizedFileURL.path,
+              backup.deletingLastPathComponent().lastPathComponent == "previous" ||
+                (transaction == nil && backup.deletingLastPathComponent().lastPathComponent == "new")
+        else { throw InstallResult.failed("invalid backup path") }
+        return stage
+    }
+
+    func cleanStage(for target: URL) throws {
+        let stage = try stage(for: target)
+        let parent = try descriptor(open(target.deletingLastPathComponent().path, directoryFlags))
+        let fd = openat(parent.fileDescriptor, stage.lastPathComponent, directoryFlags)
+        if fd < 0 && errno == ENOENT { return }
+        let dir = try descriptor(fd)
+        let info = try status(dir)
+        guard info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700 else { throw InstallResult.busy }
+        let root = try volumeURL(info)
+        for child in try FileManager.default.contentsOfDirectory(atPath: root.path) {
+            try FileManager.default.removeItem(at: root.appendingPathComponent(child))
+        }
+        guard sameEntry(parent, stage.lastPathComponent, info),
+              unlinkat(parent.fileDescriptor, stage.lastPathComponent, AT_REMOVEDIR) == 0 else { throw InstallResult.busy }
+    }
+
+    static func identity(at app: URL) throws -> String {
+        let data = try Data(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+        guard let info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let v = info["CFBundleShortVersionString"] as? String, let b = info["CFBundleVersion"] as? String,
+              AppVersion(version: v, build: b) != nil else { throw InstallResult.failed("invalid Info.plist") }
+        return v + "+" + b
+    }
+
+    // Called under flock. Even if the volume filled up during rollback, the
+    // original pending record survives until the failed identity is durable.
+    static func reconcileRestored(in support: URL, target: URL) throws {
+        guard let pending = try read(in: support) else {
+            // Older clients could unlink pending before clearing the watchdog sentinel.
+            try remove("update-rollback", in: support)
+            return
+        }
+        guard try identity(at: target) == pending.from else { return }
+        _ = try pending.stage(for: target)
+        let file = support.appendingPathComponent("update-blocked.json")
+        var blocked: Set<String>
+        do { blocked = try JSONDecoder().decode(Set<String>.self, from: Data(contentsOf: file)) }
+        catch let e as CocoaError where e.code == .fileReadNoSuchFile { blocked = [] }
+        if blocked.insert(pending.to).inserted {
+            try JSONEncoder().encode(blocked.sorted()).write(to: file, options: .atomic)
+        }
+        let fd = try descriptor(open(file.path, readFlags))
+        guard fsync(fd.fileDescriptor) == 0 else { throw posixError() }
+        let dir = try descriptor(open(support.path, directoryFlags))
+        guard fsync(dir.fileDescriptor) == 0 else { throw posixError() }
+        do { try pending.cleanStage(for: target) }
+        catch { log("update: restored bundle stage cleanup: \(error)") }
+        try remove("update-rollback", in: support)
+        try remove(pending.marker, in: support)
+        try remove("update-pending.json", in: support)
+    }
+
+    func scheduleHealth(in support: URL, target: URL, delay: TimeInterval, completion: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            do {
+                guard try Self.read(in: support) == self, try Self.identity(at: target) == to,
+                      !FileManager.default.fileExists(atPath: support.appendingPathComponent("update-rollback").path)
+                else { return }
+                try Data().write(to: support.appendingPathComponent(marker), options: .atomic)
+                completion()
+            } catch { log("update: launch receipt failed: \(error)") }
+        }
+    }
+}
+
+enum UpdateWatch {
+    static func start(helper: URL, lock: FileHandle, support: URL, target: URL) throws -> Process {
+        // The enclosing installed/Cala.app snapshot was strictly verified under
+        // a private mkdtemp parent. Execute only its sealed, verified helper.
+        let snapshot = helper.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let bundle = try descriptor(open(snapshot.path, directoryFlags))
+        let executable = try descriptor(openat(bundle.fileDescriptor, "Contents/Helpers/cala-update",
+                                               O_RDONLY | O_CLOEXEC | O_NOFOLLOW_ANY))
+        guard try status(executable).st_mode & S_IFMT == S_IFREG,
+              try InstallerTools.system.identity(helper).identifier == "local.cala.update" else {
+            throw InstallResult.verificationFailed("rollback helper")
+        }
+        let pipe = Pipe()
+        let p = Process()
+        p.executableURL = helper
+        p.standardInput = lock
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        p.arguments = ["arm", "--pending", support.appendingPathComponent("update-pending.json").path,
+                       "--pid", String(getpid()), "--target", target.path]
+        try p.run()
+        let fd = pipe.fileHandleForReading.fileDescriptor
+        var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        var byte: UInt8 = 0
+        guard poll(&pollFD, 1, 15000) > 0, read(fd, &byte, 1) == 1, byte == 1, p.isRunning else {
+            if p.isRunning { p.terminate() }
+            throw InstallResult.failed("rollback helper did not acknowledge")
+        }
+        return p
+    }
+}
+
+// Keep the private cache directory and the exact destination inode open for
+// the lifetime of the URLSession transfer, including cancellation and cleanup.
+final class DownloadFile {
+    let directory: FileHandle
+    let file: FileHandle
+    let savedURL: URL
+    let pinnedURL: URL
+    let cached: Bool
+
+    fileprivate static func directory(_ base: URL, _ m: UpdateManifest, create: Bool) throws -> FileHandle {
+        var dir = try descriptor(open(base.path, directoryFlags))
+        for component in ["local.cala", "Updates", "\(m.version)-\(m.build)"] {
+            if create, mkdirat(dir.fileDescriptor, component, 0o700) != 0, errno != EEXIST { throw posixError() }
+            dir = try descriptor(openat(dir.fileDescriptor, component, directoryFlags))
+            guard try status(dir).st_uid == geteuid(), fchmod(dir.fileDescriptor, 0o700) == 0 else { throw posixError(EACCES) }
+        }
+        return dir
+    }
+
+    init(base: URL, manifest: UpdateManifest, saved: URL?) throws {
+        directory = try Self.directory(base, manifest, create: true)
+        let path = base.appendingPathComponent("local.cala/Updates/\(manifest.version)-\(manifest.build)")
+        var existing: FileHandle?
+        if let saved, saved.deletingLastPathComponent().standardizedFileURL.path == path.standardizedFileURL.path,
+           saved.pathExtension == "dmg" {
+            let fd = openat(directory.fileDescriptor, saved.lastPathComponent, readFlags)
+            if fd >= 0 {
+                let handle = try descriptor(fd)
+                let info = try status(handle)
+                if info.st_mode & S_IFMT == S_IFREG, info.st_uid == geteuid(), info.st_nlink == 1,
+                   info.st_size == manifest.dmg.size { existing = handle }
+            }
+        }
+        cached = existing != nil
+        if let existing, let saved {
+            savedURL = saved
+            file = existing
+        } else {
+            savedURL = path.appendingPathComponent(UUID().uuidString + ".dmg")
+            file = try descriptor(openat(directory.fileDescriptor, savedURL.lastPathComponent,
+                                         O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600))
+        }
+        pinnedURL = try volumeURL(status(directory)).appendingPathComponent(savedURL.lastPathComponent)
+    }
+
+    func receive(_ temporary: URL, size: Int64) throws {
+        let source = try descriptor(open(temporary.path, readFlags))
+        guard try status(source).st_size == size else { throw InstallResult.verificationFailed("download size") }
+        _ = try UpdateSignature.hash(source, limit: size, copyingTo: file)
+    }
+
+    func discard() {
+        if let info = try? status(file), sameEntry(directory, savedURL.lastPathComponent, info) {
+            unlinkat(directory.fileDescriptor, savedURL.lastPathComponent, 0)
+        }
     }
 }

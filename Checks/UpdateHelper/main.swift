@@ -69,10 +69,11 @@ private func watchCase(_ name: String, healthy: Bool, signedPrevious: Bool = tru
     try fm.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     try makeApp(previous, version: "1.0.0", build: "120", sign: signedPrevious)
     try makeApp(target, version: "1.1.0", build: "131", sign: true)
-    try Data(#"["0.9.0+119"]"#.utf8).write(to: blocked)
+    let corruptList = name == "unreadable-list"
+    try Data((corruptList ? "invalid" : #"["0.9.0+119"]"#).utf8).write(to: blocked)
     let record = [
         "from": "1.0.0+120", "to": "1.1.0+131", "previous": previous.path,
-        "deadline": ISO8601DateFormatter().string(from: Date().addingTimeInterval(120)),
+        "deadline": ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120)),
     ]
     try JSONEncoder().encode(record).write(to: pending)
     let script = """
@@ -84,9 +85,12 @@ private func watchCase(_ name: String, healthy: Bool, signedPrevious: Bool = tru
     case "$version" in
       1.1.0)
         [ ! -e "$TEST_SENTINEL" ]
-        if [ "$TEST_HEALTHY" = 1 ]; then touch "$TEST_MARKER"; fi ;;
+        if [ "$TEST_NAME" = hung-open ]; then exec /bin/sleep 12; fi
+        if [ "$TEST_NAME" = replaced-backup ] && [ -d "$TEST_PREVIOUS" ]; then mv "$TEST_PREVIOUS" "$TEST_PREVIOUS.saved"; fi
+        if [ "$TEST_NAME" = block-write-failure ]; then rm -f "$TEST_RESERVE"; fi
+        if [ "$TEST_HEALTHY" = 1 ]; then (sleep 0.18; touch "$TEST_MARKER") & fi ;;
       1.0.0)
-        [ -f "$TEST_SENTINEL" ] && /usr/bin/grep -q '1.1.0+131' "$TEST_BLOCKED" ;;
+        [ -f "$TEST_SENTINEL" ] && { [ "$TEST_NAME" = block-write-failure ] || /usr/bin/grep -q '1.1.0+131' "$TEST_BLOCKED"; } ;;
       *) exit 4 ;;
     esac
     printf '%s\\n' "$version" >> "$TEST_OPENS"
@@ -98,32 +102,47 @@ private func watchCase(_ name: String, healthy: Bool, signedPrevious: Bool = tru
     old.executableURL = URL(fileURLWithPath: "/bin/sleep")
     old.arguments = ["0.2"]
     try old.run()
+    let start = ProcessInfo.processInfo.systemUptime
     let result = try run(helper, ["watch", "--pending", pending.path, "--pid", String(old.processIdentifier),
                                   "--target", target.path], environment: [
-        "CALA_UPDATE_TEST_OPEN": fakeOpen.path, "TEST_TARGET": target.path,
+        "CALA_UPDATE_TEST_OPEN": fakeOpen.path, "TEST_NAME": name, "TEST_PREVIOUS": previous.path,
+        "CALA_UPDATE_TEST_RESTORE_ERROR": name == "restore-error" ? "1" : "0",
+        "TEST_RESERVE": support.appendingPathComponent("update-block-reserve").path, "TEST_TARGET": target.path,
         "TEST_HEALTHY": healthy ? "1" : "0", "TEST_MARKER": marker.path,
         "TEST_SENTINEL": sentinel.path, "TEST_BLOCKED": blocked.path, "TEST_OPENS": opens.path,
         "TEST_OLD_PID": String(old.processIdentifier),
     ])
     old.waitUntilExit()
-    expect(result == (signedPrevious ? 0 : 1), "unexpected watch exit status for \(name)")
+    let invalid = !signedPrevious || corruptList
+    let changed = name == "replaced-backup" || name == "restore-error"
+    let full = name == "block-write-failure"
+    expect(result == (invalid || changed ? 1 : 0), "unexpected watch exit status for \(name)")
+    if invalid {
+        expect((try? String(contentsOf: opens, encoding: .utf8)) == "1.1.0\n" && !fm.fileExists(atPath: sentinel.path),
+               "invalid recovery state reopens legacy caller without terminating Cala")
+        return
+    }
+    if name == "hung-open" { expect(ProcessInfo.processInfo.systemUptime - start < 8, "open is bounded") }
     let launchLog = try String(contentsOf: opens, encoding: .utf8)
     let blockedBuilds = try JSONDecoder().decode([String].self, from: Data(contentsOf: blocked))
-    let expectedLaunches = healthy || !signedPrevious ? "1.1.0\n" : "1.1.0\n1.0.0\n"
+    let expectedLaunches = healthy ? "1.1.0\n" : changed ? "1.1.0\n1.1.0\n" : name == "hung-open" ? "1.0.0\n" : "1.1.0\n1.0.0\n"
     expect(launchLog == expectedLaunches, "unexpected opens for \(name)")
-    expect(!fm.fileExists(atPath: sentinel.path), "rollback sentinel was left behind")
-    expect(fm.fileExists(atPath: stage.path) == !signedPrevious, "unexpected stage cleanup for \(name)")
-    expect(fm.fileExists(atPath: pending.path) == !healthy, "unexpected pending state for \(name)")
-    expect(blockedBuilds == (healthy || !signedPrevious ? ["0.9.0+119"] : ["0.9.0+119", "1.1.0+131"]),
+    expect(fm.fileExists(atPath: sentinel.path) == full, "unexpected rollback sentinel")
+    expect(fm.fileExists(atPath: stage.path) == (changed || full), "unexpected stage cleanup for \(name)")
+    expect(fm.fileExists(atPath: pending.path) == (changed || full), "unexpected pending state for \(name)")
+    expect(blockedBuilds == (healthy || full ? ["0.9.0+119"] : ["0.9.0+119", "1.1.0+131"]),
            "unexpected blocked list for \(name)")
     let restoredPlist = try Data(contentsOf: target.appendingPathComponent("Contents/Info.plist"))
     let info = try PropertyListSerialization.propertyList(from: restoredPlist, format: nil) as? [String: Any]
-    expect(info?["CFBundleVersion"] as? String == (healthy || !signedPrevious ? "131" : "120"),
+    expect(info?["CFBundleVersion"] as? String == (healthy || changed ? "131" : "120"),
            "unexpected build at target for \(name)")
 }
 
 try watchCase("marker", healthy: true)
 try watchCase("timeout", healthy: false)
 try watchCase("unsigned", healthy: false, signedPrevious: false)
-print("PASS update helper marker, timeout rollback, and invalid signature")
+for fault in ["unreadable-list", "hung-open", "restore-error", "replaced-backup", "block-write-failure"] {
+    try watchCase(fault, healthy: false)
+}
+print("PASS helper launch deadline, timeout rollback, signature, unreadable-list, hung-open, replaced-backup, block-write-failure")
 #endif

@@ -17,22 +17,26 @@ enum UpdatePolicy {
         case relaunch
     }
 
-    static func decide(running: String?, disk: String?, blockers: [Blocker]) -> Decision {
-        guard let running = components(running), let disk = components(disk),
-              running.lexicographicallyPrecedes(disk) else { return .none }
+    static func version(_ plist: [String: Any]?) -> AppVersion? {
+        guard let version = plist?["CFBundleShortVersionString"] as? String,
+              let build = plist?["CFBundleVersion"] as? String else { return nil }
+        return AppVersion(version: version, build: build)
+    }
+
+    static func decide(running: AppVersion?, disk: AppVersion?, blockers: [Blocker]) -> Decision {
+        guard let running, let disk, running < disk else { return .none }
         return blockers.first.map(Decision.deferred) ?? .relaunch
     }
 
-    private static func components(_ version: String?) -> [UInt64]? {
-        guard let version else { return nil }
-        let parts = version.split(separator: ".", omittingEmptySubsequences: false)
-        let numbers = parts.compactMap { part -> UInt64? in
-            guard part.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
-            return UInt64(part)
+    static func restart(force: Bool, userStarted: Bool, blockers: [Blocker], autoAllowed: @autoclosure () -> Bool) -> Decision {
+        if force { return .relaunch }
+        if let blocker = blockers.first(where: { $0 != .updater && !(userStarted && $0 == .settings) }) {
+            return .deferred(blocker)
         }
-        guard (1...3).contains(parts.count), numbers.count == parts.count else { return nil }
-        return numbers + Array(repeating: 0, count: 3 - numbers.count)
+        if !userStarted && !autoAllowed() { return .deferred(.inactiveSession) }
+        return .relaunch
     }
+
 }
 
 enum LoginItemPolicy {

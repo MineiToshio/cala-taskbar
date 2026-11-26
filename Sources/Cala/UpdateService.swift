@@ -10,42 +10,6 @@ enum UpdateState: Codable, Equatable {
     case manualInstall, unsupported, unavailable, failed, restartFailed
 }
 
-/// The file shared with the standalone rollback helper.
-struct PendingUpdate: Codable, Equatable {
-    let from: String
-    let to: String
-    let previous: String
-    let deadline: String
-
-    static var url: URL { AppPaths.supportDirectory.appendingPathComponent("update-pending.json") }
-    var helper: URL { URL(fileURLWithPath: previous).appendingPathComponent("Contents/Helpers/cala-update") }
-
-    static func read() -> PendingUpdate? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(Self.self, from: data)
-    }
-
-    func write() throws {
-        try JSONEncoder().encode(self).write(to: Self.url, options: .atomic)
-    }
-
-    /// Recovery only removes the private stage belonging to this target, never a path outside it.
-    func stage(for target: URL) -> URL? {
-        let app = URL(fileURLWithPath: previous).standardizedFileURL
-        let parent = app.deletingLastPathComponent()
-        let stage = parent.deletingLastPathComponent()
-        guard target.lastPathComponent == "Cala.app", app.lastPathComponent == "Cala.app",
-              ["previous", "new"].contains(parent.lastPathComponent),
-              stage.lastPathComponent.hasPrefix(".cala-update."),
-              stage.deletingLastPathComponent().path == target.deletingLastPathComponent().path,
-              stage.resolvingSymlinksInPath().path == stage.path else { return nil }
-        var info = stat()
-        guard lstat(stage.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR, info.st_uid == getuid(),
-              info.st_mode & 0o777 == 0o700 else { return nil }
-        return stage
-    }
-}
-
 final class UpdateService: ObservableObject {
     static let shared = UpdateService()
     static let releases = URL(string: "https://github.com/MineiToshio/cala-taskbar/releases/latest")!
@@ -97,7 +61,6 @@ final class UpdateService: ObservableObject {
         let keys: [Data]
         let test: Bool
         let idleThreshold: Double
-        let launchTimeout: TimeInterval
         let installerFaults: InstallerFaults
 
         init() {
@@ -106,13 +69,11 @@ final class UpdateService: ObservableObject {
             let testMode = info["CalaUpdateTest"] as? Bool == true
             let env = testMode ? ProcessInfo.processInfo.environment : [:]
             let idle = testMode ? info["CalaUpdateTestIdleSeconds"] as? Double : nil
-            let timeout = testMode ? info["CalaUpdateTestUpTimeout"] as? Double : nil
             installerFaults = testMode ? InstallerFaults(rawValue: info["CalaUpdateTestFault"] as? String ?? "") ?? .none : .none
             #else
             let testMode = false
             let env: [String: String] = [:]
             let idle: Double? = nil
-            let timeout: Double? = nil
             installerFaults = .none
             #endif
             test = testMode
@@ -122,7 +83,6 @@ final class UpdateService: ObservableObject {
             let configuredURL = env["CALA_UPDATE_FEED_URL"] ?? info["CalaUpdateFeedURL"] as? String ?? UpdateService.feed.absoluteString
             url = URL(string: configuredURL).flatMap { UpdateTransfer.allows($0, test: testMode) ? $0 : nil }
             idleThreshold = idle.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil } ?? 600
-            launchTimeout = timeout.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 120
         }
 
         var isEnabled: Bool { !keys.isEmpty && url != nil && running.parsed != nil }
@@ -157,7 +117,8 @@ final class UpdateService: ObservableObject {
     private var resume: (build: String, data: Data)?
     private var retryInstall = false
     private var restart: (manifest: UpdateManifest, previous: URL, userStarted: Bool)?
-    private var writingPending = false
+    private var installer: UpdateInstaller?
+    private var checkingRestart = false
     private var restartRetryAfter = Date.distantPast
     private var nextCheck = Date.distantFuture
     private var timer: Timer?
@@ -206,9 +167,10 @@ final class UpdateService: ObservableObject {
             let site = Site()
             let path = site.path()
             var saved = Self.load()
+            self.recoverLaunch(site: site, launched: launched)
             let newlyBlocked = Self.readBlocked().subtracting(saved.blockedBuilds)
             saved.blockedBuilds.formUnion(newlyBlocked)
-            if let pending = PendingUpdate.read(), newlyBlocked.contains(pending.to), pending.from == site.running.identity {
+            if let pending = try? UpdateJournal.read(in: AppPaths.supportDirectory), newlyBlocked.contains(pending.to), pending.from == site.running.identity {
                 saved.lastResult = .rolledBack(Self.marketingVersion(pending.to), site.running.version)
             } else if let failed = newlyBlocked.compactMap({ id -> (String, AppVersion)? in
                 let parts = id.split(separator: "+", omittingEmptySubsequences: false).map(String.init)
@@ -217,7 +179,6 @@ final class UpdateService: ObservableObject {
             }).max(by: { $0.1 < $1.1 }) {
                 saved.lastResult = .rolledBack(Self.marketingVersion(failed.0), site.running.version)
             }
-            self.recoverLaunch(site: site, blocked: saved.blockedBuilds, launched: launched)
             let cached = saved.envelope.flatMap { try? UpdateSignature.verify(feed: $0, publicKeys: site.keys).manifest }
             if cached == nil { saved.envelope = nil }
             let loaded = saved
@@ -492,16 +453,13 @@ final class UpdateService: ObservableObject {
                 DispatchQueue.main.async { self.failInstall(.diskFull(required)) }
                 return
             }
-            let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("local.cala/Updates/\(manifest.version)-\(manifest.build)", isDirectory: true)
-            let dmg = directory.appendingPathComponent("Cala.dmg")
             do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let alreadyDownloaded = cached == dmg && FileManager.default.fileExists(atPath: dmg.path)
+                let file = try DownloadFile(base: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0],
+                                            manifest: manifest, saved: cached)
                 DispatchQueue.main.async {
-                    guard self.store != nil, self.activity == .preparing else { return }
-                    if alreadyDownloaded { self.installDownloaded(dmg, manifest: manifest, site: site, userStarted: userStarted) }
-                    else { self.download(dmg, manifest: manifest, site: site, userStarted: userStarted) }
+                    guard self.store != nil, self.activity == .preparing else { if !file.cached { file.discard() }; return }
+                    if file.cached { self.installDownloaded(file, manifest: manifest, site: site, userStarted: userStarted) }
+                    else { self.download(file, manifest: manifest, site: site, userStarted: userStarted) }
                 }
             } catch {
                 DispatchQueue.main.async { self.failInstall(Self.isDiskFull(error) ? .diskFull(required) : .failed) }
@@ -509,7 +467,7 @@ final class UpdateService: ObservableObject {
         }
     }
 
-    private func download(_ dmg: URL, manifest: UpdateManifest, site: Site, userStarted: Bool) {
+    private func download(_ dmg: DownloadFile, manifest: UpdateManifest, site: Site, userStarted: Bool) {
         activity = .downloading
         state = .downloading(0)
         let build = Build(manifest).identity
@@ -523,11 +481,14 @@ final class UpdateService: ObservableObject {
                 }
             }, done: { [weak self] result in
                 DispatchQueue.main.async {
-                    guard let self, self.store != nil, self.activity == .downloading || self.activity == .cancelling else { return }
+                    guard let self, self.store != nil, self.activity == .downloading || self.activity == .cancelling else {
+                        dmg.discard()
+                        return
+                    }
                     self.transfer = nil
                     if self.activity == .cancelling {
                         // A successful transfer can already be queued when Cancel reaches the main thread.
-                        if case .success = result { self.work.async { try? FileManager.default.removeItem(at: dmg) } }
+                        dmg.discard()
                         if case .failure(let failure) = result, let data = failure.resume { self.resume = (build, data) }
                         self.activity = nil
                         self.nextAutoProbe = Date().addingTimeInterval(600)
@@ -537,11 +498,14 @@ final class UpdateService: ObservableObject {
                     }
                     switch result {
                     case .success:
-                        self.verifyDownload(dmg, manifest: manifest, site: site, userStarted: userStarted)
+                        self.installDownloaded(dmg, manifest: manifest, site: site, userStarted: userStarted)
                     case .failure(let failure):
+                        dmg.discard()
                         if let data = failure.resume { self.resume = (build, data) }
                         if let response = failure.error as? UpdateTransfer.FeedError,
                                   case .response(.tooLarge) = response {
+                            self.failInstall(.verificationFailed)
+                        } else if failure.error is InstallResult {
                             self.failInstall(.verificationFailed)
                         } else if Self.isDiskFull(failure.error) {
                             self.failInstall(.diskFull(Int64(manifest.dmg.size)))
@@ -553,28 +517,28 @@ final class UpdateService: ObservableObject {
             })
     }
 
-    private func verifyDownload(_ dmg: URL, manifest: UpdateManifest, site: Site, userStarted: Bool) {
-        activity = .preparing
-        state = .verifying
-        work.async {
-            let size = try? dmg.resourceValues(forKeys: [.fileSizeKey]).fileSize
-            let matches = size.map(Int64.init) == Int64(manifest.dmg.size)
-            if !matches { try? FileManager.default.removeItem(at: dmg) }
-            DispatchQueue.main.async {
-                guard self.store != nil, self.activity == .preparing else { return }
-                guard matches else { self.failInstall(.verificationFailed); return }
-                // UpdateInstaller verifies the digest and the staged bundle before using it.
-                self.installDownloaded(dmg, manifest: manifest, site: site, userStarted: userStarted)
-            }
-        }
-    }
-
-    private func installDownloaded(_ dmg: URL, manifest: UpdateManifest, site: Site, userStarted: Bool) {
-        saved.downloaded = dmg
+    private func installDownloaded(_ dmg: DownloadFile, manifest: UpdateManifest, site: Site, userStarted: Bool) {
+        saved.downloaded = dmg.savedURL
         persist()
         activity = .installing
         state = .installing
-        UpdateInstaller(target: site.target, faults: site.installerFaults).install(manifest: manifest, dmg: dmg) { [weak self] result in
+        var tools = InstallerTools.system
+        if !userStarted {
+            tools.beforeSwap = {
+                let presenting = Self.isPresenting()
+                let ready = DispatchSemaphore(value: 0)
+                var allowed = false
+                DispatchQueue.main.async {
+                    allowed = self.autoAllowed(manifest, site: site, presenting: presenting)
+                    ready.signal()
+                }
+                ready.wait()
+                guard allowed else { throw InstallResult.deferred }
+            }
+        }
+        let installer = UpdateInstaller(target: site.target, tools: tools, faults: site.installerFaults)
+        self.installer = installer
+        installer.install(manifest: manifest, dmg: dmg.pinnedURL) { [weak self] result in
             guard let self, self.store != nil else { return }
             switch result {
             case .installed(let previous):
@@ -583,7 +547,11 @@ final class UpdateService: ObservableObject {
                 self.available = nil
                 self.clearDownload(dmg)
                 self.activity = nil
-                self.prepareRestart(site: site, initial: true)
+                self.tryRestart()
+            case .deferred:
+                self.activity = nil
+                self.nextAutoProbe = Date().addingTimeInterval(15)
+                self.apply(site.evaluate(manifest, saved: self.saved), manifest: manifest, checked: self.saved.lastSuccess ?? Date())
             case .upToDate:
                 self.clearDownload(dmg)
                 self.activity = nil
@@ -604,10 +572,10 @@ final class UpdateService: ObservableObject {
         }
     }
 
-    private func clearDownload(_ dmg: URL) {
+    private func clearDownload(_ dmg: DownloadFile) {
         saved.downloaded = nil
         persist()
-        work.async { try? FileManager.default.removeItem(at: dmg) }
+        work.async { dmg.discard() }
     }
 
     private func failInstall(_ result: UpdateState) {
@@ -618,100 +586,101 @@ final class UpdateService: ObservableObject {
         setResult(result)
     }
 
+    private func autoAllowed(_ manifest: UpdateManifest, site: Site, presenting: Bool) -> Bool {
+        guard let config = store?.config else { return false }
+        let blockers = BundleUpdateMonitor.blockers(sessionActive: sessionActive).filter { $0 != .updater || windowOpen }
+        return UpdateRules.autoInstall(enabled: config.updateChecks && config.updateAutoInstall, path: site.path(),
+                                       idleSeconds: CGEventSource.secondsSinceLastEventType(.combinedSessionState,
+                                                                                    eventType: CGEventType(rawValue: UInt32.max)!),
+                                       blockers: blockers.count, presenting: presenting, skipped: saved.skippedVersion == manifest.version,
+                                       blocked: saved.blockedBuilds.contains(Build(manifest).identity), idleThreshold: site.idleThreshold)
+    }
+
     private func tryRestart(force: Bool = false) {
-        guard let site, let restart, !writingPending, force || Date() >= restartRetryAfter else { return }
-        if !force, let blocker = restartBlocker(userStarted: restart.userStarted) {
-            state = .pendingRestart(blocker.rawValue)
-            return
-        }
-        prepareRestart(site: site, initial: false, force: force)
-    }
-
-    private func restartBlocker(userStarted: Bool) -> UpdatePolicy.Blocker? {
-        BundleUpdateMonitor.blockers(sessionActive: sessionActive).first {
-            $0 != .updater && !(userStarted && $0 == .settings)
-        }
-    }
-
-    private func prepareRestart(site: Site, initial: Bool, force: Bool = false) {
-        guard let restart, !writingPending else { return }
-        writingPending = true
+        guard let site, let restart, let installer, !checkingRestart, force || Date() >= restartRetryAfter else { return }
+        checkingRestart = true
         work.async {
-            let pending = PendingUpdate(from: site.running.identity, to: Build(restart.manifest).identity,
-                                        previous: restart.previous.path,
-                                        deadline: ISO8601DateFormatter().string(from: Date().addingTimeInterval(site.launchTimeout)))
-            var ready = false
+            let ready: Bool
             do {
-                guard pending.stage(for: site.target) != nil, FileManager.default.isExecutableFile(atPath: pending.helper.path) else {
-                    throw CocoaError(.fileNoSuchFile)
-                }
-                if initial {
-                    let marker = AppPaths.supportDirectory.appendingPathComponent("update-up-\(pending.to)")
-                    try? FileManager.default.removeItem(at: marker)
-                }
-                try pending.write()
+                try installer.confirmWatch(previous: restart.previous)
                 ready = true
-            } catch { log("update: could not prepare rollback helper: \(error)") }
-            let prepared = ready
+            } catch {
+                log("update: restart handoff failed: \(error)")
+                ready = false
+            }
+            let presenting = !force && !restart.userStarted && Self.isPresenting()
             DispatchQueue.main.async {
-                self.writingPending = false
+                self.checkingRestart = false
                 guard self.store != nil else { return }
-                if !prepared {
+                guard ready, installer.watcher?.isRunning == true else {
                     self.state = .restartFailed
-                    self.restartRetryAfter = Date().addingTimeInterval(60)
-                } else if initial {
-                    self.tryRestart()
-                } else if !force, let blocker = self.restartBlocker(userStarted: restart.userStarted) {
-                    self.state = .pendingRestart(blocker.rawValue)
-                } else {
-                    Relaunch.open(site.target, inBackground: true, update: pending)
-                    // AppKit can refuse termination while a dialog is open.
-                    self.restartRetryAfter = Date().addingTimeInterval(5)
+                    self.restartRetryAfter = Date().addingTimeInterval(15)
+                    return
                 }
+                let decision = UpdatePolicy.restart(force: force, userStarted: restart.userStarted,
+                    blockers: BundleUpdateMonitor.blockers(sessionActive: self.sessionActive),
+                    autoAllowed: self.autoAllowed(restart.manifest, site: site, presenting: presenting))
+                if case .deferred(let reason) = decision { self.state = .pendingRestart(reason.rawValue); return }
+                self.restartRetryAfter = Date().addingTimeInterval(5)
+                NSApp.terminate(nil)
             }
         }
     }
 
-    private func recoverLaunch(site: Site, blocked: Set<String>, launched: Date) {
-        guard let pending = PendingUpdate.read() else { return }
-        let deadline = ISO8601DateFormatter().date(from: pending.deadline) ?? .distantPast
-        guard pending.to == site.running.identity else {
-            let delay = blocked.contains(pending.to) ? 0 : max(0, deadline.timeIntervalSinceNow)
-            work.asyncAfter(deadline: .now() + delay) {
-                guard PendingUpdate.read() == pending else { return }
-                try? FileManager.default.removeItem(at: PendingUpdate.url)
+    private func recoverLaunch(site: Site, launched: Date) {
+        let support = AppPaths.supportDirectory
+        guard let pending = try? UpdateJournal.read(in: support) else {
+            if FileManager.default.fileExists(atPath: support.appendingPathComponent("update-rollback").path) {
+                recover(nil, site: site)
             }
             return
         }
-        let delay = max(0, 20 - Date().timeIntervalSince(launched))
-        work.asyncAfter(deadline: .now() + delay) {
-            guard site.running.parsed != nil, PendingUpdate.read() == pending, pending.stage(for: site.target) != nil else { return }
-            let marker = AppPaths.supportDirectory.appendingPathComponent("update-up-\(site.running.identity)")
-            do { try Data().write(to: marker, options: .atomic) }
-            catch { log("update: could not write launch marker: \(error)"); return }
-            self.recoverStage(pending, target: site.target, marker: marker)
+        if pending.to == site.running.identity {
+            pending.scheduleHealth(in: support, target: site.target, delay: max(0, 20 - Date().timeIntervalSince(launched))) {
+                self.work.async { self.recover(pending, site: site) }
+            }
+        } else {
+            recover(pending, site: site)
         }
     }
 
-    private func recoverStage(_ pending: PendingUpdate, target: URL, marker: URL) {
-        guard PendingUpdate.read() == pending else { return }
-        let lockPath = target.deletingLastPathComponent().appendingPathComponent(".cala-update.lock").path
-        let fd = open(lockPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    private func recover(_ pending: UpdateJournal?, site: Site) {
+        let support = AppPaths.supportDirectory
+        guard (try? UpdateJournal.read(in: support)) == pending else { return }
+        let path = site.target.deletingLastPathComponent().appendingPathComponent(".cala-update.lock")
+        let fd = open(path.path, O_CREAT | O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0o664)
         guard fd >= 0 else { return }
         defer { close(fd) }
-        // The watcher releases this lock after consuming the marker. If it exited early, Cala owns cleanup.
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
-            work.asyncAfter(deadline: .now() + 5) { self.recoverStage(pending, target: target, marker: marker) }
+            work.asyncAfter(deadline: .now() + 2) { self.recover(pending, site: site) }
             return
         }
-        guard PendingUpdate.read() == pending, let stage = pending.stage(for: target) else { return }
         do {
-            try FileManager.default.removeItem(at: stage)
-            try FileManager.default.removeItem(at: PendingUpdate.url)
-            try? FileManager.default.removeItem(at: marker)
-            let rollback = AppPaths.supportDirectory.appendingPathComponent("update-rollback")
-            try? FileManager.default.removeItem(at: rollback)
-        } catch { log("update: could not recover stage: \(error)") }
+            guard try UpdateJournal.read(in: support) == pending else { return }
+            guard let pending else {
+                try UpdateJournal.reconcileRestored(in: support, target: site.target)
+                return
+            }
+            if try UpdateJournal.identity(at: site.target) == pending.from {
+                try UpdateJournal.reconcileRestored(in: support, target: site.target)
+                DispatchQueue.main.async {
+                    guard self.site != nil else { return } // start() imports the list before setting site.
+                    self.saved.blockedBuilds.insert(pending.to)
+                    if self.offer.map(Build.init)?.identity == pending.to { self.offer = nil; self.available = nil }
+                    self.setResult(.rolledBack(Self.marketingVersion(pending.to), site.running.version))
+                }
+            } else if pending.to == site.running.identity,
+                      FileManager.default.fileExists(atPath: support.appendingPathComponent(pending.marker).path),
+                      !Self.readBlocked().contains(pending.to) {
+                try pending.cleanStage(for: site.target)
+                try UpdateJournal.remove("update-rollback", in: support)
+                try UpdateJournal.remove("update-pending.json", in: support)
+                try UpdateJournal.remove(pending.marker, in: support)
+            }
+        } catch {
+            log("update: recovery failed: \(error)")
+            work.asyncAfter(deadline: .now() + 60) { self.recover(pending, site: site) }
+        }
     }
 
     private func setResult(_ value: UpdateState) {
@@ -781,7 +750,7 @@ private final class UpdateTransfer: NSObject, URLSessionDataDelegate, URLSession
     private var feedDone: ((Result<Data, FeedError>) -> Void)?
     private var downloadDone: ((Result<Void, DownloadError>) -> Void)?
     private var progress: ((Int) -> Void)?
-    private var destination: URL?
+    private var destination: DownloadFile?
     private var downloadSize: Int64 = 0
     private var bytes = Data()
     private var feedError: FeedFailure?
@@ -828,7 +797,7 @@ private final class UpdateTransfer: NSObject, URLSessionDataDelegate, URLSession
         return task
     }
 
-    func download(_ url: URL, to destination: URL, size: Int64, resume: Data?, progress: @escaping (Int) -> Void,
+    func download(_ url: URL, to destination: DownloadFile, size: Int64, resume: Data?, progress: @escaping (Int) -> Void,
                   done: @escaping (Result<Void, DownloadError>) -> Void) -> URLSessionTask {
         self.destination = destination
         downloadSize = size
@@ -895,8 +864,7 @@ private final class UpdateTransfer: NSObject, URLSessionDataDelegate, URLSession
             return
         }
         do {
-            if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
-            try FileManager.default.moveItem(at: location, to: destination)
+            try destination.receive(location, size: downloadSize)
             downloaded = true
         } catch { downloadError = error }
     }

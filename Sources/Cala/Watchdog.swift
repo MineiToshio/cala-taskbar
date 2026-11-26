@@ -26,7 +26,13 @@ enum Watchdog {
     MARK="$DIR/clean-exit-$PID"
     if [ -e "$MARK" ]; then rm -f "$MARK"; exit 0; fi
     [ -e "$DIR/no-relaunch" ] && exit 0
-    [ -e "$DIR/update-rollback" ] && exit 0
+    if [ -e "$DIR/update-rollback" ]; then
+        HELPER=$(cat "$DIR/update-rollback" 2>/dev/null)
+        case "$HELPER" in
+            ''|*[!0-9]*) exit 0 ;; # legacy watcher
+            *) kill -0 "$HELPER" 2>/dev/null && exit 0 ;;
+        esac
+    fi
     NOW=$(date +%s); STATE="$DIR/relaunch-times"
     RECENT=$(awk -v now="$NOW" 'now - $1 < 120' "$STATE" 2>/dev/null | wc -l | tr -d ' ')
     [ "$RECENT" -ge 3 ] && exit 0

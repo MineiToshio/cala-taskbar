@@ -43,8 +43,9 @@ func makeApp(_ location: String, version: String, build: Int) throws -> URL {
     for dir in ["Contents/Helpers", "Contents/MacOS", "Contents/Resources"] { try mkdir(app.appendingPathComponent(dir)) }
     try fm.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: app.appendingPathComponent(executable))
     try fm.copyItem(at: URL(fileURLWithPath: "packaging/Helpers/cala-keychain"), to: app.appendingPathComponent(helperPath))
+    try fm.copyItem(atPath: CommandLine.arguments[2], toPath: app.appendingPathComponent("Contents/Helpers/cala-update").path)
     try Data(version.utf8).write(to: app.appendingPathComponent(resource))
-    let plist = ["CFBundlePackageType":"APPL", "CFBundleExecutable":"Cala", "CFBundleIdentifier":"local.cala",
+    let plist: [String: Any] = ["CalaUpdateTest": true, "CalaUpdateTestUpTimeout": 0.25, "CFBundlePackageType":"APPL", "CFBundleExecutable":"Cala", "CFBundleIdentifier":"local.cala",
                  "CFBundleVersion":String(build), "CFBundleShortVersionString":version, "LSMinimumSystemVersion":"14.0"]
     try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: app.appendingPathComponent(plistPath))
     try sign(app, id: "local.cala", requirement: requirement)
@@ -78,6 +79,9 @@ final class Fixture {
     let dir: URL, target: URL, image: URL
     var tools = InstallerTools.system
     var manifest = base
+    var installer: UpdateInstaller?
+    var child: Process?
+    deinit { if let child, child.isRunning { child.terminate() } }
     var fault = InstallerFaults.none
 
     init() throws {
@@ -91,7 +95,22 @@ final class Fixture {
         try fm.copyItem(at: old, to: target)
         try imageBytes.write(to: image)
         tools.capacity = { _ in Int64.max }
-        tools.blocked = { [] }
+        let support = dir.appendingPathComponent("support")
+        try mkdir(support)
+        tools.supportDirectory = { support }
+        tools.blocked = {
+            let url = support.appendingPathComponent("update-blocked.json")
+            if !fm.fileExists(atPath: url.path) { return [] }
+            return try JSONDecoder().decode(Set<String>.self, from: Data(contentsOf: url))
+        }
+        tools.arm = { [weak self] file, _, _, _ in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            process.arguments = ["30"]
+            try process.run()
+            self?.child = process
+            return process
+        }
         tools.attach = { verified, mount in
             check(!Thread.isMainThread && (try? Data(contentsOf: verified)) == imageBytes, "background, pinned verified image")
             check(mode(mount.deletingLastPathComponent()) == 0o700, "private stage")
@@ -105,6 +124,7 @@ final class Fixture {
 
     func run(download: Bool = false, localFile: URL? = nil) -> InstallResult {
         let installer = UpdateInstaller(target: target, tools: tools, faults: fault)
+        self.installer = installer
         var result: InstallResult?
         installer.install(manifest: manifest, dmg: download ? manifest.dmg.url : (localFile ?? image)) {
             check(Thread.isMainThread, "completion on main")
@@ -118,11 +138,11 @@ final class Fixture {
 
     func cleanFailure(_ name: String, unchanged: Bool = true, _ matches: (InstallResult) -> Bool) throws {
         let before = try inode(target)
-        let existing = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix(".cala-update.") }
+        let existing = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix(".cala-update.") && $0 != ".cala-update.lock" }
         let result = run()
         check(matches(result), "\(name) result \(result)")
         if unchanged { check(try inode(target) == before && snapshot(target) == oldBytes, "\(name) unchanged bytes and inode") }
-        let remaining = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix(".cala-update.") }
+        let remaining = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix(".cala-update.") && $0 != ".cala-update.lock" }
         check(Set(remaining) == Set(existing), "\(name) cleanup")
     }
 }
@@ -186,7 +206,7 @@ func suite() throws {
         check(!files.contains { $0.hasSuffix(".dmg") }, "download cache cleanup")
     }
 
-    for scenario in ["swap", "after-swap", "cleanup failure", "detach retry", "image path replaced"] {
+    for scenario in ["swap", "cleanup failure", "detach retry", "image path replaced"] {
         let f = try Fixture()
         var forced = false
         if scenario == "swap" {
@@ -200,7 +220,6 @@ func suite() throws {
                 else { throw POSIXError(.EIO) }
             }
         }
-        if scenario == "after-swap" { f.fault = .afterSwap }
         if scenario == "cleanup failure" { f.tools.cleanup = { _ in throw POSIXError(.EIO) } }
         if scenario == "detach retry" {
             let detach = f.tools.detach
@@ -223,8 +242,21 @@ func suite() throws {
         check(try snapshot(f.target) == newBytes && snapshot(previous) == oldBytes &&
               inode(previous) == before && inode(f.target) != before, "\(scenario) complete atomic exchange")
         check(previous.path.hasSuffix("/previous/Cala.app"), "rollback path")
-        check(mode(f.target) & 0o772 == 0o770 && mode(f.target.appendingPathComponent(resource)) & 0o662 == 0o660, "normalized permissions")
+        if scenario == "swap" {
+            try f.installer!.confirmWatch(previous: previous)
+            let copy = previous.deletingLastPathComponent().appendingPathComponent("displaced")
+            try fm.moveItem(at: previous, to: copy)
+            try fm.copyItem(at: old, to: previous)
+            do { try f.installer!.confirmWatch(previous: previous); check(false, "changed backup prevents quit") }
+            catch { check(true, "changed backup prevents quit") }
+        }
         let file = f.target.appendingPathComponent(resource)
+        let admin = getgrnam("admin")?.pointee.gr_gid
+        for (url, expected) in [(f.target, mode_t(0o750)), (file, mode_t(0o640))] {
+            var status = stat()
+            check(lstat(url.path, &status) == 0 && (mode(url) & 0o772) == (expected | (admin == status.st_gid ? 0o020 : 0)),
+                  "normalized permissions follow effective group")
+        }
         check(getxattr(file.path, "com.apple.quarantine", nil, 0, 0, 0) < 0 && errno == ENOATTR, "quarantine removed")
         check(mode(file) & 0o111 == 0 && mode(f.target.appendingPathComponent(executable)) & 0o110 == 0o110, "executable bits")
         check(try InstallerTools.system.identity(f.target).identifier == "local.cala", "post-normalization signature")
@@ -239,6 +271,78 @@ func suite() throws {
         }
         if scenario == "image path replaced" { check(try Data(contentsOf: f.image) == Data("changed cache entry".utf8), "preserve replacement") }
     }
+
+    check(UpdateInstaller.normalizedMode(0o777, executable: true, group: 20, admin: 80) == 0o755 &&
+          UpdateInstaller.normalizedMode(0o666, executable: false, group: 80, admin: 80) == 0o664, "effective admin group")
+    let noHelper = try Fixture()
+    noHelper.tools.arm = { _, _, _, _ in
+        let process = Process()
+        process.executableURL = noHelper.dir.appendingPathComponent("missing-helper")
+        try process.run()
+        return process
+    }
+    try noHelper.cleanFailure("helper run failure", failed)
+    check(try UpdateJournal.read(in: noHelper.tools.supportDirectory()) == nil, "unarmed journal cancelled")
+
+    let deferred = try Fixture()
+    deferred.tools.beforeSwap = {
+        check(try UpdateJournal.read(in: deferred.tools.supportDirectory())?.from == "1.0.0+99999",
+              "pending identifies locked disk bundle")
+        throw InstallResult.deferred
+    }
+    try deferred.cleanFailure("auto gate changed before swap") { $0 == .deferred }
+
+    let cache = try Fixture()
+    let baseDir = cache.tools.cacheDirectory
+    let file = try DownloadFile(base: baseDir, manifest: base, saved: nil)
+    let releaseDir = file.savedURL.deletingLastPathComponent()
+    let movedCache = baseDir.appendingPathComponent("moved")
+    try fm.moveItem(at: releaseDir, to: movedCache)
+    try fm.createSymbolicLink(at: releaseDir, withDestinationURL: cache.dir)
+    let outside = cache.dir.appendingPathComponent(file.savedURL.lastPathComponent)
+    try mkdir(outside)
+    try file.receive(movedCache.appendingPathComponent("download.dmg"), size: base.dmg.size)
+    file.discard()
+    check(fm.fileExists(atPath: outside.path) && !fm.fileExists(atPath: file.pinnedURL.path), "pinned download and unlink")
+    do { _ = try DownloadFile(base: baseDir, manifest: base, saved: nil); check(false, "symlink cache rejected") }
+    catch { check(true, "symlink cache rejected") }
+
+    let live = try Fixture()
+    let support = live.tools.supportDirectory()
+    let backup = live.dir.appendingPathComponent(".cala-update.fixture/previous/Cala.app")
+    let journal = UpdateJournal(from: "0.9.0+5", to: "1.0.0+99999", previous: backup.path, transaction: UUID())
+    try journal.write(in: support)
+    journal.scheduleHealth(in: support, target: live.target, delay: 0.01) {}
+    Thread.sleep(forTimeInterval: 0.1)
+    let receipt = support.appendingPathComponent(journal.marker)
+    check(!fm.fileExists(atPath: receipt.path), "frozen main loop cannot acknowledge")
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    check(fm.fileExists(atPath: receipt.path), "live main loop acknowledges transaction")
+    try fm.removeItem(at: receipt)
+    journal.scheduleHealth(in: support, target: live.target, delay: 0.01) {}
+    let other = UpdateJournal(from: journal.from, to: journal.to, previous: journal.previous, transaction: UUID())
+    try other.write(in: support)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    check(!fm.fileExists(atPath: receipt.path), "stale transaction cannot acknowledge")
+
+    let diskFull = try Fixture()
+    let diskSupport = diskFull.tools.supportDirectory()
+    let restored = UpdateJournal(from: "1.0.0+99999", to: "1.1.0+2",
+                                 previous: diskFull.dir.appendingPathComponent(".cala-update.restored/previous/Cala.app").path,
+                                 transaction: UUID())
+    try restored.write(in: diskSupport)
+    try Data().write(to: diskSupport.appendingPathComponent("update-rollback"))
+    check(verification(diskFull.run()), "reconcile unrecorded failed build before reinstall")
+    check(try UpdateJournal.read(in: diskSupport) == nil && !fm.fileExists(atPath: diskSupport.appendingPathComponent("update-rollback").path),
+          "restored pending and rollback markers removed together")
+
+    try Data().write(to: diskSupport.appendingPathComponent("update-rollback"))
+    // The old build could clear only pending at startup. A later install cleans the orphan under flock.
+    diskFull.manifest.version = "1.2.0"
+    _ = diskFull.run()
+    check(!fm.fileExists(atPath: diskSupport.appendingPathComponent("update-rollback").path), "orphan rollback sentinel")
+
+    try crashCase()
 
     let before = try Fixture()
     before.fault = .beforeSwap
@@ -397,6 +501,47 @@ func suite() throws {
             if case .installed = result { check(true, "team install") } else { check(false, "\(variant): \(result)") }
         } else { try f.cleanFailure(variant, verification) }
     }
+}
+func crashCase() throws {
+    let childRoot = root.appendingPathComponent("crash")
+    let fakeOpen = root.appendingPathComponent("fake-open")
+    try Data("#!/bin/sh\necho launch >> \"$CALA_LAUNCH_LOG\"\nsleep 0.4\n".utf8).write(to: fakeOpen)
+    guard chmod(fakeOpen.path, 0o700) == 0 else { throw POSIXError(.EIO) }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    p.arguments = [childRoot.path, CommandLine.arguments[2], "crash"]
+    p.environment = ProcessInfo.processInfo.environment.merging(
+        ["CALA_UPDATE_TEST_OPEN": fakeOpen.path, "CALA_LAUNCH_LOG": root.appendingPathComponent("launches").path]) { _, new in new }
+    try p.run()
+    p.waitUntilExit()
+    check(p.terminationStatus == 86, "after-swap exits before completion")
+    let dir = URL(fileURLWithPath: try String(contentsOf: childRoot.appendingPathComponent("transaction"), encoding: .utf8))
+    let support = dir.appendingPathComponent("support")
+    let contender = open(dir.appendingPathComponent(".cala-update.lock").path, O_RDONLY)
+    defer { close(contender) }
+    check(contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) != 0, "helper retains flock after installer exit")
+    let deadline = Date().addingTimeInterval(12)
+    while Date() < deadline, try UpdateJournal.read(in: support) != nil { Thread.sleep(forTimeInterval: 0.05) }
+    check(try UpdateJournal.identity(at: dir.appendingPathComponent("Cala.app")) == "1.0.0+99999", "armed helper restores after installer crash")
+    check(try String(contentsOf: support.appendingPathComponent("update-blocked.json"), encoding: .utf8).contains("1.1.0+2"),
+          "after-swap failed build blocked")
+    check(try String(contentsOf: root.appendingPathComponent("launches"), encoding: .utf8) == "launch\nlaunch\n", "after-swap relaunches restored bundle")
+}
+
+if CommandLine.arguments.last == "crash" {
+    let f = try Fixture()
+    try f.dir.path.write(to: root.appendingPathComponent("transaction"), atomically: true, encoding: .utf8)
+    f.tools.arm = { helper, lock, support, target in
+        check(helper.path.contains("/installed/Cala.app/") && !helper.path.hasPrefix(f.dir.path), "verified private helper")
+        let p = try UpdateWatch.start(helper: helper, lock: lock, support: support, target: target)
+        let contender = open(f.dir.appendingPathComponent(".cala-update.lock").path, O_RDONLY)
+        defer { close(contender) }
+        check(contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) != 0, "continuous watcher lock")
+        return p
+    }
+    f.fault = .afterSwap
+    print("Unexpected crash installer result", f.run())
+    exit(1)
 }
 do { try suite(); print("PASS \(passed) installer checks") }
 catch { print("FAIL installer fixture: \(error)"); exit(1) }
