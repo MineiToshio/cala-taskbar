@@ -17,7 +17,6 @@ PLIST="$HOME/Library/LaunchAgents/local.cala.plist"
 OLD_PLIST="$HOME/Library/LaunchAgents/local.mactaskbar.plist"
 PB=/usr/libexec/PlistBuddy
 uid=$(id -u)
-owner=$(id -un)
 
 # Local rebuilds can come from the same commit. Advance past the installed build by default.
 if [[ -z "${CALA_BUILD_NUMBER:-}" ]]; then
@@ -32,21 +31,38 @@ fi
 ./build.sh
 
 # Validate the staged copy before publishing it. Both names are on the same volume, so
-# renamex_np can atomically exchange two populated directories (or install a new name exclusively).
+# renameatx_np can atomically exchange two populated directories (or install a new name exclusively).
 publish() {
-  /usr/bin/sudo /bin/zsh -f -s -- "$SRC" "$DEST" "$owner" <<'PUBLISH'
+  /usr/bin/sudo /bin/zsh -f -s -- "$SRC" "$DEST" <<'PUBLISH'
 set -euo pipefail
 src=$1
 dest=$2
-owner=$3
+owner=${SUDO_USER:?Missing invoking user}
 dir=${dest:h}
-stage=$(/usr/bin/mktemp -d "$dir/.cala-install.XXXXXXXX")
+parent=/private/var/root
+for path in /private /private/var "$parent"; do
+  if [[ ! -d "$path" || -L "$path" || ! -O "$path" ]] ||
+     (( 8#$(/usr/bin/stat -f %Lp "$path") & 022 )); then
+    print -u2 "Unsafe staging parent: $path. / Directorio temporal inseguro: $path."
+    exit 1
+  fi
+done
+if [[ "$(/usr/bin/stat -f %d "$parent")" != "$(/usr/bin/stat -f %d "$dir")" ]]; then
+  print -u2 "Staging and $dir must share a volume. / El directorio temporal y $dir deben estar en el mismo volumen."
+  exit 1
+fi
+stage=$(/usr/bin/mktemp -d "$parent/.cala-install.XXXXXXXX")
 trap '/bin/rm -rf "$stage"' EXIT
 staged="$stage/Cala.app"
-/usr/bin/ditto "$src" "$staged"
-/usr/sbin/chown -Rh "$owner:admin" "$staged"
+/usr/bin/ditto --noacl "$src" "$staged"
+unusual=$(/usr/bin/find "$staged" ! \( -type d -o \( -type f -links 1 \) \) -print)
+if [[ ! -d "$staged" || -n "$unusual" ]]; then
+  print -u2 "Unexpected entries in the staged bundle. / Entradas inesperadas en el paquete temporal."
+  exit 1
+fi
 /bin/chmod -RN "$staged"
-/bin/chmod -R u+rwX,g+rwX,o-w "$staged"
+/usr/sbin/chown -Rh "$owner:admin" "$staged"
+/bin/chmod -R u-s,g-s,u+rwX,g+rwX,o-w "$staged"
 /usr/bin/codesign --verify --deep --strict "$staged"
 
 if [[ -e "$dest" || -L "$dest" ]]; then
@@ -61,15 +77,19 @@ if [[ -e "$dest" || -L "$dest" ]]; then
 else
   flags=4 # RENAME_EXCL
 fi
-/usr/bin/ruby --disable-gems -rfiddle/import - "$staged" "$dest" "$flags" <<'RUBY'
+/usr/bin/ruby --disable-gems -rfiddle/import - "$stage" "$dir" "$flags" <<'RUBY'
 module Darwin
   extend Fiddle::Importer
   dlload Fiddle::Handle::DEFAULT
-  extern 'int renamex_np(const char *, const char *, unsigned int)'
+  extern 'int renameatx_np(int, const char *, int, const char *, unsigned int)'
 end
 
-if Darwin.renamex_np(ARGV[0], ARGV[1], Integer(ARGV[2])) != 0
-  abort SystemCallError.new('renamex_np', Fiddle.last_error).message
+stage, destination = ARGV.take(2).map { |path| File.open(path, File::RDONLY | File::NOFOLLOW) }
+unless stage.stat.directory? && destination.stat.directory? && stage.stat.dev == destination.stat.dev
+  abort 'Staging and destination must be directories on the same volume.'
+end
+if Darwin.renameatx_np(stage.fileno, 'Cala.app', destination.fileno, 'Cala.app', Integer(ARGV[2])) != 0
+  abort SystemCallError.new('renameatx_np', Fiddle.last_error).message
 end
 RUBY
 PUBLISH
