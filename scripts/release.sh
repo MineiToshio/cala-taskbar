@@ -12,26 +12,34 @@ for var in ${(k)parameters}; do
 done
 [[ -z "${CALA_QA_REGULAR:-}" ]] || { echo "CALA_QA_REGULAR is for testing builds only" >&2; exit 1; }
 
-BUILD_DIR=${CALA_BUILD_DIR:-build}
-BUILD_DIR=${BUILD_DIR:a}
-# With tracked changes, take the version, keys, notes and code from HEAD together.
-if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-  echo "› uncommitted changes here: building $(git rev-parse --short HEAD) in a clean checkout"
-  work=$(mktemp -d "${TMPDIR:-/tmp}/cala-release.XXXXXXXX")
-  clean="$work/cala"
-  trap 'git worktree remove --force "$clean" 2>/dev/null || true; rmdir "$work"' EXIT
-  git worktree add --detach --quiet "$clean" HEAD
-  CALA_BUILD_DIR="$clean/build" CALA_BUILD_NUMBER=${CALA_BUILD_NUMBER:-$(git rev-list --count HEAD)} "$clean/scripts/release.sh"
-  version=$(tr -d '[:space:]' < "$clean/VERSION")
-  mkdir -p "$BUILD_DIR"
-  rm -rf "$BUILD_DIR/Cala.app"
-  ditto "$clean/build/Cala.app" "$BUILD_DIR/Cala.app"
-  cp "$clean/build/Cala-$version.dmg" "$clean/build/Cala-$version.dmg.sha256" "$clean/build/latest.json" "$BUILD_DIR/"
-  echo "Release lista en $BUILD_DIR (desde el commit $(git rev-parse --short HEAD))"
-  exit 0
+if (( $# > 1 )); then
+  echo "Usage: $0 [commit]" >&2
+  exit 1
 fi
+commit=$(git rev-parse --verify --end-of-options "${1:-HEAD}^{commit}")
+output=${CALA_BUILD_DIR:-build}
+output=${output:a}
+work=$(mktemp -d "${TMPDIR:-/tmp}/cala-release.XXXXXXXX")
+mount="$work/mnt"
+mounted=0
+cleanup() {
+  if (( mounted )); then
+    hdiutil detach -quiet "$mount" || hdiutil detach -quiet -force "$mount" || return
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
 
-export CALA_VERSION=$(tr -d '[:space:]' < VERSION)
+# Never build in the caller's tree, which may contain untracked or ignored source files.
+echo "› building $commit in a clean checkout"
+git clone --quiet --shared --no-checkout "$PWD" "$work/cala"
+cd "$work/cala"
+git checkout --quiet --detach "$commit"
+export CALA_BUILD_DIR="$work/build"
+BUILD_DIR="$CALA_BUILD_DIR"
+
+CALA_VERSION=$(tr -d '[:space:]' < VERSION)
+export CALA_VERSION
 python3 - "$CALA_VERSION" <<'PY'
 import re
 import subprocess
@@ -79,16 +87,6 @@ if [[ "$CALA_SIGN_IDENTITY" != "-" ]]; then
   codesign -d --entitlements - "$APP" 2>/dev/null | grep -q automation.apple-events || { echo "entitlements missing" >&2; exit 1; }
 fi
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/cala-release.XXXXXXXX")
-mount="$work/mnt"
-mounted=0
-cleanup() {
-  if (( mounted )); then
-    hdiutil detach -quiet "$mount" || hdiutil detach -quiet -force "$mount" || return
-  fi
-  rm -rf "$work"
-}
-trap cleanup EXIT
 if [[ -z "${CALA_SKIP_NOTARIZE:-}" ]]; then
   # Staple the app before making the disk image so the copied app can open offline.
   zip="$work/Cala-notarize.zip"
@@ -104,7 +102,7 @@ if [[ -z "${CALA_SKIP_NOTARIZE:-}" ]]; then
   spctl -a -t open --context context:primary-signature -vv "$DMG"
   spctl -a -t exec -vv "$APP"
 fi
-shasum -a 256 "$DMG" > "$work/Cala.dmg.sha256"
+(cd "$BUILD_DIR" && shasum -a 256 "${DMG:t}") > "$DMG.sha256"
 
 python3 - "$APP" "$DMG" "$notes_dir" "$work/manifest.json" <<'PY'
 from datetime import datetime, timezone
@@ -145,42 +143,18 @@ manifest = {
 }
 output.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
 PY
-swift scripts/update-sign.swift sign --key "$key" --manifest "$work/manifest.json" --out "$work/latest.json"
-swift scripts/update-sign.swift verify --keys "$keys" --feed "$work/latest.json" --dmg "$DMG"
-
+signer=(swift -module-cache-path "$work/modules" scripts/update-sign.swift)
+"${signer[@]}" sign --key "$key" --manifest "$work/manifest.json" --out "$work/latest.json"
+"${signer[@]}" verify --keys "$keys" --feed "$work/latest.json" --dmg "$DMG"
 mkdir "$mount"
 hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mount" "$DMG"
 mounted=1
-python3 - "$mount/Cala.app" "$keys" "$work/latest.json" <<'PY'
-import base64
-from hashlib import sha256
-import json
-from pathlib import Path
-import plistlib
-import sys
-
-app, keys, feed = map(Path, sys.argv[1:])
-with (app / "Contents/Info.plist").open("rb") as source:
-    info = plistlib.load(source)
-manifest = json.loads(base64.b64decode(json.loads(feed.read_bytes())["manifest"]))
-expected = {
-    "CalaUpdatePublicKeys": keys.read_text(encoding="utf-8").split(),
-    "CalaUpdateFeedURL": "https://github.com/MineiToshio/cala-taskbar/releases/latest/download/latest.json",
-    "CFBundleIdentifier": manifest["bundleId"],
-    "CFBundleShortVersionString": manifest["version"],
-    "CFBundleVersion": str(manifest["build"]),
-    "LSMinimumSystemVersion": manifest["minimumSystemVersion"],
-}
-for key, value in expected.items():
-    if info.get(key) != value:
-        sys.exit(f"Unexpected {key} in the release DMG")
-if any(key.startswith("CalaUpdateTest") for key in info):
-    sys.exit("Release DMG contains test settings")
-if sha256((app / "Contents/Helpers/cala-keychain").read_bytes()).hexdigest() != manifest["app"]["keychainHelperSHA256"]:
-    sys.exit("Keychain helper SHA-256 differs from the manifest")
-PY
+"${signer[@]}" verify-release --keys "$keys" --feed "$work/latest.json" \
+  --dmg "$DMG" --app "$mount/Cala.app" --tag "v$CALA_VERSION"
 hdiutil detach -quiet "$mount"
 mounted=0
-mv -f "$work/Cala.dmg.sha256" "$DMG.sha256"
-mv -f "$work/latest.json" "$BUILD_DIR/latest.json"
-echo "Release lista: $DMG, $DMG.sha256 y $BUILD_DIR/latest.json"
+mkdir -p "$output"
+rm -rf "$output/Cala.app"
+ditto "$APP" "$output/Cala.app"
+cp "$DMG" "$DMG.sha256" "$work/latest.json" "$output/"
+echo "Release lista en $output (commit $commit, tag v$CALA_VERSION)"

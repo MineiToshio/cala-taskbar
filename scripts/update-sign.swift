@@ -77,6 +77,18 @@ private struct ManifestAsset: Decodable {
     let dmg: DMG
 }
 
+private struct ReleaseManifest: Decodable {
+    struct DMG: Decodable { let url: String }
+    struct App: Decodable { let keychainHelperSHA256: String }
+    let schema: Int
+    let bundleId: String
+    let version: String
+    let build: Int
+    let minimumSystemVersion: String
+    let dmg: DMG
+    let app: App
+}
+
 private func randomBytes(_ count: Int) throws -> Data {
     var bytes = [UInt8](repeating: 0, count: count)
     guard SecRandomCopyBytes(kSecRandomDefault, count, &bytes) == errSecSuccess else {
@@ -183,6 +195,7 @@ private func verify(_ feed: Data, publicKeys: [Data]) throws -> Data {
 
 private func verifyAsset(_ url: URL, manifest: Data) throws {
     let asset = try JSONDecoder().decode(ManifestAsset.self, from: manifest).dmg
+    guard (1...200_000_000).contains(asset.size) else { throw Failure("DMG exceeds the update size limits") }
     let file = try FileHandle(forReadingFrom: url)
     defer { try? file.close() }
     var hash = SHA256()
@@ -196,6 +209,70 @@ private func verifyAsset(_ url: URL, manifest: Data) throws {
     guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == asset.sha256.lowercased() else {
         throw Failure("DMG SHA-256 differs from the manifest")
     }
+}
+
+private func verifiedManifest(keys: URL, feed: URL, dmg: URL?) throws -> (Data, [Data]) {
+    let keys = try String(contentsOf: keys, encoding: .utf8).split(whereSeparator: \.isWhitespace)
+    guard (1...2).contains(keys.count) else { throw Failure("Expected one or two update public keys") }
+    let publicKeys = try keys.map { text in
+        guard let raw = Data(base64Encoded: String(text)), raw.count == 32 else { throw Failure("Invalid update public key") }
+        return raw
+    }
+    let manifest = try verify(Data(contentsOf: feed), publicKeys: publicKeys)
+    if let dmg { try verifyAsset(dmg, manifest: manifest) }
+    return (manifest, publicKeys)
+}
+
+private func verifyRelease(keys: URL, feed: URL, dmg: URL, app: URL, tag: String) throws {
+    let (manifestBytes, publicKeys) = try verifiedManifest(keys: keys, feed: feed, dmg: dmg)
+    let manifest = try JSONDecoder().decode(ReleaseManifest.self, from: manifestBytes)
+    guard manifest.schema == 1, manifest.build > 0,
+          manifest.version.range(of: #"^[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil,
+          tag == "v\(manifest.version)" else {
+        throw Failure("Manifest version or build is invalid for release tag \(tag)")
+    }
+    let releases = "https://github.com/MineiToshio/cala-taskbar/releases"
+    let name = "Cala-\(manifest.version).dmg"
+    guard dmg.lastPathComponent == name, manifest.dmg.url == "\(releases)/download/\(tag)/\(name)" else {
+        throw Failure("Manifest DMG URL or filename differs from the release asset")
+    }
+    let contents = app.appendingPathComponent("Contents")
+    let helpers = contents.appendingPathComponent("Helpers")
+    let plistURL = contents.appendingPathComponent("Info.plist")
+    let helperURL = helpers.appendingPathComponent("cala-keychain")
+    let fm = FileManager.default
+    for url in [app, contents, helpers, plistURL, helperURL] {
+        let expected: FileAttributeType = [plistURL, helperURL].contains(url) ? .typeRegular : .typeDirectory
+        guard (try fm.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType) == expected else {
+            throw Failure("Unexpected file type in release DMG: \(url.lastPathComponent)")
+        }
+    }
+    let plist = try Data(contentsOf: plistURL)
+    guard let info = try PropertyListSerialization.propertyList(from: plist, format: nil) as? [String: Any] else {
+        throw Failure("Invalid Info.plist in the DMG")
+    }
+    guard !info.keys.contains(where: { $0.hasPrefix("CalaUpdateTest") || $0 == "CalaQARegular" }) else {
+        throw Failure("Release DMG contains test settings")
+    }
+    let expected = [
+        "CalaUpdateFeedURL": "\(releases)/latest/download/latest.json",
+        "CFBundleIdentifier": manifest.bundleId,
+        "CFBundleShortVersionString": manifest.version,
+        "CFBundleVersion": String(manifest.build),
+        "LSMinimumSystemVersion": manifest.minimumSystemVersion,
+    ]
+    for (key, value) in expected where (info[key] as? String) != value {
+        throw Failure("Unexpected \(key) in the release DMG")
+    }
+    guard (info["CalaUpdatePublicKeys"] as? [String]) == publicKeys.map({ $0.base64EncodedString() }) else {
+        throw Failure("Release DMG public keys differ from the committed keys")
+    }
+    let helper = try Data(contentsOf: helperURL)
+    let hash = SHA256.hash(data: helper).map { String(format: "%02x", $0) }.joined()
+    guard hash == manifest.app.keychainHelperSHA256 else {
+        throw Failure("Keychain helper SHA-256 differs from the manifest")
+    }
+    print("PASS release signature, DMG, tag and bundled Info.plist")
 }
 
 private func makeTestKey(_ directory: URL) throws {
@@ -245,15 +322,11 @@ private func run(_ args: [String]) throws {
         try sign(manifest, with: loadKey(url(args[2]))).write(to: url(args[6]), options: .atomic)
     case "verify" where (args.count == 5 || (args.count == 7 && args[5] == "--dmg"))
                         && args[1] == "--keys" && args[3] == "--feed":
-        let keys = try String(contentsOf: url(args[2]), encoding: .utf8).split(whereSeparator: \.isWhitespace)
-        guard (1...2).contains(keys.count) else { throw Failure("Expected one or two update public keys") }
-        let publicKeys = try keys.map { text in
-            guard let raw = Data(base64Encoded: String(text)), raw.count == 32 else { throw Failure("Invalid update public key") }
-            return raw
-        }
-        let manifest = try verify(Data(contentsOf: url(args[4])), publicKeys: publicKeys)
-        if args.count == 7 { try verifyAsset(url(args[6]), manifest: manifest) }
+        _ = try verifiedManifest(keys: url(args[2]), feed: url(args[4]), dmg: args.count == 7 ? url(args[6]) : nil)
         print("PASS update signature" + (args.count == 7 ? " and DMG" : ""))
+    case "verify-release" where args.count == 11 && args[1] == "--keys" && args[3] == "--feed"
+                                && args[5] == "--dmg" && args[7] == "--app" && args[9] == "--tag":
+        try verifyRelease(keys: url(args[2]), feed: url(args[4]), dmg: url(args[6]), app: url(args[8]), tag: args[10])
     case "testkey" where args.count == 2:
         try makeTestKey(url(args[1]))
     case "selftest" where args.count == 1:
@@ -263,6 +336,7 @@ private func run(_ args: [String]) throws {
         Usage: update-sign.swift generate --out FILE
                update-sign.swift sign --key FILE --manifest M --out FEED
                update-sign.swift verify --keys KEYS --feed FEED [--dmg D]
+               update-sign.swift verify-release --keys KEYS --feed FEED --dmg D --app APP --tag TAG
                update-sign.swift testkey DIR
                update-sign.swift selftest
         """)

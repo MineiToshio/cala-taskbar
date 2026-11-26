@@ -28,10 +28,15 @@ git add VERSION docs/releases/1.1.0.{en,es}.md
 git commit -m "Version 1.1.0"
 ./scripts/release.sh
 git push
-./scripts/publish-github.sh
+git tag v1.1.0
+./scripts/publish-github.sh --dry-run v1.1.0
+git push origin tag v1.1.0
+./scripts/publish-github.sh v1.1.0
 ```
 
-`release.sh` pide la frase de la clave en la Terminal y produce `build/Cala-1.1.0.dmg`, su `.sha256` y `build/latest.json`. Verifica la firma y el DMG, y monta la imagen en modo de solo lectura para cotejar la app empaquetada con el manifiesto. `publish-github.sh` vuelve a verificar el feed y el DMG, y sube los tres archivos al borrador con las notas en ambos idiomas.
+`release.sh [commit]` compila siempre en un checkout temporal del commit elegido (HEAD por defecto). Pide la frase de la clave en la Terminal y produce `build/Cala-1.1.0.dmg`, su `.sha256` y `build/latest.json`. Crea el tag en el commit que imprime el script, después del build. Si compilaste un commit distinto de HEAD, pásalo a `git tag v1.1.0 <commit>`.
+
+`publish-github.sh` toma la versión, las claves y las notas del commit del tag. Verifica la firma del feed, el tamaño y el SHA-256 de una copia privada del DMG. Monta esa copia en solo lectura y comprueba que la versión coincida con el tag y el manifiesto, que el build coincida con el manifiesto y que la app lleve las claves comprometidas y la URL de producción. Rechaza los ajustes de prueba. `--dry-run` hace estas mismas comprobaciones locales. Al publicar, el script exige que el tag de GitHub apunte al mismo commit y sube los tres archivos verificados a un borrador con las notas en ambos idiomas.
 
 Abre el borrador con `gh release view v1.1.0 --web`, revísalo y pulsa **Publish release**. Ese paso activa la distribución para los usuarios que ya tienen el actualizador. Desde una máquina sin sesión iniciada en GitHub, descarga y verifica el feed publicado.
 
@@ -132,7 +137,7 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 
 #### Qué comprueba `release.sh`
 
-- Ejecuta todos los `scripts/check-*.sh` antes del build y se detiene si falla alguno. El [inventario de checks](architecture.md#automated-checks) incluye `scripts/check-settings.sh` y `scripts/check-statusline.sh`. Con cambios rastreados sin commit, el release usa una copia limpia de HEAD.
+- Ejecuta todos los `scripts/check-*.sh` antes del build y se detiene si falla alguno. El [inventario de checks](architecture.md#automated-checks) incluye `scripts/check-settings.sh` y `scripts/check-statusline.sh`. El checkout temporal contiene solo los archivos del commit, incluidos el código, la versión, las claves y las notas.
 - Vía `build.sh`: que el ayudante del Llavero sea el del repo (SHA-256 y, en ad-hoc, cdhash) y que bundle id, identificadores de firma y Team ID cuadren.
 - Que la firma sea válida y que las entitlements estén puestas (`packaging/Cala.entitlements`: Apple Events para Finder, Calendario y Ubicación; nada más).
 - Que notarytool devuelva *Accepted*. Si no, imprime el `id` para pedir el log con `xcrun notarytool log <id> --keychain-profile cala-notary`.
@@ -163,6 +168,6 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 
 ## Desarrollo local
 
-`./install.sh` compila (ad-hoc), pide sudo para publicar `/Applications/Cala.app` con el dueño de la sesión y el grupo `admin` con permiso de escritura, y abre Cala en la sesión que ejecuta el instalador. Las sesiones que ya usan la copia compartida detectan una compilación más nueva y se reinician cuando pueden hacerlo. Véase [setup.md](setup.md#other-user-profiles). El build ad-hoc fija el *designated requirement* al bundle id, así macOS conserva los permisos entre recompilaciones. Un build firmado con Developer ID tiene otro requisito, así que la primera vez que pases de uno a otro macOS vuelve a pedir los permisos (y el aviso del Llavero de Correo, una vez por cuenta).
+`./install.sh` compila (ad-hoc) y pide sudo. Prepara el bundle en un directorio privado de root en el mismo volumen que `/Applications`. Ahí asigna el dueño que invocó sudo y el grupo `admin` con permiso de escritura. Publica con un intercambio atómico, que también permite reemplazar la copia antigua de root, y abre Cala en la sesión que ejecuta el instalador. Las sesiones que ya usan la copia compartida detectan una compilación más nueva y se reinician cuando pueden hacerlo. Véase [setup.md](setup.md#other-user-profiles). El build ad-hoc fija el *designated requirement* al bundle id, así macOS conserva los permisos entre recompilaciones. Un build firmado con Developer ID tiene otro requisito, así que la primera vez que pases de uno a otro macOS vuelve a pedir los permisos (y el aviso del Llavero de Correo, una vez por cuenta).
 
 Para la [prueba integral del actualizador](updates.md#11-end-to-end-plan-the-fixture-ladder), `swift scripts/update-sign.swift testkey "$T/keys"` genera un par desechable y `scripts/make-update-fixture.sh --out "$T/f2" --version 0.0.2 --build 2 --keys "$T/keys"` prepara el DMG y el feed para el servidor local. Usa un `$T` temporal fuera del repositorio y bórralo al terminar. El firmante de producción solo acepta claves cifradas.
