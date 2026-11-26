@@ -1019,8 +1019,8 @@ private struct MailKeychainNote: View {
                 Text(tx("Cala saves this app password in the macOS Keychain, your Mac’s password safe.",
                         "Cala guarda esta contraseña en el Llavero de macOS, la caja fuerte de contraseñas de tu Mac."))
                     .fontWeight(.medium)
-                Text(tx("If macOS asks for Keychain access for “cala-keychain”, type your Mac password and choose “Always Allow”; it only happens once.",
-                        "Si macOS te pide acceso al llavero para «cala-keychain», escribe tu contraseña y elige «Permitir siempre»; solo pasa una vez."))
+                Text(tx("If you saved this account with an older Cala, macOS may show up to two windows for “cala-keychain” once. Type your Mac password if asked and choose “Always Allow” in both.",
+                        "Si guardaste esta cuenta con una Cala anterior, macOS puede mostrar una vez hasta dos ventanas para «cala-keychain». Escribe la contraseña de tu Mac si te la pide y elige «Permitir siempre» en ambas."))
                 Text(tx("Only macOS receives it; Cala never sees it.",
                         "Solo macOS la recibe; Cala nunca la ve."))
                 Button {
@@ -1034,8 +1034,8 @@ private struct MailKeychainNote: View {
                 .accessibilityAddTraits(.isButton)
                 .accessibilityValue(showsWhy ? tx("Expanded", "Expandido") : tx("Collapsed", "Contraído"))
                 if showsWhy {
-                    Text(tx("macOS checks that it’s really Cala’s Keychain helper (“cala-keychain”) before letting it open the Keychain. Updates keep the same helper, so they don’t ask again.",
-                            "macOS comprueba que de verdad es el ayudante de Llavero de Cala («cala-keychain») antes de dejarlo abrir el Llavero. Las actualizaciones conservan el mismo ayudante, así que no vuelven a preguntar."))
+                    Text(tx("Cala’s Keychain helper (“cala-keychain”) copies the password once into its own Keychain entry. After that macOS trusts it without asking, also after updates.",
+                            "El ayudante de Llavero de Cala («cala-keychain») copia la contraseña una vez a su propia entrada del Llavero. Después macOS confía en él sin preguntar, también tras las actualizaciones."))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1050,8 +1050,8 @@ private struct MailKeychainNote: View {
     }
 }
 
-/// When the Keychain helper changes (in practice: the first build that ships it) macOS asks for the Mac password again
-/// before Cala can read the saved app passwords. This small
+/// While an account's password is still only in its pre-helper Keychain item, macOS asks (up to two windows) before
+/// the helper can read it and copy it into its own item. This small
 /// window comes first, so those prompts are expected. It is not modal: the bar and everything else is already running,
 /// and only mail sync waits for "Got it" (or for the window to be closed).
 @MainActor
@@ -1098,9 +1098,10 @@ private struct MailKeychainNoticeView: View {
     let dismiss: () -> Void
 
     private var howMany: String {
-        prompts == 1
-            ? tx("macOS will ask once.", "macOS te lo preguntará 1 vez.")
-            : tx("macOS will ask \(prompts) times, once per account.", "macOS te lo preguntará \(prompts) veces, una por cuenta.")
+        prompts <= 2
+            ? tx("macOS may show up to two windows.", "macOS puede mostrar hasta dos ventanas.")
+            : tx("macOS may show up to \(prompts) windows, two per account.",
+                 "macOS puede mostrar hasta \(prompts) ventanas, dos por cuenta.")
     }
 
     var body: some View {
@@ -1111,13 +1112,13 @@ private struct MailKeychainNoticeView: View {
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(tx("macOS will ask for a password", "macOS te pedirá una contraseña"))
+                    Text(tx("macOS will ask for permission", "macOS te pedirá permiso"))
                         .font(.system(size: 15, weight: .semibold))
                         .accessibilityAddTraits(.isHeader)
-                    Text(tx("Cala now reads your Keychain through its own helper, “cala-keychain”, so macOS asks once before it can use the app password saved there. Later updates won’t ask again.",
-                            "Cala ahora lee tu Llavero mediante su propio ayudante, «cala-keychain», así que macOS pide permiso una vez para usar la contraseña de aplicación guardada ahí. Las próximas actualizaciones no volverán a pedirlo."))
-                    Text("\(howMany) " + tx("Type your Mac password and choose “Always Allow”.",
-                                           "Escribe la contraseña de tu Mac y elige «Permitir siempre»."))
+                    Text(tx("Cala’s Keychain helper, “cala-keychain”, copies your saved app passwords once into its own Keychain entries. Until then macOS asks before letting it read them. Later launches and updates won’t ask.",
+                            "El ayudante de Llavero de Cala, «cala-keychain», copia una vez tus contraseñas de aplicación guardadas a sus propias entradas del Llavero. Hasta entonces macOS pregunta antes de dejarle leerlas. Los próximos arranques y actualizaciones no preguntarán."))
+                    Text("\(howMany) " + tx("Type your Mac password if asked and choose “Always Allow” in both.",
+                                           "Escribe la contraseña de tu Mac si te la pide y elige «Permitir siempre» en ambas."))
                     Text(tx("Only macOS receives your Mac password. Cala never sees it.",
                             "Tu contraseña de Mac la recibe solo macOS. Cala nunca la ve."))
                         .foregroundStyle(.secondary)

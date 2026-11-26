@@ -7,6 +7,8 @@ struct ZonesHowTo: View {
     /// The layout strip is on (`zonesLayoutStrip`); otherwise step 3 points to Settings and the menu-bar icon.
     let strip: Bool
     var compact = false
+    /// Cala's menu-bar icon is showing (`zonesStatusItem`), so step 3 can point to it.
+    var statusItem = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 9 : 12) {
@@ -16,8 +18,11 @@ struct ZonesHowTo: View {
             step(3, "rectangle.topthird.inset.filled", strip
                  ? tx("To use another layout, move over “Change layout” at the top of the screen and rest on the one you want.",
                       "Para usar otra distribución, pasa sobre “Cambiar distribución” arriba de la pantalla y detente en la que quieras.")
-                 : tx("To use another layout, choose it per monitor here or from the Cala icon in the menu bar.",
-                      "Para usar otra distribución, elígela por pantalla aquí o desde el icono de Cala en la barra de menús."))
+                 : statusItem
+                 ? tx("To use another layout, choose it per monitor here or from the Cala icon in the menu bar.",
+                      "Para usar otra distribución, elígela por pantalla aquí o desde el icono de Cala en la barra de menús.")
+                 : tx("To use another layout, choose it per monitor here, in Settings → Zones.",
+                      "Para usar otra distribución, elígela por pantalla aquí, en Configuración → Zonas."))
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(tx("How to use Zones", "Cómo usar las zonas"))

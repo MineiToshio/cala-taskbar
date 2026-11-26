@@ -80,11 +80,24 @@ struct ZonesSettingsPane: View {
                         .toggleStyle(.switch).labelsHidden()
                         .accessibilityLabel(tx("Show layouts while dragging", "Mostrar distribuciones al arrastrar"))
                 }
+                RowDivider()
+                SettingRow(title: tx("Show the icon in the menu bar", "Mostrar el icono en la barra de menús"),
+                           caption: store.config.barEnabled
+                           ? tx("Cala's icon at the top right opens the zones editor and the layout per display. Everything it offers is also here, in Settings.",
+                                "El icono de Cala arriba a la derecha abre el editor de zonas y la distribución por pantalla. Todo lo que ofrece también está aquí, en Configuración.")
+                           : tx("With the taskbar off, this icon is the way into Settings, so it always shows.",
+                                "Con la barra de tareas apagada, este icono es la entrada a Configuración, así que siempre se muestra.")) {
+                    Toggle("", isOn: Binding(get: { !store.config.barEnabled || store.config.zonesStatusItem },
+                                             set: { store.config.zonesStatusItem = $0 }))
+                        .toggleStyle(.switch).labelsHidden().disabled(!store.config.barEnabled)
+                        .accessibilityLabel(tx("Show the icon in the menu bar", "Mostrar el icono en la barra de menús"))
+                }
             }
             SectionTitle(text: tx("How to use Zones", "Cómo usar las zonas"))
             Card {
                 ZonesHowTo(activation: ZoneActivation(config: store.config.zonesActivation),
-                           strip: store.config.zonesLayoutStrip, compact: true)
+                           strip: store.config.zonesLayoutStrip, compact: true,
+                           statusItem: !store.config.barEnabled || store.config.zonesStatusItem)
                     .padding(.horizontal, 16).padding(.vertical, 12)
             }
             Card {

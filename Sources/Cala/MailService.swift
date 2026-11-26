@@ -53,29 +53,101 @@ struct MailMessage: Identifiable, Equatable {
     var uidValidity: UInt32? = nil
 }
 
-/// macOS asks again (once per stored app password) whenever the program reading the Keychain changes. That program is
-/// the bundled helper (see MailKeychain), so `build` is its cdhash, which changes only when the helper is rebuilt (or
-/// the first time a build with the helper runs). This remembers the last one that read every enabled account's
-/// password, which is how the app knows the explanation should come before those prompts.
+/// Which accounts already have their password in the helper's own Keychain item (see MailCredentialStore). One
+/// UserDefaults key per account holds the helper identity (its cdhash) that made that item; it is written only after
+/// the item was written or read back, so a missing or different value means macOS may still show its windows for that
+/// account: up to two (one for the old item's access list, one for its partition) the first time.
 struct MailKeychainGate {
-    static let defaultsKey = "mailKeychainBuild"
-    let build: String
+    static let keyPrefix = "mailKeychainMigrated."
+    let identity: String
     let defaults: UserDefaults
 
-    init(build: String = MailKeychain.helperIdentity
-             ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0",
-         defaults: UserDefaults = .standard) {
-        self.build = build
+    init(identity: String = MailKeychain.helperIdentity ?? "helper-unknown", defaults: UserDefaults = .standard) {
+        self.identity = identity
         self.defaults = defaults
     }
 
-    var lastBuild: String? { defaults.string(forKey: Self.defaultsKey) }
+    func isMigrated(_ id: String) -> Bool { defaults.string(forKey: Self.keyPrefix + id) == identity }
+    func markMigrated(_ id: String) { if !isMigrated(id) { defaults.set(identity, forKey: Self.keyPrefix + id) } }
+    func clearMigrated(_ id: String) { defaults.removeObject(forKey: Self.keyPrefix + id) }
 
-    /// True when macOS is about to ask `prompts` times: there are accounts to read and this build has not read them yet.
-    func needsExplanation(prompts: Int) -> Bool { prompts > 0 && lastBuild != build }
+    /// How many macOS windows to announce before reading `ids`: up to two per account not moved yet.
+    func expectedPrompts(for ids: [String]) -> Int { 2 * ids.filter { !isMigrated($0) }.count }
+}
 
-    func recordRead() {
-        if lastBuild != build { defaults.set(build, forKey: Self.defaultsKey) }
+/// Where an account's app password lives. Items saved before the Keychain helper (account = the email) trust only the
+/// old Cala build that made them, and the helper can neither delete them (errSecInvalidOwnerEdit) nor change who they
+/// trust. So the helper keeps its own item per account (account "v2:<email>", same service) and reads only that once
+/// it exists. The old item is read at most until the copy succeeds and is never deleted (macOS refuses), so a failed
+/// copy can never lose the password.
+struct MailCredentialStore: @unchecked Sendable {
+    /// Result of reading the helper's own item.
+    enum OwnItem: Equatable { case found, missing, unreadable, refused }
+    /// What happens next (pure, pinned by the checks).
+    enum Next: Equatable { case use, readOldThenCopy, readOldOnly, fail }
+
+    static func next(after own: OwnItem) -> Next {
+        switch own {
+        case .found: return .use
+        case .missing: return .readOldThenCopy
+        case .unreadable: return .readOldOnly   // denied or broken: keep mail working from the old item, copy nothing
+        case .refused: return .fail             // the helper refused this Cala (77/78): the old item would fail too
+        }
+    }
+
+    static func ownAccount(_ id: String) -> String { "v2:" + id }
+
+    let get: (String) throws -> String?
+    let set: (String?, String) throws -> Void
+    let gate: MailKeychainGate
+
+    static func live() -> MailCredentialStore {
+        MailCredentialStore(get: { try MailKeychain.password(for: $0) }, set: { try MailKeychain.set($0, for: $1) },
+                            gate: MailKeychainGate())
+    }
+
+    func read(_ id: String) throws -> String? {
+        var own: OwnItem
+        var value: String?
+        var failure: Error?
+        do {
+            value = try get(Self.ownAccount(id))
+            own = value == nil ? .missing : .found
+        } catch let error as MailFailure where error == .keychainRestart || error == .keychainUnverified {
+            own = .refused
+            failure = error
+        } catch {
+            own = .unreadable
+            log("mail: the helper's own Keychain item could not be read (\(MailFailure.from(error).logCode)); using the old one")
+        }
+        switch Self.next(after: own) {
+        case .use:
+            gate.markMigrated(id)
+            return value
+        case .fail:
+            throw failure ?? MailFailure.keychain
+        case .readOldOnly:
+            return try get(id)
+        case .readOldThenCopy:
+            guard let old = try get(id) else { return nil }
+            do {
+                try set(old, Self.ownAccount(id))
+                gate.markMigrated(id)
+                log("mail: app password copied into the helper's own Keychain item")
+            } catch {
+                log("mail: copying the app password into the helper's item failed (\(MailFailure.from(error).logCode)); will retry")
+            }
+            return old
+        }
+    }
+
+    /// The helper's own item only, for rollback in Settings: never touches (or prompts for) the old item.
+    func readOwn(_ id: String) throws -> String? { try get(Self.ownAccount(id)) }
+
+    /// New and changed passwords go to the helper's own item only; removing deletes that item (the old one stays).
+    func write(_ password: String?, _ id: String) throws {
+        try set(password, Self.ownAccount(id))
+        if password != nil { gate.markMigrated(id) } else { gate.clearMigrated(id) }
     }
 }
 
@@ -161,18 +233,20 @@ final class MailService: ObservableObject {
     /// Only the shared service tracks the build (the checks inject their own credential closures and must not touch
     /// the user's defaults).
     private var keychainGate: MailKeychainGate?
-    private var credentialsRead: Set<String> = []
 
     private let accountsURL: URL?
     private let makeConnection: (MailProvider) -> MailIMAP
     private let readCredential: @Sendable (String) throws -> String?
     private let writeCredential: (String?, String) throws -> Void
+    /// What Settings reads before changing a password, to roll back if saving the account list fails.
+    private let readCurrentCredential: (String) throws -> String?
 
     private convenience init() {
+        let store = MailCredentialStore.live()
         self.init(accountsURL: AppPaths.supportDirectory.appendingPathComponent("mail-accounts.json"),
-                  makeConnection: { MailIMAP(provider: $0) }, readCredential: { try MailKeychain.password(for: $0) },
-                  writeCredential: { try MailKeychain.set($0, for: $1) })
-        keychainGate = MailKeychainGate()
+                  makeConnection: { MailIMAP(provider: $0) }, readCredential: { try store.read($0) },
+                  writeCredential: { try store.write($0, $1) }, readCurrentCredential: { try store.readOwn($0) },
+                  keychainGate: store.gate)
         observesWake = true
     }
 
@@ -186,18 +260,21 @@ final class MailService: ObservableObject {
         makeConnection = { _ in preconditionFailure("Mail snapshots do not connect to servers") }
         readCredential = { _ in nil }
         writeCredential = { _, _ in throw MailFailure.accountsFile }
+        readCurrentCredential = { _ in nil }
         accounts = [snapshotAccount]
         status = [snapshotAccount.id: .paused]
     }
 
     init(accountsURL: URL, makeConnection: @escaping (MailProvider) -> MailIMAP,
          readCredential: @escaping @Sendable (String) throws -> String?,
-         writeCredential: @escaping (String?, String) throws -> Void, keychainGate: MailKeychainGate? = nil) {
+         writeCredential: @escaping (String?, String) throws -> Void,
+         readCurrentCredential: ((String) throws -> String?)? = nil, keychainGate: MailKeychainGate? = nil) {
         self.keychainGate = keychainGate
         self.accountsURL = accountsURL
         self.makeConnection = makeConnection
         self.readCredential = readCredential
         self.writeCredential = writeCredential
+        self.readCurrentCredential = readCurrentCredential ?? readCredential
         var decoded: [MailAccount] = []
         do {
             decoded = try JSONDecoder().decode([MailAccount].self, from: Data(contentsOf: accountsURL))
@@ -237,12 +314,14 @@ final class MailService: ObservableObject {
         for account in accounts where account.enabled { launch(account.id) }
     }
 
-    /// Starts syncing, but after an update first lets `present` explain the macOS Keychain prompts that are about to
-    /// appear (it receives how many to expect and a closure to call once the person has read it). Nothing is read from
-    /// the Keychain until then; without accounts to read, or when this build already read them, it starts at once.
+    /// Starts syncing, but while any enabled account's password is not yet in the helper's own Keychain item first
+    /// lets `present` explain the macOS windows that may appear (it receives how many, up to two per such account, and a
+    /// closure to call once the person has read it). Nothing is read from the Keychain until then; when every enabled
+    /// account was moved already, it starts at once. A copy that failed leaves the account unmoved, so the explanation
+    /// comes back on the next launch.
     func start(explainingKeychain present: (_ prompts: Int, _ proceed: @escaping @MainActor () -> Void) -> Void) {
-        let prompts = accounts.filter(\.enabled).count
-        guard !running, let keychainGate, keychainGate.needsExplanation(prompts: prompts) else { start(); return }
+        let prompts = keychainGate?.expectedPrompts(for: accounts.filter(\.enabled).map(\.id)) ?? 0
+        guard !running, prompts > 0 else { start(); return }
         awaitingKeychainNotice = true
         present(prompts) { [weak self] in self?.continueAfterKeychainNotice() }
     }
@@ -260,7 +339,6 @@ final class MailService: ObservableObject {
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
         awaitingKeychainNotice = false
-        credentialsRead.removeAll()
         for connection in pendingSignIns.values { connection.close() }
         pendingSignIns.removeAll()
         guard running else { return }
@@ -548,17 +626,8 @@ final class MailService: ObservableObject {
 
     private nonisolated func signIn(_ id: String, on connection: MailIMAP) async throws {
         let stored = try readCredential(id)
-        await noteCredentialRead(id)
         guard let password = stored else { throw MailFailure.appPasswordRequired }
         try await connection.open(email: id, password: password)
-    }
-
-    /// A read that did not fail means macOS let Cala in (or there was nothing to unlock). Once every enabled account
-    /// has done so, this build is remembered and the explanation is not shown again until the next update.
-    private func noteCredentialRead(_ id: String) {
-        guard let keychainGate else { return }
-        credentialsRead.insert(id)
-        if accounts.lazy.filter(\.enabled).allSatisfy({ credentialsRead.contains($0.id) }) { keychainGate.recordRead() }
     }
 
     private func performOperations(for id: String, run: AccountRun, on connection: MailIMAP) async throws {
@@ -639,7 +708,7 @@ final class MailService: ObservableObject {
     }
 
     private func changeCredential(for id: String, to password: String?, accounts: [MailAccount]) throws {
-        let previous = try readCredential(id)
+        let previous = try readCurrentCredential(id)
         try writeCredential(password, id)
         do {
             try save(accounts)

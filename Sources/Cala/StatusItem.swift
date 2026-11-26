@@ -10,10 +10,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var modules = ModuleSet.none
     private weak var zones: (any ZonesStatusMenuProvider)?
 
-    func refresh(_ modules: ModuleSet, zones: (any ZonesStatusMenuProvider)?) {
+    func refresh(_ modules: ModuleSet, zones: (any ZonesStatusMenuProvider)?, zonesIcon: Bool) {
         self.modules = modules
         self.zones = zones
-        guard ModulePlan.showsStatusItem(modules) else { remove(); return }
+        guard ModulePlan.showsStatusItem(modules, zonesIcon: zonesIcon) else { remove(); return }
         guard item == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let image = NSImage(systemSymbolName: "rectangle.split.2x2", accessibilityDescription: "Cala")

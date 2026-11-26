@@ -68,6 +68,9 @@ check(ModulePlan.needsThumbnails(barOnly) && ModulePlan.needsThumbnails(switcher
       "bar and switcher share thumbnails")
 check(!ModulePlan.showsStatusItem(defaults) && ModulePlan.showsStatusItem(all) && ModulePlan.showsStatusItem(.none),
       "status item when bar is off or zones is on")
+check(!ModulePlan.showsStatusItem(all, zonesIcon: false) && ModulePlan.showsStatusItem(zonesOnly, zonesIcon: false)
+        && ModulePlan.showsStatusItem(.none, zonesIcon: false),
+      "hiding the zones icon only applies while the bar runs (it is the way into Settings otherwise)")
 check(ModulePlan.requiredPermissions(barOnly) == [.accessibility, .screenRecording], "bar permissions")
 check(ModulePlan.requiredPermissions(switcherOnly) == [.accessibility, .screenRecording], "switcher permissions")
 check(ModulePlan.requiredPermissions(zonesOnly) == [.accessibility], "zones permissions")

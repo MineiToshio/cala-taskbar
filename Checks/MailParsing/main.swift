@@ -881,9 +881,12 @@ private func checkKeychainNoticeGate() async throws {
         Exchange("C6 UID SEARCH UNSEEN", "* SEARCH 42\r\nC6 OK\r\n")
     ])
     var connections = 0
+    let gate = MailKeychainGate(identity: "helper-2", defaults: defaults)
+    let keychain = FakeKeychain([email: appPassword])   // only the old (pre-helper) item exists
+    let store = MailCredentialStore(get: keychain.get, set: keychain.set, gate: gate)
     let service = MailService(accountsURL: url, makeConnection: { connections += 1; return MailIMAP(socket: stream, provider: $0) },
-                              readCredential: { _ in appPassword }, writeCredential: { _, _ in },
-                              keychainGate: MailKeychainGate(build: "2", defaults: defaults))
+                              readCredential: { try store.read($0) }, writeCredential: { try store.write($0, $1) },
+                              readCurrentCredential: { try store.readOwn($0) }, keychainGate: gate)
     defer { service.stop() }
     func phase() -> MailInboxPhase {
         MailInboxPhase.of(accounts: service.accounts.map(\.id), status: service.status, synced: service.syncedAccounts,
@@ -891,7 +894,7 @@ private func checkKeychainNoticeGate() async throws {
     }
     var proceed: (@MainActor () -> Void)?
     service.start { prompts, next in
-        expect("Keychain explanation expects one prompt per enabled account", prompts == 1)
+        expect("Keychain explanation announces up to two windows per account not yet in the helper's item", prompts == 2)
         proceed = next
     }
     expect("While the Keychain explanation is open, nothing is read and the flyout says it is waiting (not empty)",
@@ -901,8 +904,13 @@ private func checkKeychainNoticeGate() async throws {
     proceed?()                               // then the window closes: must not start twice
     expect("Continuing from the flyout starts sync once", !service.awaitingKeychainNotice)
     try await waitUntil { stream.isWaiting && service.messages.count == 1 }
-    expect("After continuing, the inbox syncs and the gate records this build",
-           connections == 1 && service.unreadCount == 1 && phase() == .messages && defaults.string(forKey: MailKeychainGate.defaultsKey) == "2")
+    expect("After continuing, the inbox syncs, the password is copied into the helper's item and the account counts as moved",
+           connections == 1 && service.unreadCount == 1 && phase() == .messages && gate.isMigrated(email)
+           && keychain.items[MailCredentialStore.ownAccount(email)] == appPassword && keychain.items[email] == appPassword)
+    var shownAgain = false
+    service.stop()
+    service.start { _, _ in shownAgain = true }
+    expect("Once every enabled account is moved, the explanation is not shown again", !shownAgain && !service.awaitingKeychainNotice)
 
     let a = "a@example.test", b = "b@example.test"
     expect("Phase: connecting with no snapshot is loading, not empty",
@@ -932,6 +940,77 @@ private func checkKeychainNoticeGate() async throws {
            && Set([MailFailure.keychainUnverified, .keychainRestart, .keychain].map(\.localizedDescription)).count == 3)
 }
 do { try await checkKeychainNoticeGate() } catch { expect("Keychain notice gate transcript", false) }
+checkCredentialMigration()
+
+/// In-memory stand-in for the Keychain helper: account -> password, with counters and injectable failures.
+final class FakeKeychain: @unchecked Sendable {
+    var items: [String: String]
+    var reads: [String: Int] = [:]
+    var failRead: [String: MailFailure] = [:]
+    var failWrite: [String: MailFailure] = [:]
+    init(_ items: [String: String] = [:]) { self.items = items }
+    func get(_ account: String) throws -> String? {
+        reads[account, default: 0] += 1
+        if let failure = failRead[account] { throw failure }
+        return items[account]
+    }
+    func set(_ password: String?, _ account: String) throws {
+        if let failure = failWrite[account] { throw failure }
+        items[account] = password
+    }
+}
+
+private func checkCredentialMigration() {
+    typealias Store = MailCredentialStore
+    expect("Migration plan: own item found is used; missing reads the old item and copies it",
+           Store.next(after: .found) == .use && Store.next(after: .missing) == .readOldThenCopy)
+    expect("Migration plan: an unreadable own item falls back to the old one without copying; a refused helper fails",
+           Store.next(after: .unreadable) == .readOldOnly && Store.next(after: .refused) == .fail)
+
+    let suite = "cala-mail-migration-\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { expect("migration defaults", false); return }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let gate = MailKeychainGate(identity: "helper-A", defaults: defaults)
+    let old = "old@example.test", own = Store.ownAccount(old)
+    let keychain = FakeKeychain([old: "secret"])
+    let store = Store(get: keychain.get, set: keychain.set, gate: gate)
+    expect("Migration: an account only in the old item expects up to two windows", gate.expectedPrompts(for: [old]) == 2)
+
+    keychain.failWrite[own] = .keychain
+    let first = try? store.read(old)
+    expect("Migration: a failed copy still returns the password, keeps the old item and stays unmoved",
+           first == "secret" && keychain.items[old] == "secret" && keychain.items[own] == nil && !gate.isMigrated(old))
+    keychain.failWrite[own] = nil
+    let second = try? store.read(old)
+    expect("Migration: the next read retries the copy and marks the account moved",
+           second == "secret" && keychain.items[own] == "secret" && gate.isMigrated(old) && gate.expectedPrompts(for: [old]) == 0)
+    let oldReads = keychain.reads[old]
+    let third = try? store.read(old)
+    expect("Migration: once moved, only the helper's own item is read (the old item is not touched)",
+           third == "secret" && keychain.reads[old] == oldReads)
+
+    keychain.failRead[own] = .keychainDenied
+    let denied = try? store.read(old)
+    expect("Migration: an own item that cannot be read falls back to the old item, copying nothing",
+           denied == "secret" && keychain.reads[old] == (oldReads ?? 0) + 1)
+    keychain.failRead[own] = .keychainRestart
+    var refused: MailFailure?
+    do { _ = try store.read(old) } catch { refused = error as? MailFailure }
+    expect("Migration: a helper that refuses Cala is reported, without trying the old item",
+           refused == .keychainRestart && keychain.reads[old] == (oldReads ?? 0) + 1)
+    keychain.failRead[own] = nil
+
+    let fresh = "new@example.test"
+    try? store.write("brand-new", fresh)
+    expect("Migration: a new account is written to the helper's own item only and counts as moved",
+           keychain.items[Store.ownAccount(fresh)] == "brand-new" && keychain.items[fresh] == nil
+           && keychain.reads[fresh] == nil && gate.isMigrated(fresh) && (try? store.readOwn(fresh)) == "brand-new")
+    try? store.write(nil, old)
+    expect("Migration: removing an account deletes the helper's item, keeps the old one and clears the flag",
+           keychain.items[own] == nil && keychain.items[old] == "secret" && !gate.isMigrated(old))
+    expect("Migration: a different helper identity means the account must be moved again",
+           !MailKeychainGate(identity: "helper-B", defaults: defaults).isMigrated(fresh))
+}
 
 print("\(passes) PASS, \(failures) FAIL")
 exit(failures == 0 ? 0 : 1)

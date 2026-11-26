@@ -14,6 +14,8 @@ final class ModuleRegistry: ObservableObject {
     private let statusItem = StatusItemController()
     private var modules: [ModuleID: any CalaModule]
     private var configObserver: AnyCancellable?
+    private var statusItemObserver: AnyCancellable?
+    private var effectiveModules = ModuleSet.none
     private var desired = ModuleSet.none
     private var pending: (ModuleSet, String, ModulePlan.Source?)?
     private var isApplying = false
@@ -73,6 +75,11 @@ final class ModuleRegistry: ObservableObject {
                 } else {
                     self.apply(config.modules, reason: "config")
                 }
+            }
+        statusItemObserver = store.$config.map(\.zonesStatusItem).removeDuplicates().dropFirst()
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in
+                guard let self, !self.isShuttingDown else { return }
+                self.refreshStatusItem()
             }
         return resolved
     }
@@ -145,8 +152,13 @@ final class ModuleRegistry: ObservableObject {
             if effective.zones && modules[.zones] == nil { log("module zones: requested, unavailable (no module registered)") }
         }
         if runningModules != running { runningModules = running }
+        effectiveModules = effective
+        refreshStatusItem()
+    }
+
+    private func refreshStatusItem() {
         let zones = isRunning(.zones) ? modules[.zones] as? any ZonesStatusMenuProvider : nil
-        statusItem.refresh(effective, zones: zones)
+        statusItem.refresh(effectiveModules, zones: zones, zonesIcon: store.config.zonesStatusItem)
     }
 
     func shutdown() {
@@ -156,6 +168,8 @@ final class ModuleRegistry: ObservableObject {
         pending = nil
         configObserver?.cancel()
         configObserver = nil
+        statusItemObserver?.cancel()
+        statusItemObserver = nil
         for id in ModulePlan.startOrder(from: running, to: .none).stop { stop(id, reason: "quit") }
         thumbnails.update(needed: false)
         statusItem.remove()

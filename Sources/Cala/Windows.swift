@@ -197,6 +197,75 @@ enum WindowService {
         if let app = NSRunningApplication(processIdentifier: w.pid) { bringFront(app) }
         AXUIElementPerformAction(ax, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(ax, kAXMainAttribute as CFString, kCFBooleanTrue)
+        // After the restore animation, make sure the window really landed on a connected screen.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { ensureOnScreen(ax, id: w.id) }
+    }
+
+    /// Screen rects in CG (top-left origin) global coordinates: (frame, visibleFrame).
+    static func cgScreens() -> [(frame: CGRect, visible: CGRect)] {
+        guard let h = NSScreen.screens.first?.frame.height else { return [] }
+        func flip(_ r: NSRect) -> CGRect { CGRect(x: r.minX, y: h - r.maxY, width: r.width, height: r.height) }
+        return NSScreen.screens.map { (flip($0.frame), flip($0.visibleFrame)) }
+    }
+
+    static func windowServerBounds(_ id: CGWindowID) -> CGRect? {
+        guard let d = (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?.first,
+              let b = d[kCGWindowBounds as String] as? NSDictionary else { return nil }
+        return CGRect(dictionaryRepresentation: b)
+    }
+
+    /// True when at least a third of the window (and its title bar strip) sits on some screen.
+    static func isVisible(_ r: CGRect, on screens: [(frame: CGRect, visible: CGRect)]) -> Bool {
+        let area = r.width * r.height
+        guard area > 0 else { return false }
+        let covered = screens.reduce(CGFloat(0)) { acc, s in
+            let i = s.frame.intersection(r)
+            return acc + (i.isNull ? 0 : i.width * i.height)
+        }
+        let bar = CGRect(x: r.minX, y: r.minY, width: r.width, height: min(30, r.height))
+        let barOn = screens.contains { !$0.frame.intersection(bar).isNull && $0.frame.intersection(bar).width >= min(100, r.width) }
+        return covered >= area / 3 && barOn
+    }
+
+    /// Fixes windows restored off-screen: either outside every connected display (a display was unplugged)
+    /// or out of sync between the app and the WindowServer (the app's AX frame differs from where the
+    /// WindowServer keeps it, which happens after displays are rearranged and leaves the window invisible).
+    static func ensureOnScreen(_ ax: AXUIElement, id: CGWindowID) {
+        guard (attr(ax, kAXMinimizedAttribute) as? Bool) != true, !isFullScreen(ax),
+              let axFrame = frame(ax), axFrame.width > 0 else { return }
+        let screens = cgScreens()
+        guard !screens.isEmpty else { return }
+        let server = windowServerBounds(id)
+        let desynced = server.map { abs($0.minX - axFrame.minX) > 2 || abs($0.minY - axFrame.minY) > 2 } ?? false
+        let offscreen = !isVisible(axFrame, on: screens) || (server.map { !isVisible($0, on: screens) } ?? false)
+        guard desynced || offscreen else { return }
+
+        // Target: the screen the app believes it is on, if valid; otherwise the screen under the mouse.
+        let mouse = NSEvent.mouseLocation
+        let mainH = NSScreen.screens.first?.frame.height ?? 0
+        let mouseCG = CGPoint(x: mouse.x, y: mainH - mouse.y)
+        let target = (isVisible(axFrame, on: screens) ? screens.first { $0.frame.contains(CGPoint(x: axFrame.midX, y: axFrame.midY)) } : nil)
+            ?? screens.first { $0.frame.contains(mouseCG) } ?? screens[0]
+        let vis = target.visible
+        var size = CGSize(width: min(axFrame.width, vis.width), height: min(axFrame.height, vis.height))
+        var origin = axFrame.origin
+        if !vis.contains(CGRect(origin: origin, size: size)) {
+            origin = CGPoint(x: vis.midX - size.width / 2, y: vis.midY - size.height / 2)
+        }
+        origin.x = max(vis.minX, min(origin.x, vis.maxX - size.width))
+        origin.y = max(vis.minY, min(origin.y, vis.maxY - size.height))
+        log("ensureOnScreen id=\(id) ax=\(axFrame) server=\(server.map { "\($0)" } ?? "nil") desynced=\(desynced) offscreen=\(offscreen) -> \(origin) \(size)")
+
+        func setPos(_ p: CGPoint) {
+            var p = p
+            if let v = AXValueCreate(.cgPoint, &p) { AXUIElementSetAttributeValue(ax, kAXPositionAttribute as CFString, v) }
+        }
+        if size != axFrame.size, let v = AXValueCreate(.cgSize, &size) {
+            AXUIElementSetAttributeValue(ax, kAXSizeAttribute as CFString, v)
+        }
+        // Setting the same position the app already holds is a no-op; nudge first to force a real move.
+        if origin == axFrame.origin { setPos(CGPoint(x: origin.x + 1, y: origin.y + 1)) }
+        setPos(origin)
     }
 
     private static func closeTarget(_ w: WinRef, run: ModuleCancellation) -> WinRef? {

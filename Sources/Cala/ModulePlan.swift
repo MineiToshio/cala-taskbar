@@ -71,7 +71,9 @@ enum ModulePlan {
     }
 
     static func needsThumbnails(_ set: ModuleSet) -> Bool { set.bar || set.switcher }
-    static func showsStatusItem(_ set: ModuleSet) -> Bool { !set.bar || set.zones }
+    /// With the bar off the icon is the only way into Settings, so `zonesIcon: false` hides it only while the bar runs.
+    static func showsStatusItem(_ set: ModuleSet, zonesIcon: Bool) -> Bool { !set.bar || (set.zones && zonesIcon) }
+    static func showsStatusItem(_ set: ModuleSet) -> Bool { showsStatusItem(set, zonesIcon: true) }
 
     static func requiredPermissions(_ set: ModuleSet) -> [Permission] {
         if needsThumbnails(set) { return [.accessibility, .screenRecording] }

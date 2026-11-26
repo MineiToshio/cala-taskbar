@@ -38,6 +38,9 @@ struct Config: Codable, Equatable {
     var zonesEditorGrid = false
     /// During a zones drag, show the display's layouts in a strip at the top so one can be switched by hovering.
     var zonesLayoutStrip = true
+    /// Show Cala's icon in the macOS menu bar while Zones is on. Ignored with the taskbar off: then the icon is the
+    /// only way into Settings, so it always shows.
+    var zonesStatusItem = true
 
     var modules: ModuleSet {
         ModuleSet(bar: barEnabled, switcher: switcherEnabled, tray: trayEnabled, zones: zonesEnabled)
@@ -106,7 +109,7 @@ struct Config: Codable, Equatable {
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
         case mailLoadsRemoteImages
-        case modulesChosen, barEnabled, trayEnabled, zonesEnabled, zonesActivation, zonesGap, zonesEditorGrid, zonesLayoutStrip
+        case modulesChosen, barEnabled, trayEnabled, zonesEnabled, zonesActivation, zonesGap, zonesEditorGrid, zonesLayoutStrip, zonesStatusItem
     }
 }
 
@@ -146,6 +149,7 @@ extension Config {
         zonesGap = clamped(field(Double.self, .zonesGap) ?? zonesGap, 0...40, 8)
         zonesEditorGrid = field(Bool.self, .zonesEditorGrid) ?? zonesEditorGrid
         zonesLayoutStrip = field(Bool.self, .zonesLayoutStrip) ?? zonesLayoutStrip
+        zonesStatusItem = field(Bool.self, .zonesStatusItem) ?? zonesStatusItem
         restoreDockOnQuit = field(Bool.self, .restoreDockOnQuit) ?? restoreDockOnQuit
         dockBackupSaved = field(Bool.self, .dockBackupSaved) ?? dockBackupSaved
         dockOverridePending = field(Bool.self, .dockOverridePending)

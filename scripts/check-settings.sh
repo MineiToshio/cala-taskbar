@@ -23,7 +23,7 @@ settings = {
         usageClaudeStatusLine usageAlertsEnabled usageAlertThreshold
     """,
     "Settings/SupportSettings.swift": "crashReports relaunchOnCrash",
-    "Zones/ZonesSettingsPane.swift": "zonesActivation zonesGap zonesLayoutStrip",
+    "Zones/ZonesSettingsPane.swift": "zonesActivation zonesGap zonesLayoutStrip zonesStatusItem",
     "CalendarViews.swift": "calendarEnabled calendarJoinEnabled calendarDays calendarExcludedIDs",
     "MailViews.swift": "mailLoadsRemoteImages",
 }
@@ -60,8 +60,8 @@ hidden = keys_in(internal)
 all_keys = direct | external | hidden
 coding_block = (root / "Config.swift").read_text().split("enum CodingKeys", 1)[1].split("}", 1)[0]
 serialized = set(re.findall(r"\b\w+\b", coding_block.split("{", 1)[1])) - {"case"}
-if (len(direct), len(external), len(hidden), len(all_keys)) != (41, 3, 12, 56):
-    fail("expected 41 Settings controls, 3 controls elsewhere, and 12 internal keys")
+if (len(direct), len(external), len(hidden), len(all_keys)) != (42, 3, 12, 57):
+    fail("expected 42 Settings controls, 3 controls elsewhere, and 12 internal keys")
 if all_keys != serialized:
     fail(f"CodingKeys differ from audited keys: {sorted(all_keys ^ serialized)}")
 
@@ -78,7 +78,7 @@ for file in settings:
         if re.search(rf"\bconfig\.{key}\b", source):
             fail(f"{file} directly references {key}, which belongs outside Settings")
 
-print("PASS settings audit: 56/56 keys (41 Settings, 3 other UI, 12 internal)")
+print("PASS settings audit: 57/57 keys (42 Settings, 3 other UI, 12 internal)")
 PY
 
 out=$(mktemp -d)

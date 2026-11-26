@@ -102,7 +102,7 @@ Why fractions:
 
 ## Storage: `zones.json`
 
-`~/Library/Application Support/Cala/zones.json`. It is a separate file from `config.json` so that a damaged zones file can never cost you your bar settings, and nested arrays do not fit the flat per-field recovery `config.json` uses. Written atomically, pretty-printed with sorted keys, and only when something is committed (editor Save, a layout choice, duplicate, delete); each change is written before it goes live. The scalar preferences (`zonesEnabled`, `zonesActivation`, `zonesGap`, `zonesEditorGrid`, `zonesLayoutStrip`) stay in `config.json`.
+`~/Library/Application Support/Cala/zones.json`. It is a separate file from `config.json` so that a damaged zones file can never cost you your bar settings, and nested arrays do not fit the flat per-field recovery `config.json` uses. Written atomically, pretty-printed with sorted keys, and only when something is committed (editor Save, a layout choice, duplicate, delete); each change is written before it goes live. The scalar preferences (`zonesEnabled`, `zonesActivation`, `zonesGap`, `zonesEditorGrid`, `zonesLayoutStrip`, `zonesStatusItem`) stay in `config.json`.
 
 ```json
 {
@@ -196,6 +196,7 @@ All in `config.json`; full reference in [configuration.md](configuration.md#modu
 | `zonesGap` | `8` | Space around snapped windows, 0 to 40 pt (clamped) |
 | `zonesEditorGrid` | `false` | The editor's 12-division snapping |
 | `zonesLayoutStrip` | `true` | Show the layout strip during a zones drag ([above](#using-it)) |
+| `zonesStatusItem` | `true` | Show Cala's icon in the menu bar (**Show the icon in the menu bar** in Settings → Zones). Only with the taskbar on; without it the icon always shows |
 
 Settings → **Zones** shows the module switch, its status and an **Enable Zones** action when off, followed by **Edit zones…**, one layout picker per display, the gesture picker, gap slider, layout strip switch, and macOS tiling help. Layout choices and the editor are available while Zones is off.
 
