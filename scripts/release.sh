@@ -104,7 +104,7 @@ if [[ -z "${CALA_SKIP_NOTARIZE:-}" ]]; then
 fi
 (cd "$BUILD_DIR" && shasum -a 256 "${DMG:t}") > "$DMG.sha256"
 
-python3 - "$APP" "$DMG" "$notes_dir" "$work/manifest.json" <<'PY'
+python3 - "$APP" "$DMG" "$notes_dir" "$work/manifest.json" "$commit" <<'PY'
 from datetime import datetime, timezone
 from hashlib import sha256 as digest
 import json
@@ -112,7 +112,8 @@ from pathlib import Path
 import plistlib
 import sys
 
-app, dmg, notes_dir, output = map(Path, sys.argv[1:])
+app, dmg, notes_dir, output = map(Path, sys.argv[1:5])
+commit = sys.argv[5]
 with (app / "Contents/Info.plist").open("rb") as source:
     info = plistlib.load(source)
 version = info["CFBundleShortVersionString"]
@@ -130,6 +131,7 @@ if not 0 < size <= 200_000_000:
     sys.exit("DMG exceeds the update size limit")
 manifest = {
     "schema": 1,
+    "commit": commit,
     "bundleId": info["CFBundleIdentifier"],
     "version": version,
     "build": int(info["CFBundleVersion"]),
@@ -150,7 +152,7 @@ mkdir "$mount"
 hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mount" "$DMG"
 mounted=1
 "${signer[@]}" verify-release --keys "$keys" --feed "$work/latest.json" \
-  --dmg "$DMG" --app "$mount/Cala.app" --tag "v$CALA_VERSION"
+  --dmg "$DMG" --app "$mount/Cala.app" --tag "v$CALA_VERSION" --commit "$commit"
 hdiutil detach -quiet "$mount"
 mounted=0
 mkdir -p "$output"

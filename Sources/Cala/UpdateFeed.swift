@@ -11,6 +11,8 @@ struct UpdateManifest: Codable, Equatable {
         var keychainHelperSHA256: String
     }
     var schema: Int
+    // In-memory fixtures can omit this argument. Codable still requires the key on the wire.
+    var commit = ""
     var bundleId: String
     var version: String
     var build: Int
@@ -33,7 +35,13 @@ struct UpdateManifest: Codable, Equatable {
                         app: AppInfo(unpackedSize: 0, keychainHelperSHA256: ""), notes: [:], notesURL: nil)
         }
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(Self.self, from: data)
+        let manifest = try decoder.decode(Self.self, from: data)
+        guard manifest.commit.utf8.count == 40, manifest.commit.utf8.allSatisfy({
+            (48...57).contains($0) || (97...102).contains($0)
+        }) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [CodingKeys.commit], debugDescription: "Invalid commit SHA"))
+        }
+        return manifest
     }
 }
 

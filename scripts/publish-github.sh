@@ -53,7 +53,7 @@ mkdir "$mount"
 hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mount" "$work/$asset"
 mounted=1
 "${signer[@]}" verify-release --keys "$work/keys" --feed "$work/latest.json" \
-  --dmg "$work/$asset" --app "$mount/Cala.app" --tag "$tag"
+  --dmg "$work/$asset" --app "$mount/Cala.app" --tag "$tag" --commit "$commit"
 hdiutil detach -quiet "$mount"
 mounted=0
 
