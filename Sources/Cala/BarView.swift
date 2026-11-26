@@ -18,10 +18,12 @@ extension View {
 
 let startID = "__start"
 let deskID = "__desk"
+let updateID = "__update"
 
 struct BarView: View {
     @ObservedObject var model: TaskbarModel
     @ObservedObject var store: ConfigStore
+    @ObservedObject private var updates = UpdateService.shared
     var screenKey = ""
     var onFrames: ([String: CGRect]) -> Void
 
@@ -59,6 +61,7 @@ struct BarView: View {
             HStack(spacing: 2) {
                 if !centered { icons }
                 Spacer(minLength: 8)
+                if let version = updates.available?.version { UpdateButton(version: version).reportFrame(updateID) }
                 if model.trayVisible {
                     JoinPill(model: model)
                     TrayView(model: model, screenKey: screenKey)
@@ -83,6 +86,22 @@ struct BarView: View {
         .environment(\.themeAccent, theme.accent)
         .environment(\.colorScheme, theme.dark.map { $0 ? .dark : .light } ?? systemScheme)
         .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 0.5) }
+    }
+}
+
+struct UpdateButton: View {
+    @Environment(\.themeAccent) private var accent
+    let version: String
+
+    var body: some View {
+        Image(systemName: "arrow.down.circle.fill")
+            .font(.system(size: 26))
+            .foregroundStyle(accent)
+            .frame(width: 40)
+            .frame(maxHeight: .infinity)
+            .accessibilityLabel(tx("Cala \(version) update available", "Actualización de Cala \(version) disponible"))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { UpdateWindowController.shared.show() }
     }
 }
 

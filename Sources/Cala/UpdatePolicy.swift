@@ -8,6 +8,7 @@ enum UpdatePolicy {
         case settings = "Settings open"
         case onboarding = "onboarding in progress"
         case modal = "modal window open"
+        case updater = "update in progress"
     }
 
     enum Decision: Equatable {

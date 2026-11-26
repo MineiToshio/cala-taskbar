@@ -316,7 +316,17 @@ private struct SidebarItem: View {
     let pane: SettingsPane
     let selected: Bool
     let action: () -> Void
+    @ObservedObject private var updates = UpdateService.shared
+    @Environment(\.settingsSnapshot) private var snapshot
     @State private var hover = false
+
+    private var indicatedVersion: String? {
+        if let snapshot {
+            if case .available(let version) = snapshot.update.state { return version }
+            return nil
+        }
+        return updates.available?.version
+    }
 
     var body: some View {
         Button(action: action) {
@@ -324,6 +334,10 @@ private struct SidebarItem: View {
                 SettingsIcon(pane: pane, size: 24)
                 Text(pane.title).font(.system(size: 13, weight: selected ? .semibold : .regular))
                     .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                if pane == .help, let version = indicatedVersion {
+                    Circle().fill(Color.accentColor).frame(width: 5, height: 5)
+                        .accessibilityLabel(tx("Cala \(version) update available", "Actualización de Cala \(version) disponible"))
+                }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
@@ -343,6 +357,7 @@ struct SettingsSnapshot {
     var language: String? = nil
     var layouts: ZonesState
     var mail: MailService
+    var update = UpdateSettingsSnapshot(state: .idle, ready: false)
 }
 
 private struct SettingsSnapshotKey: EnvironmentKey { static let defaultValue: SettingsSnapshot? = nil }

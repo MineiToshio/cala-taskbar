@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 /// A registered Zones module can supply the editor and current per-display layout actions.
 protocol ZonesStatusMenuProvider: AnyObject {
@@ -7,6 +8,7 @@ protocol ZonesStatusMenuProvider: AnyObject {
 
 final class StatusItemController: NSObject, NSMenuDelegate {
     private var item: NSStatusItem?
+    private var updateObserver: AnyCancellable?
     private var modules = ModuleSet.none
     private weak var zones: (any ZonesStatusMenuProvider)?
 
@@ -16,17 +18,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard ModulePlan.showsStatusItem(modules, zonesIcon: zonesIcon) else { remove(); return }
         guard item == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        let image = NSImage(systemSymbolName: "rectangle.split.2x2", accessibilityDescription: "Cala")
-        image?.isTemplate = true
-        if let image { item.button?.image = image }
-        else { item.button?.title = "Cala" }
-        item.button?.setAccessibilityLabel("Cala")
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.delegate = self
         item.menu = menu
         item.isVisible = true
         self.item = item
+        updateObserver = UpdateService.shared.$available.map { $0?.version }.removeDuplicates()
+            .sink { [weak self] version in self?.refreshImage(version: version) }
         log("status item: shown")
     }
 
@@ -34,11 +33,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let item else { return }
         NSStatusBar.system.removeStatusItem(item)
         self.item = nil
+        updateObserver = nil
         log("status item: hidden")
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        if let update = UpdateWindowController.menuItem() { menu.addItem(update) }
         let settings = BlockItem(tx("Settings…", "Configuración…")) { SettingsWindowController.shared.show() }
         settings.keyEquivalent = ","
         menu.addItem(settings)
@@ -54,6 +55,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let quit = BlockItem(tx("Quit Cala", "Salir de Cala")) { NSApp.terminate(nil) }
         quit.keyEquivalent = "q"
         menu.addItem(quit)
+    }
+
+    private func refreshImage(version: String?) {
+        guard let button = item?.button else { return }
+        let label = version.map { v in tx("Cala \(v) update available", "Actualización de Cala \(v) disponible") } ?? "Cala"
+        button.setAccessibilityLabel(label)
+        guard let glyph = NSImage(systemSymbolName: "rectangle.split.2x2", accessibilityDescription: label) else {
+            button.title = "Cala"
+            return
+        }
+        let image: NSImage
+        if version != nil {
+            image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
+                glyph.draw(in: NSRect(x: 1, y: 1, width: 14, height: 14))
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: NSRect(x: 15, y: 12, width: 4, height: 4)).fill()
+                return true
+            }
+        } else {
+            image = glyph
+        }
+        image.isTemplate = true
+        button.image = image
     }
 
     private func zonePlaceholders() -> [NSMenuItem] {

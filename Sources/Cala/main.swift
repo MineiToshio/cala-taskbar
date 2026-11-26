@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ n: Notification) {
+        UpdateService.shared.stop()
         updates.stop()
         registry.shutdown()
         terminationSource?.cancel()
@@ -44,6 +45,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        #if CALA_UPDATE_TEST
+        if Bundle.main.object(forInfoDictionaryKey: "CalaUpdateTest") as? Bool == true,
+           Bundle.main.object(forInfoDictionaryKey: "CalaUpdateTestCrashAtLaunch") as? Bool == true {
+            abort()
+        }
+        #endif
         ZoneEditor.install()
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
         signal(SIGTERM, SIG_IGN)
@@ -67,8 +74,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         LoginItem.migrateLegacy()
         LoginItem.rebindAfterMove()
         Watchdog.start(store: store)
+        let axTrusted = AXIsProcessTrusted()
         let modules = registry.launch(onboardingCompleted: OnboardingWindowController.completed,
-                                      onboardingPending: OnboardingWindowController.pending, axTrusted: AXIsProcessTrusted())
+                                      onboardingPending: OnboardingWindowController.pending, axTrusted: axTrusted)
+        DispatchQueue.global(qos: .utility).async {
+            log("launch: version=\(Telemetry.appVersion()) accessibility=\(axTrusted) screenRecording=\(CGPreflightScreenCaptureAccess())")
+        }
+        UpdateService.shared.start(store: store)
         UsageService.shared.finishStatusLineCleanup(config: store.config)
         MenuBarDiagnostics.install()
         // `notifyutil -p local.cala.openSystemPanel` opens the CPU panel while the tray is running.
@@ -142,9 +154,11 @@ enum Snapshots {
         let zones = try? ZonesStore(templateName: ZonesModule.templateName, readOnly: true)
         let layouts = zones?.state ?? ZoneTemplates.seedState()
         let mail = MailService.snapshot()
-        func pane(_ p: SettingsPane, modules: ModuleSet? = nil, ready: Bool = true, language: String? = nil) -> some View {
+        func pane(_ p: SettingsPane, modules: ModuleSet? = nil, ready: Bool = true, language: String? = nil,
+                  update: UpdateSettingsSnapshot = UpdateSettingsSnapshot(state: .idle, ready: false)) -> some View {
             SettingsPage(pane: p, store: store, open: { _ in }, openDetail: { _ in })
-                .environment(\.settingsSnapshot, SettingsSnapshot(modules: modules ?? enabled, ready: ready, language: language, layouts: layouts, mail: mail))
+                .environment(\.settingsSnapshot, SettingsSnapshot(modules: modules ?? enabled, ready: ready, language: language,
+                                                                 layouts: layouts, mail: mail, update: update))
                 .padding(34)
         }
         for p in SettingsPane.pages { write(pane(p), p.id, width: 640) }
@@ -175,6 +189,25 @@ enum Snapshots {
         let minimumWindow = SettingsView(store: store, navigation: minimumNavigation)
             .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts, mail: mail))
         write(minimumWindow, "settings-window-min", width: minimumSize.width, height: minimumSize.height)
+        let fixture = UpdateManifest(schema: 1, bundleId: "local.cala", version: "1.1.0", build: 131,
+                                     minimumSystemVersion: "14.0", publishedAt: Date(timeIntervalSince1970: 1_796_117_200),
+                                     dmg: .init(url: UpdateService.releases, size: 6_123_456, sha256: ""),
+                                     app: .init(unpackedSize: 21_000_000, keychainHelperSHA256: ""),
+                                     notes: ["en": "Improved window previews and more reliable keyboard shortcuts.",
+                                             "es": "Vistas previas mejoradas y atajos de teclado más fiables."],
+                                     notesURL: UpdateService.releases)
+        let updateStates: [(String, UpdateState)] = [
+            ("idle", .idle), ("checking", .checking), ("up-to-date", .upToDate(fixture.publishedAt)),
+            ("available", .available(fixture.version)), ("skipped", .skipped(fixture.version)),
+            ("downloading", .downloading(42)), ("verifying", .verifying), ("installing", .installing),
+            ("pending-restart", .pendingRestart(UpdatePolicy.Blocker.zonesEditor.rawValue)),
+            ("rolled-back", .rolledBack(fixture.version, "1.0.0")), ("offline", .offline),
+            ("feed-unavailable", .feedUnavailable), ("verification-failed", .verificationFailed),
+            ("disk-full", .diskFull(154_000_000)), ("busy", .busy), ("blocked-by-macos", .blockedByMacOS),
+            ("needs-admin", .needsAdmin), ("needs-newer-macos", .needsNewerMacOS(fixture.version, "26.0")),
+            ("manual-install", .manualInstall), ("unsupported", .unsupported), ("unavailable", .unavailable),
+            ("failed", .failed), ("restart-failed", .restartFailed)
+        ]
         let language = appLanguageOverride
         for code in ["en", "es"] {
             appLanguageOverride = code
@@ -184,6 +217,20 @@ enum Snapshots {
             write(OnboardingView(finish: {}, step: .ready, bar: true, zones: true), "onboarding-ready-bar-zones-\(code)", width: 600)
             write(pane(.general, language: code), "general-\(code)", width: 640)
             write(pane(.zones), "zones-\(code)", width: 640)
+            for (name, state) in updateStates {
+                let ready = ![UpdateState.needsAdmin, .unsupported].contains(state)
+                let offer = state.isInstallOffer || state == .offline ? fixture : nil
+                let update = UpdateSettingsSnapshot(state: state, offer: offer, ready: ready)
+                write(pane(.help, update: update), "update-\(name)-\(code)", width: 640)
+            }
+            let availableUpdate = UpdateSettingsSnapshot(state: .available(fixture.version), offer: fixture)
+            write(UpdateWindowView(service: .shared, store: store, snapshot: availableUpdate),
+                  "update-window-\(code)", width: 420, height: 380)
+            let updateNavigation = SettingsNavigation()
+            updateNavigation.select(.help)
+            let updateSettings = SettingsView(store: store, navigation: updateNavigation)
+                .environment(\.settingsSnapshot, SettingsSnapshot(modules: enabled, layouts: layouts, mail: mail, update: availableUpdate))
+            write(updateSettings, "update-settings-window-\(code)", width: defaultSize.width, height: defaultSize.height)
             if let store = zones {
                 // The drag-time layout strip as it draws on screen: the collapsed pill and the open strip.
                 let layouts = store.state.layouts

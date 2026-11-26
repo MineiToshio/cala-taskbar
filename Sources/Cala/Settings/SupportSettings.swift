@@ -26,8 +26,16 @@ struct PermissionsPane: View {
     }
 }
 
+struct UpdateSettingsSnapshot {
+    let state: UpdateState
+    var offer: UpdateManifest?
+    var ready = true
+}
+
 struct AdvancedPane: View {
     @ObservedObject var store: ConfigStore
+    @ObservedObject private var updates = UpdateService.shared
+    @Environment(\.settingsSnapshot) private var snapshot
     @State private var confirmQuit = false
 
     var body: some View {
@@ -39,10 +47,7 @@ struct AdvancedPane: View {
                     Text("\(Telemetry.appVersion()) (\(Telemetry.appBuild()))").monospacedDigit().textSelection(.enabled)
                 }
                 RowDivider()
-                SettingRow(title: tx("Updates", "Actualizaciones")) {
-                    Link(tx("View releases online", "Ver versiones publicadas en la web"),
-                         destination: URL(string: "https://github.com/MineiToshio/cala-taskbar/releases/latest")!)
-                }
+                updateRows
             }
             Card {
                 SettingRow(title: tx("Report a problem", "Reportar un problema"), caption: tx("Tell us what is broken or what you would like. You will see exactly what is sent before it goes out.", "Cuéntanos qué falla o qué te gustaría. Verás exactamente qué se envía antes de enviarlo.")) {
@@ -96,6 +101,49 @@ struct AdvancedPane: View {
                     Button(tx("Uninstall…", "Desinstalar…"), role: .destructive) { Uninstaller.confirmAndRun(store: store) }
                 }
             }
+        }
+    }
+
+    @ViewBuilder private var updateRows: some View {
+        let state = snapshot?.update.state ?? updates.state
+        let offer = snapshot.map { $0.update.offer } ?? updates.offer
+        let releasePage = snapshot == nil ? updates.releasePage : (offer?.notesURL ?? UpdateService.releases)
+        SettingRow(title: tx("Updates", "Actualizaciones"), caption: state.message) {
+            UpdateAction(state: state, service: updates, releasePage: releasePage)
+        }
+        if let offer, state.displaysSettingsNotes {
+            UpdateNotes(manifest: offer, releasePage: releasePage)
+                .frame(maxHeight: 150, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16).padding(.bottom, 12)
+        }
+        RowDivider()
+        let check = tx("Check for updates automatically", "Buscar actualizaciones automáticamente")
+        SettingRow(title: check, caption: tx(
+            "Once a day Cala asks GitHub whether there is a new version. GitHub sees your IP address and Cala's version, as with any download.",
+            "Una vez al día Cala pregunta a GitHub si hay una versión nueva. GitHub ve tu dirección IP y la versión de Cala, como en cualquier descarga."
+        )) {
+            Toggle("", isOn: Binding(get: { store.config.updateChecks }, set: { store.config.updateChecks = $0 }))
+                .toggleStyle(.switch).labelsHidden().accessibilityLabel(check)
+        }
+        RowDivider()
+        let install = tx("Install updates automatically", "Instalar actualizaciones automáticamente")
+        SettingRow(title: install, caption: tx(
+            "When you're away from the Mac, Cala installs the update and restarts. When it's off, you install with one click.",
+            "Cuando no estás usando la Mac, Cala instala la actualización y se reinicia. Si está apagado, la instalas con un clic."
+        )) {
+            Toggle("", isOn: Binding(get: { store.config.updateAutoInstall }, set: { store.config.updateAutoInstall = $0 }))
+                .toggleStyle(.switch).labelsHidden().accessibilityLabel(install)
+                .disabled(!store.config.updateChecks || !(snapshot?.update.ready ?? updates.canAutoInstall))
+        }
+    }
+}
+
+private extension UpdateState {
+    var displaysSettingsNotes: Bool {
+        switch self {
+        case .available, .offline, .feedUnavailable: return true
+        default: return false
         }
     }
 }

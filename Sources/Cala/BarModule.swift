@@ -435,6 +435,8 @@ final class BarController {
         if e.type == .rightMouseDown {
             let menu = item.map(itemMenu) ?? settingsMenu()
             popUp(menu, x: id.map { iconLeftX(bar, $0) } ?? m.x, bar: bar)
+        } else if id == updateID {
+            UpdateWindowController.shared.show()
         } else if id == deskID {
             toggleDesktop()
         } else if id == startID {
@@ -538,6 +540,7 @@ final class BarController {
 
     func itemMenu(_ item: AppItem) -> NSMenu {
         let menu = NSMenu()
+        if let update = UpdateWindowController.menuItem() { menu.addItem(update) }
         if let pid = item.pid {
             let news = WindowService.newItems(pid: pid)
             for n in news {
@@ -591,6 +594,7 @@ final class BarController {
 
     func settingsMenu() -> NSMenu {
         let menu = NSMenu()
+        if let update = UpdateWindowController.menuItem() { menu.addItem(update) }
         menu.addItem(BlockItem(tx("Hide bar automatically", "Ocultar barra automáticamente"), checked: store.config.autoHide) { [store] in
             store.config.autoHide.toggle()
         })

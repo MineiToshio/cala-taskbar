@@ -84,18 +84,7 @@ final class BundleUpdateMonitor: NSObject {
             return
         }
 
-        var blockers: [UpdatePolicy.Blocker] = []
-        if !sessionActive { blockers.append(.inactiveSession) }
-        // A pressed button also covers a window drag when the Zones module is disabled.
-        if NSEvent.pressedMouseButtons != 0 || ZonesModule.current?.isInZonesMode == true { blockers.append(.drag) }
-        if ZonesModule.editorOpen { blockers.append(.zonesEditor) }
-        if let window = SettingsWindowController.shared.window, window.isVisible || window.isMiniaturized {
-            blockers.append(.settings)
-        }
-        if OnboardingWindowController.shared.isOpen { blockers.append(.onboarding) }
-        if NSApp.modalWindow != nil || NSApp.windows.contains(where: { $0.attachedSheet != nil }) {
-            blockers.append(.modal)
-        }
+        let blockers = Self.blockers(sessionActive: sessionActive)
 
         switch UpdatePolicy.decide(running: runningVersion, disk: disk, blockers: blockers) {
         case .none:
@@ -117,6 +106,24 @@ final class BundleUpdateMonitor: NSObject {
         }
 
         scheduleRetry()
+    }
+
+    static func blockers(sessionActive: Bool) -> [UpdatePolicy.Blocker] {
+        var blockers: [UpdatePolicy.Blocker] = []
+        if !sessionActive { blockers.append(.inactiveSession) }
+        // A pressed button also covers a window drag when the Zones module is disabled.
+        if NSEvent.pressedMouseButtons != 0 || ZonesModule.current?.isInZonesMode == true { blockers.append(.drag) }
+        if ZonesModule.editorOpen { blockers.append(.zonesEditor) }
+        if let window = SettingsWindowController.shared.window, window.isVisible || window.isMiniaturized {
+            blockers.append(.settings)
+        }
+        if OnboardingWindowController.shared.isOpen { blockers.append(.onboarding) }
+        if NSApp.modalWindow != nil || NSApp.windows.contains(where: { $0.attachedSheet != nil }) {
+            blockers.append(.modal)
+        }
+
+        if UpdateService.shared.blocksRelaunch { blockers.append(.updater) }
+        return blockers
     }
 
     private func scheduleRetry(after delay: TimeInterval = 5) {
