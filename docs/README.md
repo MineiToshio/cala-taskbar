@@ -17,6 +17,7 @@ The original goal was a Windows-like experience on a Mac. The Dock plus DockDoor
 | [../README.md](../README.md) · [../README.es.md](../README.es.md) | Install guide for end users (English · Spanish) |
 | [release.md](release.md) | Signing, notarization, costs and the release checklist |
 | [features.md](features.md) | Everything Cala does and how to use it, including the modules |
+| [mail.md](mail.md) | Mail for maintainers: connection lifecycle and queue, optimistic actions and rollback, the server commands that must not change, body cache and prefetch, attachments, observability (`mail-timing`), measurements and checks |
 | [zones.md](zones.md) | Zones: gestures, layouts, storage format, monitors, editor, permissions, limits and the owner's manual test checklist |
 | [architecture.md](architecture.md) | Source layout, the module registry and lifecycles, how each part works, key technical decisions |
 | [setup.md](setup.md) | Build, permissions, auto-start, recommended system settings |
