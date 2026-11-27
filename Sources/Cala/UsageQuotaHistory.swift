@@ -31,6 +31,8 @@ extension QuotaObservation {
 struct QuotaAccount {
     let account: String
     let subject: String?
+    /// ChatGPT user id of a Codex login, as a rollout's `session_meta` names its creator. Not part of the digest.
+    var creatorUser: String? = nil
 
     var components: [String] { [account, subject ?? ""] }
 }
@@ -285,7 +287,8 @@ final class UsageQuotaHistory {
     private static let version = 1
     /// Bumped when the archive importer changes what it accepts; older imports are then rebuilt from the archive.
     /// 2: compressed rollouts, jitter-tolerant cycles, and no unlabeled history across several accounts.
-    private static let importRevision = 2
+    /// 3: rollouts are identified by their session_meta creator; fresh restarts and stale-snapshot blips are one account.
+    private static let importRevision = 3
 
     private struct LoginRecord: Codable {
         var identity: String?

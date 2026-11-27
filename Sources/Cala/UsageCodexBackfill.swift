@@ -167,6 +167,10 @@ final class UsageCodexBackfill {
         var first = Date.distantFuture
         var last = Date.distantPast
         var foreign = false
+        /// What the opening `session_meta` record says about the whole file.
+        var creator = UsageJSON.CodexRollout.Identity.unlabeled
+        /// A row contradicts the creator (one names the active account, the other another one): no row is kept.
+        var conflict = false
         /// Read to the end without a read error.
         var finished = false
         /// An event may be hidden: a budget cut it, or an oversized line looks like a quota event.
@@ -181,7 +185,7 @@ final class UsageCodexBackfill {
 
     struct Pass {
         let candidates: [Candidate]
-        // Offline replay has no active account and never writes to production history.
+        // Offline replay never writes to production history. Rows of files that contradict their creator are left out.
         let replayCandidates: [Candidate]
         /// Some file was read incompletely, or the archive was not exhausted by the final pass.
         let truncated: Bool
@@ -207,9 +211,12 @@ final class UsageCodexBackfill {
         var zstd: ZstdReader?
         var skipping = false
         var line = Data()
+        /// The next complete line is the file's first one, where Codex writes `session_meta`.
+        var atStart = true
     }
 
     private static let eventMarker: StaticString = "\"token_count\""
+    private static let metaMarker: StaticString = "\"session_meta\""
     private static let limitsMarker: StaticString = "rate_limits"
 
     private let queue = DispatchQueue(label: "local.cala.usage.backfill", qos: .utility)
@@ -278,7 +285,7 @@ final class UsageCodexBackfill {
                 active = false
                 completedPasses += 1
                 let incomplete = files.filter { !$0.complete }
-                let pass = Pass(candidates: eligibleReadings(more: more), replayCandidates: readings,
+                let pass = Pass(candidates: eligibleReadings(more: more), replayCandidates: trusted,
                                 truncated: !incomplete.isEmpty || (more && completedPasses == 2),
                                 moreFiles: more, files: files.count, incompleteFiles: incomplete.count,
                                 incompleteDays: Set(incomplete.map(\.day)).count, compressedFiles: compressed,
@@ -410,18 +417,21 @@ final class UsageCodexBackfill {
                 if file.skipping {
                     // Remainder of an oversized line.
                 } else if file.line.isEmpty && newline != nil && length <= limits.maxLineBytes {
-                    consider(segment)
+                    line(segment, file: &file)
                 } else if file.line.count + length > limits.maxLineBytes {
                     file.line.append(contentsOf: segment.prefix(max(0, limits.maxLineBytes - file.line.count)))
                     // A genuine quota event is small. An oversized line is skipped, but one that opens like an
-                    // event could hide an identity or reading, so its file stops counting as complete.
+                    // event could hide an identity or reading, so its file stops counting as complete. An oversized
+                    // first line leaves the file without a creator, so its rows stay unlabeled.
                     file.line.withUnsafeBytes(oversized)
                     file.line.removeAll(keepingCapacity: true)
                     file.skipping = newline == nil
+                    file.atStart = false
                 } else {
                     file.line.append(contentsOf: segment)
                     if newline != nil {
-                        file.line.withUnsafeBytes(consider)
+                        let complete = file.line
+                        complete.withUnsafeBytes { line($0, file: &file) }
                         file.line.removeAll(keepingCapacity: true)
                     }
                 }
@@ -446,6 +456,29 @@ final class UsageCodexBackfill {
         if isCandidate(bytes) { files[files.count - 1].hidden = true }
     }
 
+    private func line(_ bytes: UnsafeRawBufferPointer, file: inout FileCursor) {
+        if file.atStart {
+            file.atStart = false
+            creator(bytes)
+        }
+        consider(bytes)
+    }
+
+    /// Reads the creator that Codex's opening `session_meta` record names; it applies to every row of the file.
+    private func creator(_ bytes: UnsafeRawBufferPointer) {
+        guard Self.contains(bytes, Self.metaMarker), let base = bytes.baseAddress,
+              let object = UsageJSON.object(Data(bytes: base, count: bytes.count)),
+              let ids = UsageJSON.codexSessionCreator(object) else { return }
+        let file = files.count - 1
+        let identity = UsageJSON.CodexRollout.creatorIdentity(account: ids.account, user: ids.user, active: account)
+        files[file].creator = identity
+        if identity == .foreign {
+            files[file].foreign = true
+            // The session's start bounds the span another account was in use.
+            if let date = UsageJSON.date(object["timestamp"]) { files[file].observe(date) }
+        }
+    }
+
     private func consider(_ bytes: UnsafeRawBufferPointer) {
         guard isCandidate(bytes), let base = bytes.baseAddress else { return }
         parsedLines += 1
@@ -457,8 +490,16 @@ final class UsageCodexBackfill {
         let file = files.count - 1
         if let date = UsageJSON.date(object["timestamp"]) { files[file].observe(date) }
         let ids = UsageJSON.rolloutIDs(object)
-        let identity = UsageJSON.CodexRollout.identity(accounts: ids.accounts, subjects: ids.subjects, active: account)
-        if identity == .foreign { files[file].foreign = true; return }
+        let row = UsageJSON.CodexRollout.identity(accounts: ids.accounts, subjects: ids.subjects, active: account)
+        let creator = files[file].creator
+        let identity = UsageJSON.CodexRollout.combined(row, creator)
+        // A row that contradicts its file's creator fails closed: none of the file's rows is kept. (Rows that name
+        // the active account themselves stay trusted beside foreign-labeled rows, as before.)
+        if identity == .foreign {
+            if (creator == .matching && row == .foreign) || (creator == .foreign && row == .matching) { files[file].conflict = true }
+            files[file].foreign = true
+            return
+        }
         guard let event = UsageJSON.codexRollout(object, ids: ids),
               event.reading.date >= now.addingTimeInterval(-UsageQuotaHistory.retention),
               event.reading.date <= now.addingTimeInterval(5) else { return }
@@ -470,9 +511,12 @@ final class UsageCodexBackfill {
         readings.append(Candidate(reading: reading, provenance: identity == .matching ? .identified : .unlabeledStrict, file: file))
     }
 
+    /// Rows of files that do not contradict their `session_meta` creator. A row is labeled by its own ids or its file's creator.
+    private var trusted: [Candidate] { readings.filter { !files[$0.file].conflict } }
+
     /// Decides which rows may leave the importer.
     ///
-    /// - Labeled rows always pass.
+    /// - Labeled rows always pass, unless their file contradicts its `session_meta` creator.
     /// - With no foreign identity in the scanned archive, every unlabeled row of a completely read file passes as
     ///   `unlabeledSingleAccount`. Other files, complete or not, cannot be poisoned by an incomplete one.
     /// - Once any foreign identity exists, only a fully exhausted, fully read scan can keep unlabeled rows, and only
@@ -480,7 +524,7 @@ final class UsageCodexBackfill {
     private func eligibleReadings(more: Bool) -> [Candidate] {
         let foreign = files.filter(\.foreign)
         if foreign.isEmpty {
-            return readings.compactMap { candidate in
+            return trusted.compactMap { candidate in
                 guard candidate.identified || files[candidate.file].complete else { return nil }
                 return Candidate(reading: candidate.reading,
                                  provenance: candidate.identified ? .identified : .unlabeledSingleAccount, file: candidate.file)
@@ -488,13 +532,13 @@ final class UsageCodexBackfill {
         }
         // A skipped file, oversized event or unfinished scan can hide both an identity and its span.
         guard !more, files.allSatisfy(\.complete), !foreign.contains(where: { $0.first > $0.last }) else {
-            return readings.filter(\.identified)
+            return trusted.filter(\.identified)
         }
         // Sweep the foreign spans once, including endpoints shared by concurrent sessions.
         let spans = foreign.sorted { $0.first < $1.first }
         var next = 0
         var foreignUntil = Date.distantPast
-        return readings.sorted { $0.reading.date < $1.reading.date }.filter { candidate in
+        return trusted.sorted { $0.reading.date < $1.reading.date }.filter { candidate in
             let date = candidate.reading.date
             while next < spans.count && spans[next].first <= date {
                 foreignUntil = max(foreignUntil, spans[next].last)
@@ -598,13 +642,20 @@ final class UsageCodexBackfill {
         return Attribution(observations: result, timeline: timeline, awaitsLiveReading: mixed && fresh.isEmpty)
     }
 
-    /// Unlabeled history describes more than one account when its cycles cannot follow each other.
+    /// Unlabeled history describes more than one account when its cycles keep interleaving.
     ///
-    /// One account has one window per meter: a new cycle starts only once the previous one reset, and it never
-    /// returns to an older reset. Resets within `explicitResetJitter` are one cycle. A single early start is
-    /// tolerated (a provider-wide reset); a return to an earlier cycle or two early starts are not. Early starts
-    /// within `earlyStartWindow` of each other, even on different meters, are one event: a provider-wide reset
-    /// that finds a 5-hour and a weekly window open starts both early at once.
+    /// One account has one window per meter: a new cycle normally starts once the previous one reset, and it never
+    /// goes back to an older reset. Resets within `explicitResetJitter` are one cycle.
+    ///
+    /// - A return to a cycle that a later one replaced counts only when the old cycle is still written
+    ///   `returnGrace` after the new one first appeared. Concurrent sessions that started earlier write their cached,
+    ///   older snapshot for seconds after a reset; such blips are one account.
+    /// - An early start whose new cycle is a fresh window (at most `restartUsed` used, `resets_at` within
+    ///   `restartTolerance` of the reading plus the window length) is a restart of the same account's window, such as
+    ///   a provider reset, and is only counted in `restarts`.
+    /// - Other early starts are tolerated once (a provider-wide reset seen late); two are several accounts. Early
+    ///   starts within `earlyStartWindow` of each other, even on different meters, are one event: a provider-wide
+    ///   reset that finds a 5-hour and a weekly window open starts both early at once.
     static func accountTimeline(_ candidates: [Candidate], key: QuotaImportKey, now: Date) -> AccountTimeline {
         AccountTimeline(candidates.filter { !$0.identified }.flatMap { candidate in
             UsageQuotaCapture.observations(candidate.reading, provider: .codex, profile: key.profile, timeZoneID: key.timeZoneID,
@@ -613,27 +664,42 @@ final class UsageCodexBackfill {
     }
 
     struct AccountTimeline {
-        /// Early starts of a new cycle while the previous one had not reset yet, counted per event.
+        /// Early starts of a new cycle while the previous one had not reset yet, counted per event. Fresh restarts
+        /// are not included.
         private(set) var earlyStarts = 0
+        /// Early starts that opened a fresh window: the same account's window restarted.
+        private(set) var restarts = 0
         static let earlyStartWindow: TimeInterval = 3_600
-        /// A reading went back to a cycle that a later one had already replaced.
+        /// A reading went back to a cycle that a later one had already replaced, and kept to it past `returnGrace`.
         private(set) var returns = 0
+        static let returnGrace: TimeInterval = 300
+        static let restartUsed = 5.0
+        static let restartTolerance: TimeInterval = 600
         var mixed: Bool { returns > 0 || earlyStarts >= 2 }
 
         init(_ observations: [QuotaObservation]) {
             let jitter = QuotaObservation.explicitResetJitter
             var earlyDates: [Date] = []
             for (_, rows) in Dictionary(grouping: observations.filter { $0.resetKind == .explicit }, by: \.series) {
+                // Cycles in the order they first appeared.
                 var resets: [Date] = []
+                var firstSeen: [Date] = []
                 var current: Int?
                 for row in rows.sorted(by: { $0.date < $1.date }) {
                     if let index = resets.firstIndex(where: { abs($0.timeIntervalSince(row.reset)) <= jitter }) {
-                        if let active = current, active != index, row.date < resets[index] { returns += 1 }
+                        if let active = current, active != index, row.date < resets[index], index + 1 < firstSeen.count,
+                           row.date >= firstSeen[index + 1].addingTimeInterval(Self.returnGrace) { returns += 1 }
                         current = index
                         continue
                     }
-                    if let active = current, row.date < resets[active].addingTimeInterval(-jitter) { earlyDates.append(row.date) }
+                    if let active = current, row.date < resets[active].addingTimeInterval(-jitter) {
+                        let window = TimeInterval(row.series.meter.durationSeconds)
+                        let fresh = row.used <= Self.restartUsed
+                            && abs(row.reset.timeIntervalSince(row.date.addingTimeInterval(window))) <= Self.restartTolerance
+                        if fresh { restarts += 1 } else { earlyDates.append(row.date) }
+                    }
                     resets.append(row.reset)
+                    firstSeen.append(row.date)
                     current = resets.count - 1
                 }
             }

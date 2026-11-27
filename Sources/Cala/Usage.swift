@@ -852,19 +852,7 @@ final class UsageService: ObservableObject {
         return text
     }
 
-    private static func codexAccount(_ auth: [String: Any]?) -> QuotaAccount? {
-        guard let tokens = auth?["tokens"] as? [String: Any],
-              let account = quotaIdentifier(tokens["account_id"]) else { return nil }
-        var subject = quotaIdentifier(tokens["user_id"])
-        // Claims are used only as a local partition hint, never as authentication.
-        if subject == nil, let token = tokens["id_token"] as? String, token.utf8.count <= 32_768,
-           let payload = token.split(separator: ".").dropFirst().first {
-            var base64 = payload.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-            base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
-            if let bytes = Data(base64Encoded: base64) { subject = quotaIdentifier(UsageJSON.object(bytes)?["sub"]) }
-        }
-        return QuotaAccount(account: account, subject: subject)
-    }
+    private static func codexAccount(_ auth: [String: Any]?) -> QuotaAccount? { UsageJSON.codexAccount(auth) }
 
     private func updateQuotaLogin(_ provider: UsageProvider, signedIn: Bool, rotate: Bool = false) {
         let state = states[index(provider)]

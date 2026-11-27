@@ -178,6 +178,34 @@ for (event, canAlert) in [(accountOnly, true), (foreignSpanRollout, false), (for
            rolloutDisplay.remaining(now) == 5 && (UsagePace.thresholdAlert(rolloutDisplay, selected.reading.windows[0],
                                                                            threshold: 20, now: now) != nil) == canAlert)
 }
+
+// A rollout's session_meta names its creator: the ChatGPT user id, not the token subject, is compared.
+let creatorCodex = QuotaAccount(account: "account-a", subject: "subject-a", creatorUser: "user-a")
+let creator = UsageJSON.CodexRollout.creatorIdentity
+expect("A session_meta creator naming the active account and user is trusted",
+       creator("account-a", "user-a", creatorCodex) == .matching && creator("account-a", nil, creatorCodex) == .matching
+       && creator("account-a", nil, activeCodex) == .matching)
+expect("A session_meta creator naming another account or user is foreign; none is unlabeled",
+       creator("account-b", "user-a", creatorCodex) == .foreign && creator("account-a", "user-b", creatorCodex) == .foreign
+       && creator("account-a", "user-a", nil) == .foreign && creator(nil, nil, creatorCodex) == .unlabeled)
+expect("A creator user the active login cannot confirm stays unlabeled",
+       creator("account-a", "user-a", activeCodex) == .unlabeled && creator(nil, "user-a", creatorCodex) == .unlabeled)
+expect("A row and its file combine fail-closed",
+       UsageJSON.CodexRollout.combined(.unlabeled, .matching) == .matching
+       && UsageJSON.CodexRollout.combined(.matching, .foreign) == .foreign
+       && UsageJSON.CodexRollout.combined(.foreign, .matching) == .foreign
+       && UsageJSON.CodexRollout.combined(.unlabeled, .unlabeled) == .unlabeled)
+let meta = UsageJSON.object(Data(#"{"timestamp":"2026-11-05T09:00:00Z","type":"session_meta","payload":{"id":"s","creator_account_id":"account-a","creator_user_id":"user-a"}}"#.utf8))!
+expect("session_meta exposes its creator ids", UsageJSON.codexSessionCreator(meta).map { $0.account == "account-a" && $0.user == "user-a" } == true
+       && UsageJSON.codexSessionCreator(UsageJSON.object(Data(rolloutJSON.utf8))!) == nil)
+func jwtPart(_ object: [String: Any]) -> String {
+    try! JSONSerialization.data(withJSONObject: object).base64EncodedString()
+        .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+}
+let idToken = ["e30", jwtPart(["sub": "subject-a", "https://api.openai.com/auth": ["chatgpt_user_id": "user-a"]]), "sig"].joined(separator: ".")
+let login = UsageJSON.codexAccount(["tokens": ["account_id": "account-a", "id_token": idToken]])
+expect("auth.json yields the account, the token subject and the ChatGPT user id",
+       login?.account == "account-a" && login?.subject == "subject-a" && login?.creatorUser == "user-a")
 for format in ["http", "rpc"] {
     let data = format == "rpc"
         ? ["primary": ["usedPercent": 20, "windowDurationMins": 10080]]
