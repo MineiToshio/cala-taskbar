@@ -852,19 +852,7 @@ final class UsageService: ObservableObject {
         return text
     }
 
-    private static func codexAccount(_ auth: [String: Any]?) -> QuotaAccount? {
-        guard let tokens = auth?["tokens"] as? [String: Any],
-              let account = quotaIdentifier(tokens["account_id"]) else { return nil }
-        var subject = quotaIdentifier(tokens["user_id"])
-        // Claims are used only as a local partition hint, never as authentication.
-        if subject == nil, let token = tokens["id_token"] as? String, token.utf8.count <= 32_768,
-           let payload = token.split(separator: ".").dropFirst().first {
-            var base64 = payload.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-            base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
-            if let bytes = Data(base64Encoded: base64) { subject = quotaIdentifier(UsageJSON.object(bytes)?["sub"]) }
-        }
-        return QuotaAccount(account: account, subject: subject)
-    }
+    private static func codexAccount(_ auth: [String: Any]?) -> QuotaAccount? { UsageJSON.codexAccount(auth) }
 
     private func updateQuotaLogin(_ provider: UsageProvider, signedIn: Bool, rotate: Bool = false) {
         let state = states[index(provider)]
@@ -1004,7 +992,7 @@ final class UsageService: ObservableObject {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         let key = QuotaImportKey(profile: login.profile, timeZoneID: calendar.timeZone.identifier)
-        let step = importPlanner.step(for: key)
+        let step = importPlanner.step(for: key, account: quotaAccounts[.codex])
         if case .reattribute(let candidates) = step {
             reattributeDeferred(candidates, key: key, login: login, run: run)
             return
@@ -1061,7 +1049,7 @@ final class UsageService: ObservableObject {
                                             updated: { [weak self] in self?.quotaFeed.send(.importUpdated) })
             if finished && decision.mixed {
                 let timeline = decision.timeline
-                log("usage forecast: unlabeled Codex history shows more than one account (\(timeline.earlyStarts) early cycle starts, \(timeline.returns) returns to an earlier cycle); "
+                log("usage forecast: unlabeled Codex history shows more than one account (\(timeline.earlyStarts) early cycle starts, \(timeline.returns) returns to an earlier cycle, \(timeline.restarts) fresh restarts not counted); "
                     + (decision.awaitsLiveReading ? "nothing is kept until a live reading arrives" : "only the live cycle is kept"))
             }
             if finished {

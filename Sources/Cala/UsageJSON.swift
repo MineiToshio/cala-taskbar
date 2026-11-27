@@ -160,6 +160,57 @@ enum UsageJSON {
             }
             return .matching
         }
+
+        /// The identity a rollout's opening `session_meta` record names for the whole file.
+        ///
+        /// Codex writes the creating account and ChatGPT user there; its `token_count` events carry no identity. The
+        /// user is compared with the active login's ChatGPT user id (not the token subject, a different namespace), so
+        /// a workspace account shared by several users is trusted only for the same user. A user the active login
+        /// cannot confirm leaves the file unlabeled, never trusted. With no readable active login (an `auth.json`
+        /// being rewritten on token refresh) nothing can be compared, so nothing is foreign either: the importer does
+        /// not scan without a login, and offline replay keeps such files unlabeled.
+        static func creatorIdentity(account: String?, user: String?, active: QuotaAccount?) -> Identity {
+            if account == nil && user == nil { return .unlabeled }
+            guard let active else { return .unlabeled }
+            if let account, account != active.account { return .foreign }
+            if let user, let known = active.creatorUser, user != known { return .foreign }
+            guard account != nil, user == nil || active.creatorUser != nil else { return .unlabeled }
+            return .matching
+        }
+
+        /// A row's identity from its own ids and its file's: either side foreign is foreign, otherwise a match wins.
+        static func combined(_ row: Identity, _ file: Identity) -> Identity {
+            if row == .foreign || file == .foreign { return .foreign }
+            return row == .matching || file == .matching ? .matching : .unlabeled
+        }
+    }
+
+    /// The creator ids of a rollout's opening `session_meta` record, or nil when the line is not one.
+    static func codexSessionCreator(_ object: [String: Any]) -> (account: String?, user: String?)? {
+        guard object["type"] as? String == "session_meta", let payload = object["payload"] as? [String: Any] else { return nil }
+        return (identifier(payload["creator_account_id"]), identifier(payload["creator_user_id"]))
+    }
+
+    private static func identifier(_ value: Any?) -> String? {
+        guard let text = value as? String, !text.isEmpty, text.utf8.count <= 256 else { return nil }
+        return text
+    }
+
+    /// The active Codex login from `auth.json`. Claims are used only as a local partition hint, never as authentication.
+    static func codexAccount(_ auth: [String: Any]?) -> QuotaAccount? {
+        guard let tokens = auth?["tokens"] as? [String: Any],
+              let account = identifier(tokens["account_id"]) else { return nil }
+        var claims: [String: Any]?
+        if let token = tokens["id_token"] as? String, token.utf8.count <= 32_768,
+           let payload = token.split(separator: ".").dropFirst().first {
+            var base64 = payload.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+            claims = Data(base64Encoded: base64).flatMap { object($0) }
+        }
+        let subject = identifier(tokens["user_id"]) ?? identifier(claims?["sub"])
+        let openAI = claims?["https://api.openai.com/auth"] as? [String: Any]
+        let creatorUser = identifier(openAI?["chatgpt_user_id"]) ?? identifier(openAI?["user_id"])
+        return QuotaAccount(account: account, subject: subject, creatorUser: creatorUser)
     }
 
     /// Shared filter for realtime rollout reads and bounded history import.

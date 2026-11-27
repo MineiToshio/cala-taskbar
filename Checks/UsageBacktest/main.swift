@@ -14,6 +14,7 @@ private struct ArchiveRow {
 private struct Scan {
     let rows: [ArchiveRow]
     let candidates: Int
+    let identified: Int
     let truncated: Bool
     let unsupported: Int
     let files: Int
@@ -27,14 +28,14 @@ private struct Scan {
     let timeline: UsageCodexBackfill.AccountTimeline
 }
 
-private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey) -> Scan {
+private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey, account: QuotaAccount?) -> Scan {
     var limits = UsageCodexBackfill.Limits()
     // Keep the production line and observation bounds. Offline replay gets longer wall-clock budgets.
     limits.elapsed = 120
     limits.finalElapsed = 600
     limits.pause = 0
     let started = ProcessInfo.processInfo.systemUptime
-    let importer = UsageCodexBackfill(sessionsRoot: root, now: asOf, calendar: calendar, account: nil, limits: limits)
+    let importer = UsageCodexBackfill(sessionsRoot: root, now: asOf, calendar: calendar, account: account, limits: limits)
     let done = DispatchSemaphore(value: 0)
     var pass: UsageCodexBackfill.Pass?
     func receive(_ result: UsageCodexBackfill.Pass) {
@@ -50,9 +51,8 @@ private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey
     let result = pass!
     var unsupported = 0
     let rows = result.replayCandidates.flatMap { candidate -> [ArchiveRow] in
-        // There is no live anchor in a replay. Admit only directly parseable, unlabeled rows,
-        // with no inferred identity, plan, duration, or future same-cycle anchor.
-        guard !candidate.identified else { return [] }
+        // There is no live anchor in a replay. Admit only directly parseable rows (unlabeled, or identified by the
+        // login next to the archive), with no inferred plan, duration, or future same-cycle anchor.
         let reading = candidate.reading
         return UsageQuotaCapture.observations(reading, provider: .codex, profile: key.profile,
                                         timeZoneID: key.timeZoneID, source: .rollout, attribution: .provisional,
@@ -65,7 +65,8 @@ private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey
             return available <= asOf ? ArchiveRow(quota: quota, available: available) : nil
         }
     }
-    return Scan(rows: rows, candidates: result.replayCandidates.count, truncated: result.truncated, unsupported: unsupported,
+    return Scan(rows: rows, candidates: result.replayCandidates.count,
+                identified: result.replayCandidates.filter(\.identified).count, truncated: result.truncated, unsupported: unsupported,
                 files: result.files, incompleteFiles: result.incompleteFiles, incompleteDays: result.incompleteDays,
                 compressedFiles: result.compressedFiles, bytes: result.bytesRead, compressedBytes: result.compressedBytesRead,
                 seconds: ProcessInfo.processInfo.systemUptime - started, foreignSeen: result.foreignSeen,
@@ -435,7 +436,10 @@ else { fail("Expected an ISO 8601 as-of timestamp with a timezone.") }
 var calendar = Calendar(identifier: .iso8601)
 calendar.timeZone = .current
 let key = QuotaImportKey(profile: QuotaProfileID(rawValue: "offline-backtest"), timeZoneID: calendar.timeZone.identifier)
-private let archive = scan(root: root, asOf: asOf, calendar: calendar, key: key)
+// The login next to the archive (`<codex home>/auth.json`), read only, so its rollouts' session_meta can identify them.
+private let authURL = root.deletingLastPathComponent().appendingPathComponent("auth.json")
+private let login = (try? Data(contentsOf: authURL)).flatMap(UsageJSON.object).flatMap(UsageJSON.codexAccount)
+private let archive = scan(root: root, asOf: asOf, calendar: calendar, key: key, account: login)
 private let replayed = replay(archive.rows, asOf: asOf, key: key,
                              store: URL(fileURLWithPath: arguments[2], isDirectory: true), calendar: calendar)
 let dateFormat = ISO8601DateFormatter()
@@ -449,12 +453,13 @@ print(String(format: "Scan coverage: %d rollout files (%d compressed .zst, %d in
              archive.files, archive.compressedFiles, archive.incompleteFiles, archive.incompleteDays,
              Double(archive.bytes) / 1_048_576, Double(archive.compressedBytes) / 1_048_576, archive.seconds,
              archive.foreignSeen ? "yes" : "no"))
+print("Identity: active login \(login == nil ? "not found" : "found"); \(archive.identified) candidate events identified as it, \(archive.candidates - archive.identified) unlabeled.")
 let localDays = Set(dates.map { calendar.startOfDay(for: $0) })
 let localWeeks = Set(dates.map { weekStart($0, calendar: calendar) })
 let spanDays = (dates.min().flatMap { first in dates.max().map { Int($0.timeIntervalSince(first) / 86_400) + 1 } }) ?? 0
-print("Account timeline: \(archive.timeline.earlyStarts) early cycle starts, \(archive.timeline.returns) returns to an earlier cycle → \(archive.timeline.mixed ? "more than one account; the app keeps only the live cycle of this history, so the replay below treats several accounts as one" : "consistent with one account").")
+print("Account timeline of unlabeled rows: \(archive.timeline.earlyStarts) early cycle starts, \(archive.timeline.restarts) fresh restarts, \(archive.timeline.returns) returns to an earlier cycle → \(archive.timeline.mixed ? "more than one account; the app keeps only the live cycle of this history, so the replay below treats several accounts as one" : "consistent with one account").")
 print("History reach: \(localDays.count) local days with rows over a \(spanDays)-day span, \(localWeeks.count) local calendar weeks (provisional needs 3 observed weeks across 14 days, risk 4).")
-print("Unlabeled archive only, provisional attribution. Weekly origins use the first fresh local-day reading; short cycles use the first fresh reading. Production thresholds are fixed.")
+print("Unlabeled and identified archive rows, provisional attribution. Weekly origins use the first fresh local-day reading; short cycles use the first fresh reading. Production thresholds are fixed.")
 print("\(replayed.cycles) cycles, \(replayed.origins) eligible origins, \(replayed.origins - replayed.scores.count) omitted for unresolved labels, \(replayed.excludedExhausted) already exhausted at origin.")
 for reason in replayed.unresolved.keys.sorted() { print("Unresolved cycles: \(replayed.unresolved[reason]!) · \(reason)") }
 print("Horizon | Eligible origins | Labeled origins | Forecast abstain point/warn | Linear abstain point/warn | Pooled abstain point/warn")
