@@ -22,6 +22,8 @@ final class ZstdReader {
     private enum Stage { case frame, block, checksum, done }
 
     private static let blockMax = 128 * 1_024
+    /// Consecutive steps (frame headers, skipped input chunks, empty blocks, checksums) one `read` takes without producing output.
+    private static let idleStepLimit = 64
     private static let padding = 16
 
     private let source: (Int) throws -> Data
@@ -33,6 +35,11 @@ final class ZstdReader {
     private(set) var frames = 0
     private var stage = Stage.frame
     private var failure: Error?
+    /// Bytes of a skippable frame still to skip.
+    private var pendingSkip = 0
+
+    /// The input ended cleanly after a whole frame; an empty `read` before that only means "call again".
+    var finished: Bool { stage == .done }
 
     // Frame state.
     private var windowSize = 0
@@ -80,8 +87,9 @@ final class ZstdReader {
         out?.deallocate()
     }
 
-    /// Returns at least one decoded block (roughly `limit` bytes, never more than `limit + 128 KiB`), or empty data
-    /// once the input ended cleanly after a whole frame.
+    /// Returns at least one decoded block (roughly `limit` bytes, never more than `limit + 128 KiB`). Empty data
+    /// means the input ended cleanly after a whole frame when `finished`; otherwise the call only skipped over
+    /// empty blocks or skippable frames (bounded work per call) and must be repeated.
     func read(upTo limit: Int) throws -> Data {
         if let failure { throw failure }
         var result = Data()
@@ -96,7 +104,16 @@ final class ZstdReader {
     }
 
     private func fill(_ result: inout Data, limit: Int) throws {
+        var idle = 0
+        var size = result.count
         while result.count < max(1, limit) {
+            if result.count == size {
+                idle += 1
+                if idle > Self.idleStepLimit { return }
+            } else {
+                size = result.count
+                idle = 0
+            }
             switch stage {
             case .done:
                 return
@@ -127,7 +144,7 @@ final class ZstdReader {
         var result = Data()
         while true {
             let chunk = try reader.read(upTo: 1 << 20)
-            if chunk.isEmpty { return result }
+            if chunk.isEmpty && reader.finished { return result }
             result.append(chunk)
         }
     }
@@ -161,6 +178,14 @@ final class ZstdReader {
     // MARK: Frames
 
     private func startFrame() throws {
+        if pendingSkip > 0 {
+            // One buffered chunk of a skippable frame per step.
+            guard try need(1) else { throw Failure.truncated }
+            let step = min(pendingSkip, input.count - inputPos)
+            inputPos += step
+            pendingSkip -= step
+            return
+        }
         guard try need(4) else {
             // A clean end only between frames, and only after at least one real frame.
             guard input.count == inputPos, frames > 0 else { throw Failure.truncated }
@@ -170,14 +195,8 @@ final class ZstdReader {
         let magic = UInt32(littleEndian(0, 4))
         if magic & 0xFFFF_FFF0 == 0x184D_2A50 {
             guard try need(8) else { throw Failure.truncated }
-            var skip = Int(littleEndian(4, 4))
+            pendingSkip = Int(littleEndian(4, 4))
             inputPos += 8
-            while skip > 0 {
-                guard try need(1) else { throw Failure.truncated }
-                let step = min(skip, input.count - inputPos)
-                inputPos += step
-                skip -= step
-            }
             return
         }
         guard magic == 0xFD2F_B528 else { throw Failure.corrupt("magic") }

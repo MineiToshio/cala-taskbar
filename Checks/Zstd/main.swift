@@ -59,7 +59,7 @@ func decode(_ data: Data, limits: ZstdReader.Limits = .init(), chunk: Int = 1 <<
     var output = Data()
     while true {
         let part = try reader.read(upTo: chunk)
-        if part.isEmpty { return output }
+        if part.isEmpty && reader.finished { return output }
         check(part.count <= chunk + 128 * 1_024, "a read returns at most one block past the request")
         output.append(part)
     }
@@ -100,6 +100,29 @@ let joined = try decode(one + skippable + two)
 check(joined == sources["tiny"]! + sources["random"]!, "frames and skippable frames concatenate")
 skippable.removeLast()
 check(failure(one + skippable) == .truncated, "a cut skippable frame is truncated")
+
+// Thousands of empty skippable frames cost bounded work per read; the caller still gets control back in between.
+let emptySkip = Data([0x50, 0x2A, 0x4D, 0x18, 0, 0, 0, 0])
+let flood = one + Data(Array(repeating: emptySkip, count: 5_000).joined()) + two
+let floodReader = ZstdReader(data: flood)
+var floodOutput = Data()
+var floodReads = 0
+var emptyReads = 0
+while true {
+    let part = try floodReader.read(upTo: 1 << 20)
+    floodReads += 1
+    if part.isEmpty {
+        if floodReader.finished { break }
+        emptyReads += 1
+    }
+    floodOutput.append(part)
+}
+check(floodOutput == sources["tiny"]! + sources["random"]!, "empty skippable frames decode to the surrounding frames")
+check(emptyReads > 0, "a flood of empty frames is split over several reads")
+check(floodReads < 5_000, "each read still skips a batch of frames")
+let skipHuge = Data([0x50, 0x2A, 0x4D, 0x18, 0, 0, 0x10, 0]) + Data(count: 0x100000)
+let hugeDecoded = try decode(one + skipHuge + two)
+check(hugeDecoded == sources["tiny"]! + sources["random"]!, "a large skippable frame is skipped across steps")
 
 // Damage is detected: checksum, magic, reserved bits, dictionaries, oversized windows, empty input.
 var damaged = try Data(contentsOf: fixtures.appendingPathComponent("text-1.zst"))

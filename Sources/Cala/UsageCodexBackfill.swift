@@ -363,9 +363,13 @@ final class UsageCodexBackfill {
             let before = zstd.compressedBytes
             let decoded = try? zstd.read(upTo: count)
             compressedBytes += zstd.compressedBytes - before
-            // A corrupt, truncated or unsupported frame leaves the file incomplete; an empty read is a clean end.
+            // A corrupt, truncated or unsupported frame leaves the file incomplete; an empty read is a clean end only
+            // once the reader says so (otherwise it only skipped empty blocks and the slice loop calls again).
             guard let data = decoded else { close(); return }
-            if data.isEmpty { finishFile(); return }
+            if data.isEmpty {
+                if zstd.finished { finishFile() } else { cursor = file }
+                return
+            }
             file.remaining = max(0, file.remaining - data.count)
             passBytes += data.count
             totalBytes += data.count
@@ -512,6 +516,24 @@ final class UsageCodexBackfill {
     /// Once any foreign identity exists, unlabeled rows need a same-meter, same-cycle match with a fresh API sample.
     static func attributed(_ candidates: [Candidate], key: QuotaImportKey, anchors: [QuotaObservation],
                            switchedAt: Date?, now: Date) -> [QuotaObservation] {
+        attribute(candidates, key: key, anchors: anchors, switchedAt: switchedAt, now: now).observations
+    }
+
+    /// What `attribute` decided about the unlabeled history.
+    struct Attribution {
+        let observations: [QuotaObservation]
+        /// The account judgement applied to the unlabeled rows.
+        let timeline: AccountTimeline
+        /// The history shows several accounts and no fresh live API reading exists at all (of any series), so nothing
+        /// of it was kept. The import must not be marked complete: re-attributing the same candidates once a live
+        /// reading arrives can still keep the live cycle. A fresh reading whose series never appears in the
+        /// archive is a final answer, not a reason to wait.
+        let awaitsLiveReading: Bool
+        var mixed: Bool { timeline.mixed }
+    }
+
+    static func attribute(_ candidates: [Candidate], key: QuotaImportKey, anchors: [QuotaObservation],
+                          switchedAt: Date?, now: Date) -> Attribution {
         let fresh = anchors.filter { now.timeIntervalSince($0.date) <= ($0.series.meter.durationSeconds == 18_000 ? 600 : 1_800)
             && $0.date <= now.addingTimeInterval(5) && $0.reset > now }
         func capture(_ candidate: Candidate, anchors: [UsageQuotaCapture.AnchorKey: [QuotaObservation]]) -> [QuotaObservation] {
@@ -549,7 +571,8 @@ final class UsageCodexBackfill {
             capture(candidate, anchors: verifiedAnchors)
         }
         // Unlabeled rows only stand for one account while their cycles could belong to one account.
-        let mixed = AccountTimeline(single).mixed
+        let timeline = AccountTimeline(single)
+        let mixed = timeline.mixed
         let verified = Dictionary(grouping: observations.filter { $0.attribution == .verifiedArchive }, by: \.series)
         func sameCycle(_ row: QuotaObservation, _ reset: Date) -> Bool {
             abs(row.reset.timeIntervalSince(reset)) <= QuotaObservation.explicitResetJitter
@@ -572,14 +595,16 @@ final class UsageCodexBackfill {
             }
             if continuous { result.append(contentsOf: cycle) }
         }
-        return result
+        return Attribution(observations: result, timeline: timeline, awaitsLiveReading: mixed && fresh.isEmpty)
     }
 
     /// Unlabeled history describes more than one account when its cycles cannot follow each other.
     ///
     /// One account has one window per meter: a new cycle starts only once the previous one reset, and it never
     /// returns to an older reset. Resets within `explicitResetJitter` are one cycle. A single early start is
-    /// tolerated (a provider-wide reset); a return to an earlier cycle or two early starts are not.
+    /// tolerated (a provider-wide reset); a return to an earlier cycle or two early starts are not. Early starts
+    /// within `earlyStartWindow` of each other, even on different meters, are one event: a provider-wide reset
+    /// that finds a 5-hour and a weekly window open starts both early at once.
     static func accountTimeline(_ candidates: [Candidate], key: QuotaImportKey, now: Date) -> AccountTimeline {
         AccountTimeline(candidates.filter { !$0.identified }.flatMap { candidate in
             UsageQuotaCapture.observations(candidate.reading, provider: .codex, profile: key.profile, timeZoneID: key.timeZoneID,
@@ -588,14 +613,16 @@ final class UsageCodexBackfill {
     }
 
     struct AccountTimeline {
-        /// A new cycle began while the previous one had not reset yet.
+        /// Early starts of a new cycle while the previous one had not reset yet, counted per event.
         private(set) var earlyStarts = 0
+        static let earlyStartWindow: TimeInterval = 3_600
         /// A reading went back to a cycle that a later one had already replaced.
         private(set) var returns = 0
         var mixed: Bool { returns > 0 || earlyStarts >= 2 }
 
         init(_ observations: [QuotaObservation]) {
             let jitter = QuotaObservation.explicitResetJitter
+            var earlyDates: [Date] = []
             for (_, rows) in Dictionary(grouping: observations.filter { $0.resetKind == .explicit }, by: \.series) {
                 var resets: [Date] = []
                 var current: Int?
@@ -605,11 +632,52 @@ final class UsageCodexBackfill {
                         current = index
                         continue
                     }
-                    if let active = current, row.date < resets[active].addingTimeInterval(-jitter) { earlyStarts += 1 }
+                    if let active = current, row.date < resets[active].addingTimeInterval(-jitter) { earlyDates.append(row.date) }
                     resets.append(row.reset)
                     current = resets.count - 1
                 }
             }
+            var eventStart: Date?
+            for date in earlyDates.sorted() {
+                if let start = eventStart, date.timeIntervalSince(start) <= Self.earlyStartWindow { continue }
+                eventStart = date
+                earlyStarts += 1
+            }
         }
+    }
+}
+
+/// Decides, per process, how a Codex import goes on: scan the archive, re-attribute the candidates of the scan that
+/// already finished, or nothing. The archive is scanned at most once per key per process, however many live
+/// readings arrive; a scan that had to wait for a live reading keeps its candidates in memory and only the
+/// attribution is repeated (no file I/O). Used from the usage service queue only.
+final class UsageCodexImportPlanner {
+    enum Step {
+        case scan
+        case reattribute([UsageCodexBackfill.Candidate])
+        case idle
+    }
+
+    private var scanned = Set<QuotaImportKey>()
+    private var deferred: (key: QuotaImportKey, candidates: [UsageCodexBackfill.Candidate])?
+
+    func step(for key: QuotaImportKey) -> Step {
+        if let deferred {
+            if deferred.key == key { return .reattribute(deferred.candidates) }
+            self.deferred = nil
+        }
+        return scanned.contains(key) ? .idle : .scan
+    }
+
+    /// A scan reached its final pass.
+    func scanFinished(key: QuotaImportKey, candidates: [UsageCodexBackfill.Candidate],
+                      decision: UsageCodexBackfill.Attribution) {
+        scanned.insert(key)
+        deferred = decision.awaitsLiveReading ? (key, candidates) : nil
+    }
+
+    /// The deferred candidates were attributed again.
+    func reattributed(key: QuotaImportKey, decision: UsageCodexBackfill.Attribution) {
+        if !decision.awaitsLiveReading, deferred?.key == key { deferred = nil }
     }
 }

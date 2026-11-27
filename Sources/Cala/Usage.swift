@@ -292,6 +292,8 @@ final class UsageService: ObservableObject {
         let scanner: UsageCodexBackfill
     }
     private var backfill: BackfillJob?
+    private let importPlanner = UsageCodexImportPlanner()
+    private var reattributing = false
     private let quotaFeed = PassthroughSubject<UsageQuotaEvent, Never>()
     var quotaEvents: AnyPublisher<UsageQuotaEvent, Never> { quotaFeed.eraseToAnyPublisher() }
 
@@ -1002,9 +1004,14 @@ final class UsageService: ObservableObject {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         let key = QuotaImportKey(profile: login.profile, timeZoneID: calendar.timeZone.identifier)
+        let step = importPlanner.step(for: key)
+        if case .reattribute(let candidates) = step {
+            reattributeDeferred(candidates, key: key, login: login, run: run)
+            return
+        }
         if let backfill, backfill.key == key { return }
         cancelBackfill()
-        guard !quotaHistory.importComplete(key) else { return }
+        guard !quotaHistory.importComplete(key), case .scan = step else { return }
         let cancel = ModuleCancellation()
         let scanner = UsageCodexBackfill(sessionsRoot: URL(fileURLWithPath: codexHome).appendingPathComponent("sessions"),
                                          now: now, calendar: calendar, account: quotaAccounts[.codex],
@@ -1014,21 +1021,53 @@ final class UsageService: ObservableObject {
         scanBackfill(job, login: login, run: run, final: false)
     }
 
+    /// A live reading arrived after a scan that had to wait for one: attribute its candidates again, no file I/O.
+    private func reattributeDeferred(_ candidates: [UsageCodexBackfill.Candidate], key: QuotaImportKey,
+                                     login: QuotaLogin, run: ModuleCancellation) {
+        guard !reattributing else { return }
+        reattributing = true
+        let anchors = quotaHistory.liveAnchors(for: key)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let now = Date()
+            let decision = UsageCodexBackfill.attribute(candidates, key: key, anchors: anchors,
+                                                        switchedAt: login.switchedAt, now: now)
+            self?.queue.async {
+                guard let self else { return }
+                self.reattributing = false
+                guard self.run === run, !run.isCancelled, !decision.awaitsLiveReading else { return }
+                self.importPlanner.reattributed(key: key, decision: decision)
+                self.quotaHistory.replaceImport(decision.observations, for: key, complete: true, now: now,
+                                                cancelled: { run.isCancelled },
+                                                updated: { [weak self] in self?.quotaFeed.send(.importUpdated) })
+                log("usage forecast: a live Codex reading arrived; the unlabeled history was attributed without scanning again (\(decision.observations.count) rows kept)")
+            }
+        }
+    }
+
     private func scanBackfill(_ job: BackfillJob, login: QuotaLogin, run: ModuleCancellation, final: Bool) {
         let cancelled = { job.cancel.isCancelled || run.isCancelled }
         job.scanner.scanNextPass { [weak self] pass in
             guard let self, !cancelled() else { return }
             let now = Date()
-            let observations = UsageCodexBackfill.attributed(pass.candidates, key: job.key,
-                                                            anchors: self.quotaHistory.liveAnchors(for: job.key),
-                                                            switchedAt: login.switchedAt, now: now)
-            self.quotaHistory.replaceImport(observations, for: job.key, complete: final || !pass.moreFiles,
+            let decision = UsageCodexBackfill.attribute(pass.candidates, key: job.key,
+                                                        anchors: self.quotaHistory.liveAnchors(for: job.key),
+                                                        switchedAt: login.switchedAt, now: now)
+            let finished = final || !pass.moreFiles
+            // Several accounts and no fresh live reading at all: import nothing yet; the next live reading
+            // re-attributes these candidates from memory instead of scanning again.
+            let complete = finished && !decision.awaitsLiveReading
+            self.quotaHistory.replaceImport(decision.observations, for: job.key, complete: complete,
                                             now: now, cancelled: cancelled,
                                             updated: { [weak self] in self?.quotaFeed.send(.importUpdated) })
-            if final || !pass.moreFiles {
-                let timeline = UsageCodexBackfill.accountTimeline(pass.candidates, key: job.key, now: now)
-                if timeline.mixed {
-                    log("usage forecast: unlabeled Codex history shows more than one account (\(timeline.earlyStarts) early cycle starts, \(timeline.returns) returns to an earlier cycle); only the live cycle is kept")
+            if finished && decision.mixed {
+                let timeline = decision.timeline
+                log("usage forecast: unlabeled Codex history shows more than one account (\(timeline.earlyStarts) early cycle starts, \(timeline.returns) returns to an earlier cycle); "
+                    + (decision.awaitsLiveReading ? "nothing is kept until a live reading arrives" : "only the live cycle is kept"))
+            }
+            if finished {
+                self.queue.async {
+                    guard self.backfill?.cancel === job.cancel else { return }
+                    self.importPlanner.scanFinished(key: job.key, candidates: pass.candidates, decision: decision)
                 }
             }
             if pass.truncated && (final || !pass.moreFiles) {
