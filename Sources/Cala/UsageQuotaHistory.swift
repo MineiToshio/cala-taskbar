@@ -4,6 +4,9 @@ import Darwin
 
 extension QuotaObservation {
     fileprivate static let calculatedResetTolerance: TimeInterval = 2
+    /// Codex reports `resets_at` per reading, and the same window drifts by seconds to a few minutes between
+    /// readings. Explicit resets this close belong to one cycle; real cycles of one meter are at least 5 h apart.
+    static let explicitResetJitter: TimeInterval = 600
 
     func normalized(now: Date) -> Self? {
         let seconds = series.meter.durationSeconds
@@ -90,6 +93,8 @@ private struct QuotaCursor: Codable {
         let sameAttribution = prior?.attribution == observation.attribution
         let equivalentReset = cycle.map { anchor in
             if anchor.reset == observation.reset { return true }
+            if observation.resetKind == .explicit, explicitAnchor, observation.date < anchor.reset,
+               abs(anchor.reset.timeIntervalSince(observation.reset)) <= QuotaObservation.explicitResetJitter { return true }
             return explicitAnchor && observation.resetKind == .calculated
                 && abs(anchor.reset.timeIntervalSince(observation.reset)) <= QuotaObservation.calculatedResetTolerance
                 && observation.date < anchor.reset
@@ -278,6 +283,9 @@ final class UsageQuotaHistory {
     static let retention: TimeInterval = 112 * 86_400
     private static let week: TimeInterval = 7 * 86_400
     private static let version = 1
+    /// Bumped when the archive importer changes what it accepts; older imports are then rebuilt from the archive.
+    /// 2: compressed rollouts, jitter-tolerant cycles, and no unlabeled history across several accounts.
+    private static let importRevision = 2
 
     private struct LoginRecord: Codable {
         var identity: String?
@@ -301,6 +309,7 @@ final class UsageQuotaHistory {
         var tracks: [QuotaLiveTrack] = []
         var imports: Set<QuotaImportKey> = []
         var fileScopedImports: Bool? = true
+        var importRevision: Int? = UsageQuotaHistory.importRevision
     }
 
     private let queue = DispatchQueue(label: "local.cala.usage.history", qos: .utility)
@@ -999,8 +1008,8 @@ private extension UsageQuotaHistory {
                 report("usage forecast: skipped a damaged history shard")
             }
         }
-        if saved.fileScopedImports != true {
-            // Prior imports cannot prove file-level identity. Rebuild them from the archive.
+        if saved.fileScopedImports != true || saved.importRevision != Self.importRevision {
+            // Prior imports cannot prove file-level identity, or predate the current importer. Rebuild them.
             for week in Array(shards.keys) {
                 guard var shard = shards[week] else { continue }
                 let oldCount = shard.count
@@ -1014,6 +1023,7 @@ private extension UsageQuotaHistory {
             }
             manifest.imports.removeAll()
             manifest.fileScopedImports = true
+            manifest.importRevision = Self.importRevision
             scheduleFlush()
         }
         prune(now: now)

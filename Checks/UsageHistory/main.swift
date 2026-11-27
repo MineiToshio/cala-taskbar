@@ -700,4 +700,5 @@ do {
     check(cancelled.flush() && cancelled.snapshot().series.isEmpty && !cancelled.importComplete(key),
           "cancelled generation leaves no import data")
 }
+try checkArchiveAccounts()
 print("Usage history checks passed (\(assertions) assertions).")

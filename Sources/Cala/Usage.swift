@@ -1025,8 +1025,14 @@ final class UsageService: ObservableObject {
             self.quotaHistory.replaceImport(observations, for: job.key, complete: final || !pass.moreFiles,
                                             now: now, cancelled: cancelled,
                                             updated: { [weak self] in self?.quotaFeed.send(.importUpdated) })
+            if final || !pass.moreFiles {
+                let timeline = UsageCodexBackfill.accountTimeline(pass.candidates, key: job.key, now: now)
+                if timeline.mixed {
+                    log("usage forecast: unlabeled Codex history shows more than one account (\(timeline.earlyStarts) early cycle starts, \(timeline.returns) returns to an earlier cycle); only the live cycle is kept")
+                }
+            }
             if pass.truncated && (final || !pass.moreFiles) {
-                log("usage forecast: Codex history left \(pass.incompleteFiles) rollouts incomplete (\(pass.compressedFiles) compressed ones are not read)")
+                log("usage forecast: Codex history left \(pass.incompleteFiles) rollouts incomplete of \(pass.files) (\(pass.compressedFiles) compressed)")
             }
             if !final && pass.moreFiles { self.continueBackfillWhenIdle(job, login: login, run: run) }
         }

@@ -121,7 +121,8 @@ enum UsageQuotaCapture {
 
 /// Bounded two-pass reader for the resolved active Codex sessions directory.
 ///
-/// Every rollout is streamed whole, but a cheap byte pre-filter parses only lines that can be quota events.
+/// Every rollout is streamed whole, plain (`.jsonl`) or compressed by Codex (`.jsonl.zst`, decoded by `ZstdReader`
+/// one block at a time), and a cheap byte pre-filter parses only lines that can be quota events.
 /// Completeness is tracked per file, so an unreadable, oversized-event or budget-cut file only withholds its own
 /// unlabeled rows and never the rest of the archive.
 final class UsageCodexBackfill {
@@ -132,12 +133,17 @@ final class UsageCodexBackfill {
         var observations = 200_000
         /// Wall-clock budget of the first (publish early) pass.
         var elapsed: TimeInterval = 5
-        /// Wall-clock budget of the second, idle-time pass that finishes the archive.
-        var finalElapsed: TimeInterval = 60
+        /// Wall-clock budget of the second, idle-time pass that finishes the archive. Decoding compressed rollouts
+        /// makes a heavy 16-week archive about 10 GB of lines (~2 min of one utility core); it runs once per import.
+        var finalElapsed: TimeInterval = 240
         var slice: TimeInterval = 0.05
         /// Idle time between slices, so a long archive never monopolizes a core.
         var pause: TimeInterval = 0.01
         var chunkBytes = 512 * 1_024
+        /// Decoded bytes read from one compressed rollout before it is left incomplete.
+        var maxDecodedBytes = 4 * 1_024 * 1_024 * 1_024
+        /// Largest zstd window accepted (memory per open compressed rollout is about twice this).
+        var maxWindowBytes = 16 * 1_024 * 1_024
     }
 
     struct Candidate {
@@ -183,17 +189,22 @@ final class UsageCodexBackfill {
         let files: Int
         let incompleteFiles: Int
         let incompleteDays: Int
-        /// Compressed rollouts (`.jsonl.zst`) are not readable and add no rows.
+        /// Compressed rollouts (`.jsonl.zst`) opened; they count in `files` like plain ones.
         let compressedFiles: Int
         let foreignSeen: Bool
+        /// Bytes scanned for lines: file bytes for plain rollouts, decoded bytes for compressed ones.
         let bytesRead: Int
+        /// Bytes read from disk for compressed rollouts.
+        let compressedBytesRead: Int
         /// Lines that passed the byte pre-filter and were JSON-parsed.
         let parsedLines: Int
     }
 
     private struct FileCursor {
         let handle: FileHandle
+        /// Plain rollouts: bytes left of the size seen at open. Compressed ones: decoded bytes still allowed.
         var remaining: Int
+        var zstd: ZstdReader?
         var skipping = false
         var line = Data()
     }
@@ -215,6 +226,7 @@ final class UsageCodexBackfill {
     private var cursor: FileCursor?
     private var files: [FileScan] = []
     private var compressed = 0
+    private var compressedBytes = 0
     private var readings: [Candidate] = []
     private var meterCount = 0
     private var completedPasses = 0
@@ -271,7 +283,7 @@ final class UsageCodexBackfill {
                                 moreFiles: more, files: files.count, incompleteFiles: incomplete.count,
                                 incompleteDays: Set(incomplete.map(\.day)).count, compressedFiles: compressed,
                                 foreignSeen: files.contains(where: \.foreign), bytesRead: totalBytes,
-                                parsedLines: parsedLines)
+                                compressedBytesRead: compressedBytes, parsedLines: parsedLines)
                 if completedPasses == 2 || !more { close(); days.removeAll(); readings.removeAll() }
                 finish(pass)
                 return
@@ -298,24 +310,32 @@ final class UsageCodexBackfill {
         if let enumerator = days[day], let file = enumerator.nextObject() as? URL {
             let name = file.lastPathComponent
             guard name.hasPrefix("rollout-") else { return }
-            if file.pathExtension == "zst" { compressed += 1; return }
-            guard file.pathExtension == "jsonl" else { return }
+            let zstd = file.pathExtension == "zst"
+            guard file.pathExtension == "jsonl" || (zstd && file.deletingPathExtension().pathExtension == "jsonl") else { return }
             passFiles += 1
+            if zstd { compressed += 1 }
             guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
                   values.isRegularFile == true, values.isSymbolicLink != true else {
                 files.append(FileScan(day: day))
                 return
             }
-            open(file, day: day)
+            open(file, day: day, compressed: zstd)
         } else {
             days[day] = nil
             exhaustedDays.insert(day)
         }
     }
 
-    private func open(_ url: URL, day: Int) {
+    private func open(_ url: URL, day: Int, compressed: Bool) {
         files.append(FileScan(day: day))
         guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        if compressed {
+            var zstdLimits = ZstdReader.Limits()
+            zstdLimits.maxWindow = limits.maxWindowBytes
+            zstdLimits.inputChunk = limits.chunkBytes
+            cursor = FileCursor(handle: handle, remaining: limits.maxDecodedBytes, zstd: ZstdReader(handle: handle, limits: zstdLimits))
+            return
+        }
         do {
             let size = try handle.seekToEnd()
             try handle.seek(toOffset: 0)
@@ -333,6 +353,30 @@ final class UsageCodexBackfill {
     private func readChunk() {
         guard var file = cursor else { return }
         let count = min(limits.chunkBytes, file.remaining, limits.bytes - passBytes)
+        if let zstd = file.zstd {
+            guard count > 0 else {
+                // The decoded-size cap or the pass budget stops before the end, so events may be hidden.
+                files[files.count - 1].hidden = true
+                close()
+                return
+            }
+            let before = zstd.compressedBytes
+            let decoded = try? zstd.read(upTo: count)
+            compressedBytes += zstd.compressedBytes - before
+            // A corrupt, truncated or unsupported frame leaves the file incomplete; an empty read is a clean end.
+            guard let data = decoded else { close(); return }
+            if data.isEmpty { finishFile(); return }
+            file.remaining = max(0, file.remaining - data.count)
+            passBytes += data.count
+            totalBytes += data.count
+            consume(data, file: &file)
+            cursor = file
+            if meterCount >= limits.observations {
+                files[files.count - 1].hidden = true
+                close()
+            }
+            return
+        }
         guard count > 0, let data = try? file.handle.read(upToCount: count), !data.isEmpty else {
             // A read error or an externally truncated file leaves the file incomplete.
             close()
@@ -488,7 +532,8 @@ final class UsageCodexBackfill {
             let lived = fresh.first { $0.series == series && $0.date >= (switchedAt ?? .distantPast) }
             let archivalAnchor = lived.flatMap { live in
                 rows.filter { $0.date <= live.date && $0.date >= (switchedAt ?? .distantPast)
-                    && $0.reset == live.reset && $0.resetKind == .explicit }
+                    && abs($0.reset.timeIntervalSince(live.reset)) <= QuotaObservation.explicitResetJitter
+                    && $0.resetKind == .explicit }
                     .max { $0.date == $1.date ? $0.used < $1.used : $0.date < $1.date }
             }
             let compatible: Bool
@@ -503,24 +548,68 @@ final class UsageCodexBackfill {
         let single = candidates.filter { $0.provenance == .unlabeledSingleAccount }.flatMap { candidate in
             capture(candidate, anchors: verifiedAnchors)
         }
+        // Unlabeled rows only stand for one account while their cycles could belong to one account.
+        let mixed = AccountTimeline(single).mixed
         let verified = Dictionary(grouping: observations.filter { $0.attribution == .verifiedArchive }, by: \.series)
+        func sameCycle(_ row: QuotaObservation, _ reset: Date) -> Bool {
+            abs(row.reset.timeIntervalSince(reset)) <= QuotaObservation.explicitResetJitter
+        }
         for (series, rows) in Dictionary(grouping: single, by: \.series) {
             let lived = fresh.first { $0.series == series && $0.date >= (switchedAt ?? .distantPast) && $0.resetKind == .explicit }
-            for (reset, cycle) in Dictionary(grouping: rows, by: \.reset) {
-                guard let lived, lived.reset == reset else { result.append(contentsOf: cycle); continue }
-                // The live reading and the labeled rows of the cycle join the unlabeled ones in one time-ordered series.
-                let points = (cycle + (verified[series] ?? []).filter { $0.reset == reset } + [lived])
-                    .filter { $0.resetKind == .explicit }
-                    .sorted { $0.date == $1.date ? $0.used < $1.used : $0.date < $1.date }
-                var high = 0.0
-                var continuous = true
-                for point in points {
-                    if point.used < high - 1 { continuous = false; break }
-                    high = max(high, point.used)
-                }
-                if continuous { result.append(contentsOf: cycle) }
+            let cycle = lived.map { live in rows.filter { sameCycle($0, live.reset) } } ?? []
+            // Other cycles cannot be tied to the live account once the archive shows more than one account.
+            if !mixed { result.append(contentsOf: rows.filter { row in lived.map { !sameCycle(row, $0.reset) } ?? true }) }
+            guard let lived, !cycle.isEmpty else { continue }
+            // The live reading and the labeled rows of the cycle join the unlabeled ones in one time-ordered series.
+            let points = (cycle + (verified[series] ?? []).filter { sameCycle($0, lived.reset) } + [lived])
+                .filter { $0.resetKind == .explicit }
+                .sorted { $0.date == $1.date ? $0.used < $1.used : $0.date < $1.date }
+            var high = 0.0
+            var continuous = true
+            for point in points {
+                if point.used < high - 1 { continuous = false; break }
+                high = max(high, point.used)
             }
+            if continuous { result.append(contentsOf: cycle) }
         }
         return result
+    }
+
+    /// Unlabeled history describes more than one account when its cycles cannot follow each other.
+    ///
+    /// One account has one window per meter: a new cycle starts only once the previous one reset, and it never
+    /// returns to an older reset. Resets within `explicitResetJitter` are one cycle. A single early start is
+    /// tolerated (a provider-wide reset); a return to an earlier cycle or two early starts are not.
+    static func accountTimeline(_ candidates: [Candidate], key: QuotaImportKey, now: Date) -> AccountTimeline {
+        AccountTimeline(candidates.filter { !$0.identified }.flatMap { candidate in
+            UsageQuotaCapture.observations(candidate.reading, provider: .codex, profile: key.profile, timeZoneID: key.timeZoneID,
+                                           source: .rollout, attribution: .provisional, now: now)
+        })
+    }
+
+    struct AccountTimeline {
+        /// A new cycle began while the previous one had not reset yet.
+        private(set) var earlyStarts = 0
+        /// A reading went back to a cycle that a later one had already replaced.
+        private(set) var returns = 0
+        var mixed: Bool { returns > 0 || earlyStarts >= 2 }
+
+        init(_ observations: [QuotaObservation]) {
+            let jitter = QuotaObservation.explicitResetJitter
+            for (_, rows) in Dictionary(grouping: observations.filter { $0.resetKind == .explicit }, by: \.series) {
+                var resets: [Date] = []
+                var current: Int?
+                for row in rows.sorted(by: { $0.date < $1.date }) {
+                    if let index = resets.firstIndex(where: { abs($0.timeIntervalSince(row.reset)) <= jitter }) {
+                        if let active = current, active != index, row.date < resets[index] { returns += 1 }
+                        current = index
+                        continue
+                    }
+                    if let active = current, row.date < resets[active].addingTimeInterval(-jitter) { earlyStarts += 1 }
+                    resets.append(row.reset)
+                    current = resets.count - 1
+                }
+            }
+        }
     }
 }

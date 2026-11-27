@@ -21,8 +21,10 @@ private struct Scan {
     let incompleteDays: Int
     let compressedFiles: Int
     let bytes: Int
+    let compressedBytes: Int
     let seconds: Double
     let foreignSeen: Bool
+    let timeline: UsageCodexBackfill.AccountTimeline
 }
 
 private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey) -> Scan {
@@ -65,8 +67,9 @@ private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey
     }
     return Scan(rows: rows, candidates: result.replayCandidates.count, truncated: result.truncated, unsupported: unsupported,
                 files: result.files, incompleteFiles: result.incompleteFiles, incompleteDays: result.incompleteDays,
-                compressedFiles: result.compressedFiles, bytes: result.bytesRead,
-                seconds: ProcessInfo.processInfo.systemUptime - started, foreignSeen: result.foreignSeen)
+                compressedFiles: result.compressedFiles, bytes: result.bytesRead, compressedBytes: result.compressedBytesRead,
+                seconds: ProcessInfo.processInfo.systemUptime - started, foreignSeen: result.foreignSeen,
+                timeline: UsageCodexBackfill.accountTimeline(result.replayCandidates, key: key, now: asOf))
 }
 
 private enum Horizon: String, CaseIterable {
@@ -247,7 +250,20 @@ private func weekStart(_ date: Date, calendar: Calendar) -> Date {
 
 private func replay(_ archive: [ArchiveRow], asOf: Date, key: QuotaImportKey, store: URL, calendar: Calendar) -> Replay {
     var result = Replay()
-    for (series, raw) in Dictionary(grouping: archive, by: { $0.quota.series }) {
+    for (series, unclustered) in Dictionary(grouping: archive, by: { $0.quota.series }) {
+        // Codex's resets_at drifts between readings of one window. Label each window by its first reset.
+        var anchors: [Date] = []
+        let raw = unclustered.sorted { $0.quota.date < $1.quota.date }.map { row -> ArchiveRow in
+            let q = row.quota
+            guard let anchor = anchors.first(where: { abs($0.timeIntervalSince(q.reset)) <= QuotaObservation.explicitResetJitter }) else {
+                anchors.append(q.reset)
+                return row
+            }
+            let quota = QuotaObservation(series: q.series, date: q.date, used: q.used, reset: anchor, source: q.source,
+                                         resetKind: q.resetKind, attribution: q.attribution, companion: q.companion,
+                                         bindingWeekly: q.bindingWeekly, hardBlockUntil: q.hardBlockUntil)
+            return ArchiveRow(quota: quota, available: row.available)
+        }
         let timeline = raw.sorted { ($0.available, $0.quota.date, $0.quota.resetKind.rawValue, $0.quota.reset, $0.quota.used) <
             ($1.available, $1.quota.date, $1.quota.resetKind.rawValue, $1.quota.reset, $1.quota.used) }
         var seen = Set<Date>()
@@ -429,12 +445,14 @@ let dates = archive.rows.map(\.available)
 let dateRange = dates.min().flatMap { first in dates.max().map { "\(dateFormat.string(from: first)) to \(dateFormat.string(from: $0))" } } ?? "none"
 print("Codex walk-forward · \(calendar.timeZone.identifier) · archive dates \(dateRange)")
 print("Scan: \(archive.candidates) candidate events, \(archive.rows.count) quota rows before deduplication, \(archive.unsupported) unsupported duration rows, truncated=\(archive.truncated).")
-print(String(format: "Scan coverage: %d rollout files (%d incomplete in %d days, %d compressed .zst not read), %.1f MiB read in %.1f s, foreign identity seen=%@.",
-             archive.files, archive.incompleteFiles, archive.incompleteDays, archive.compressedFiles,
-             Double(archive.bytes) / 1_048_576, archive.seconds, archive.foreignSeen ? "yes" : "no"))
+print(String(format: "Scan coverage: %d rollout files (%d compressed .zst, %d incomplete in %d days), %.1f MiB scanned (%.1f MiB compressed read) in %.1f s, foreign identity seen=%@.",
+             archive.files, archive.compressedFiles, archive.incompleteFiles, archive.incompleteDays,
+             Double(archive.bytes) / 1_048_576, Double(archive.compressedBytes) / 1_048_576, archive.seconds,
+             archive.foreignSeen ? "yes" : "no"))
 let localDays = Set(dates.map { calendar.startOfDay(for: $0) })
 let localWeeks = Set(dates.map { weekStart($0, calendar: calendar) })
 let spanDays = (dates.min().flatMap { first in dates.max().map { Int($0.timeIntervalSince(first) / 86_400) + 1 } }) ?? 0
+print("Account timeline: \(archive.timeline.earlyStarts) early cycle starts, \(archive.timeline.returns) returns to an earlier cycle → \(archive.timeline.mixed ? "more than one account; the app keeps only the live cycle of this history, so the replay below treats several accounts as one" : "consistent with one account").")
 print("History reach: \(localDays.count) local days with rows over a \(spanDays)-day span, \(localWeeks.count) local calendar weeks (provisional needs 3 observed weeks across 14 days, risk 4).")
 print("Unlabeled archive only, provisional attribution. Weekly origins use the first fresh local-day reading; short cycles use the first fresh reading. Production thresholds are fixed.")
 print("\(replayed.cycles) cycles, \(replayed.origins) eligible origins, \(replayed.origins - replayed.scores.count) omitted for unresolved labels, \(replayed.excludedExhausted) already exhausted at origin.")
