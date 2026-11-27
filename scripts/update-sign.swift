@@ -133,6 +133,61 @@ private func readPassphrase(_ prompt: String) throws -> Data {
     return Data(passphrase.utf8)
 }
 
+private func readPassphrase(from fd: Int32) throws -> Data {
+    guard isatty(fd) == 0 else {
+        throw Failure("The passphrase descriptor must be a pipe or file, not a terminal")
+    }
+    var passphrase = Data()
+    var byte: UInt8 = 0
+    // security -w can render each byte of a 4094-byte passphrase as two hex digits.
+    while passphrase.count <= 8188 {
+        let count = Darwin.read(fd, &byte, 1)
+        if count < 0 && errno == EINTR { continue }
+        if count == 0 || (count == 1 && byte == 0x0a) {
+            if !passphrase.isEmpty { return passphrase }
+            break
+        }
+        guard count == 1 else { break }
+        passphrase.append(byte)
+    }
+    throw Failure("Could not read a passphrase from the file descriptor")
+}
+
+private func decodeSecurityHex(_ data: Data) -> Data? {
+    guard data.count.isMultiple(of: 2) else { return nil }
+    func digit(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57: return byte - 48
+        case 97...102: return byte - 87
+        default: return nil
+        }
+    }
+    var decoded = Data()
+    for index in stride(from: data.startIndex, to: data.endIndex, by: 2) {
+        guard let high = digit(data[index]), let low = digit(data[index + 1]) else { return nil }
+        decoded.append(high << 4 | low)
+    }
+    // Printable ASCII is emitted as-is by security, even when it looks like hex.
+    return decoded.contains { !(32...126).contains($0) } ? decoded : nil
+}
+
+private func unlockFromDescriptor(_ encrypted: EncryptedKey, fd: Int32) throws -> PrivateKey {
+    let passphrase = try readPassphrase(from: fd)
+    do {
+        return try encrypted.unlock(passphrase)
+    } catch let failure as Failure where failure.errorDescription == wrongPassphraseMessage {
+        guard let decoded = decodeSecurityHex(passphrase) else { throw failure }
+        return try encrypted.unlock(decoded)
+    }
+}
+
+private func passphraseDescriptor(_ argument: String) throws -> Int32 {
+    guard let fd = Int32(argument), fd >= 0 else {
+        throw Failure("Expected a nonnegative file descriptor for --passphrase-fd")
+    }
+    return fd
+}
+
 private func exclusiveWrite(_ data: Data, to url: URL) throws {
     let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
     guard fd >= 0 else { throw Failure("Could not create \(url.path): \(String(cString: strerror(errno)))") }
@@ -172,7 +227,7 @@ private func generate(_ out: URL) throws {
     print("Save the encrypted file and its passphrase in your password manager.")
 }
 
-private func loadKey(_ url: URL) throws -> PrivateKey {
+private func loadKey(_ url: URL, passphraseFD: Int32?) throws -> PrivateKey {
     let data = try Data(contentsOf: url)
     #if CALA_UPDATE_TEST
     if let test = try? JSONDecoder().decode(TestKey.self, from: data), test.format == "cala-update-testkey-v1" {
@@ -182,6 +237,9 @@ private func loadKey(_ url: URL) throws -> PrivateKey {
     }
     #endif
     let encrypted = try JSONDecoder().decode(EncryptedKey.self, from: data)
+    if let passphraseFD, let key = try? unlockFromDescriptor(encrypted, fd: passphraseFD) {
+        return key
+    }
     let prompt = "Frase de la clave de firma de Cala (\(url.lastPathComponent)) — NO es la contraseña del Mac / Cala signing-key passphrase, not your Mac password: "
     let attempts = 3
     for attempt in 1...attempts {
@@ -315,10 +373,22 @@ private func expectFailure(_ message: String, _ action: () throws -> Void) throw
 private func selftest() throws {
     let key = PrivateKey()
     let publicKey = key.publicKey.rawRepresentation
-    let passphrase = Data("throwaway test passphrase".utf8)
+    let passphrase = Data("frase desechable de verificación ".utf8)
     let encrypted = try EncryptedKey(key: key, passphrase: passphrase)
     let decoded = try JSONDecoder().decode(EncryptedKey.self, from: JSONEncoder().encode(encrypted))
-    let unlocked = try decoded.unlock(passphrase)
+    let pipe = Pipe()
+    let securityHex = passphrase.map { String(format: "%02x", $0) }.joined()
+    try pipe.fileHandleForWriting.write(contentsOf: passphrase + Data("\nsecond line\n\(securityHex)\n".utf8))
+    try pipe.fileHandleForWriting.close()
+    let fd = pipe.fileHandleForReading.fileDescriptor
+    let unlocked = try unlockFromDescriptor(decoded, fd: fd)
+    guard try readPassphrase(from: fd) == Data("second line".utf8) else {
+        throw Failure("Passphrase reader did not stop at the first newline")
+    }
+    guard try unlockFromDescriptor(decoded, fd: fd).rawRepresentation == key.rawRepresentation else {
+        throw Failure("Passphrase reader did not handle security's hex output")
+    }
+    try expectFailure("an empty passphrase descriptor") { _ = try readPassphrase(from: fd) }
     let manifest = Data(#"{"schema":1}"#.utf8)
     let feed = try sign(manifest, with: unlocked)
     guard unlocked.rawRepresentation == key.rawRepresentation,
@@ -341,10 +411,21 @@ private func run(_ args: [String]) throws {
     switch args.first {
     case "generate" where args.count == 3 && args[1] == "--out":
         try generate(url(args[2]))
-    case "sign" where args.count == 7 && args[1] == "--key" && args[3] == "--manifest" && args[5] == "--out":
+    case "sign" where (args.count == 7 || (args.count == 9 && args[7] == "--passphrase-fd"))
+                        && args[1] == "--key" && args[3] == "--manifest" && args[5] == "--out":
         let manifest = try Data(contentsOf: url(args[4]))
         _ = try ReleaseManifest.decode(manifest)
-        try sign(manifest, with: loadKey(url(args[2]))).write(to: url(args[6]), options: .atomic)
+        let fd = args.count == 9 ? try passphraseDescriptor(args[8]) : nil
+        try sign(manifest, with: loadKey(url(args[2]), passphraseFD: fd)).write(to: url(args[6]), options: .atomic)
+    case "check-key" where args.count == 5 && args[1] == "--key" && args[3] == "--passphrase-fd":
+        do {
+            let fd = try passphraseDescriptor(args[4])
+            let encrypted = try JSONDecoder().decode(EncryptedKey.self, from: Data(contentsOf: url(args[2])))
+            _ = try unlockFromDescriptor(encrypted, fd: fd)
+            print("PASS signing key unlock")
+        } catch {
+            throw Failure("FAIL signing key unlock: \(error.localizedDescription)")
+        }
     case "verify" where (args.count == 5 || (args.count == 7 && args[5] == "--dmg"))
                         && args[1] == "--keys" && args[3] == "--feed":
         _ = try verifiedManifest(keys: url(args[2]), feed: url(args[4]), dmg: args.count == 7 ? url(args[6]) : nil)
@@ -359,7 +440,8 @@ private func run(_ args: [String]) throws {
     default:
         throw Failure("""
         Usage: update-sign.swift generate --out FILE
-               update-sign.swift sign --key FILE --manifest M --out FEED
+               update-sign.swift sign --key FILE --manifest M --out FEED [--passphrase-fd FD]
+               update-sign.swift check-key --key FILE --passphrase-fd FD
                update-sign.swift verify --keys KEYS --feed FEED [--dmg D]
                update-sign.swift verify-release --keys KEYS --feed FEED --dmg D --app APP --tag TAG --commit SHA
                update-sign.swift testkey DIR

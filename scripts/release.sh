@@ -12,11 +12,54 @@ for var in ${(k)parameters}; do
 done
 [[ -z "${CALA_QA_REGULAR:-}" ]] || { echo "CALA_QA_REGULAR is for testing builds only" >&2; exit 1; }
 
+run_checks() {
+  for check in ./scripts/check-*.sh; do
+    echo "› running ${check:t}"
+    "$check"
+  done
+  echo "› checks passed"
+}
+
+if [[ "${1:-}" == --checks-only && $# == 1 ]]; then
+  # Isolate checks from ignored output, while letting a dry run test local edits.
+  work=$(mktemp -d "${TMPDIR:-/tmp}/cala-release-checks.XXXXXXXX")
+  trap 'rm -rf "$work"' EXIT
+  git ls-files --cached --others --exclude-standard --deduplicate -z | python3 -c '
+import shutil
+import sys
+from pathlib import Path
+from os import fsdecode
+
+root = Path(sys.argv[1])
+for entry in sys.stdin.buffer.read().split(b"\0"):
+    if not entry:
+        continue
+    source = Path(fsdecode(entry))
+    if not (source.is_file() or source.is_symlink()):
+        continue
+    destination = root / source
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(source, destination, follow_symlinks=False)
+' "$work"
+  (cd "$work" && run_checks)
+  exit 0
+fi
+checked_parent=
+if [[ "${1:-}" == --checked-parent && $# == 3 ]]; then
+  checked_parent=$2
+  shift 2
+fi
 if (( $# > 1 )); then
-  echo "Usage: $0 [commit]" >&2
+  echo "Usage: $0 [commit] | --checks-only | --checked-parent <sha> <commit>" >&2
   exit 1
 fi
 commit=$(git rev-parse --verify --end-of-options "${1:-HEAD}^{commit}")
+if [[ -n "$checked_parent" ]]; then
+  # ship.sh checks the parent before committing the version bump.
+  [[ "$(git rev-list --parents -n 1 "$commit")" == "$commit $checked_parent" ]] &&
+    git diff --quiet "$checked_parent" "$commit" -- . ':(exclude)VERSION' ||
+    { echo "The release commit must change only VERSION since the checked parent." >&2; exit 1; }
+fi
 output=${CALA_BUILD_DIR:-build}
 output=${output:a}
 work=$(mktemp -d "${TMPDIR:-/tmp}/cala-release.XXXXXXXX")
@@ -75,11 +118,9 @@ export CALA_SIGN_IDENTITY=${CALA_SIGN_IDENTITY:--}
 [[ "$CALA_SIGN_IDENTITY" == "-" ]] && { echo "› free release: ad-hoc signed"; CALA_SKIP_NOTARIZE=1; }
 [[ -n "${CALA_SENTRY_DSN:-}" ]] || echo "warning: CALA_SENTRY_DSN is not set; 'Report a problem' will be off in this build" >&2
 
-for check in ./scripts/check-*.sh; do
-  echo "› running ${check:t}"
-  "$check"
-done
-echo "› checks passed"
+if [[ -z "$checked_parent" ]]; then
+  run_checks
+fi
 ./build.sh
 APP="$BUILD_DIR/Cala.app"
 codesign --verify --deep --strict --verbose=2 "$APP"
@@ -146,7 +187,16 @@ manifest = {
 output.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
 PY
 signer=(swift -module-cache-path "$work/modules" scripts/update-sign.swift)
-"${signer[@]}" sign --key "$key" --manifest "$work/manifest.json" --out "$work/latest.json"
+needs_passphrase=0
+if /usr/bin/security find-generic-password -s local.cala.update-signing -a update-signing-key.json -w 2>/dev/null |
+  "${signer[@]}" sign --key "$key" --manifest "$work/manifest.json" --out "$work/latest.json" --passphrase-fd 0; then
+  :
+else
+  # A missing item sends EOF to the signer, which prompts on the controlling terminal.
+  signing_status=${pipestatus[2]}
+  (( signing_status == 0 )) || exit "$signing_status"
+  needs_passphrase=1
+fi
 "${signer[@]}" verify --keys "$keys" --feed "$work/latest.json" --dmg "$DMG"
 mkdir "$mount"
 hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mount" "$DMG"
@@ -160,3 +210,11 @@ rm -rf "$output/Cala.app"
 ditto "$APP" "$output/Cala.app"
 cp "$DMG" "$DMG.sha256" "$work/latest.json" "$output/"
 echo "Release lista en $output (commit $commit, tag v$CALA_VERSION)"
+echo "CALA_RELEASE_COMMIT=$commit"
+if (( needs_passphrase )); then
+  if [[ -n "$checked_parent" ]]; then
+    print 'CALA_RELEASE_NEEDS_PASSPHRASE=1'
+  else
+    print 'Guarda la frase una vez con ./scripts/ship.sh --save-passphrase / Save the passphrase once with ./scripts/ship.sh --save-passphrase'
+  fi
+fi

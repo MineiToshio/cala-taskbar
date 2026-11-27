@@ -2,7 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-out=$(mktemp -d "${TMPDIR:-/tmp}/cala-update-check.XXXXXXXX")
+# Foundation and libproc can report different paths for the per-user temp directory.
+# The frozen-process fixture needs both to agree on the executable path.
+out=$(mktemp -d "/private/tmp/cala-update-check.XXXXXXXX")
 trap 'rm -rf "$out"' EXIT
 signer=scripts/update-sign.swift
 helper=Sources/CalaUpdateHelper/main.swift

@@ -2,7 +2,7 @@
 # Developer install: publish a complete bundle in /Applications, then open it in this session.
 set -euo pipefail
 if (( EUID == 0 )); then
-  print -u2 'Run ./install.sh as your user. It will ask for sudo itself.'
+  print -u2 'Run ./install.sh as your user. It will ask for sudo when needed.'
   print -u2 'Ejecuta ./install.sh con tu usuario. El instalador pedirá sudo cuando corresponda.'
   exit 1
 fi
@@ -30,50 +30,95 @@ if [[ -z "${CALA_BUILD_NUMBER:-}" ]]; then
 fi
 ./build.sh
 
+can_publish_as_user() {
+  local group groups account_groups denied
+  local -a group_tests
+  account_groups=$(/usr/bin/id -Gn) || return 1
+  [[ " $account_groups " == *' admin '* && -w "$DEST_DIR" && -x "$DEST_DIR" ]] || return 1
+  if [[ ! -e "$DEST" && ! -L "$DEST" ]]; then return 0; fi
+  [[ -d "$DEST" && ! -L "$DEST" ]] || return 1
+
+  groups=$(/usr/bin/id -G) || return 1
+  for group in ${=groups}; do group_tests+=(-group "$group" -o); done
+  denied=$(/usr/bin/find "$DEST" ! \( -user "$uid" -o \( -perm -0020 \( "${group_tests[@]}" -false \) \) \) -print -quit) ||
+    return 1
+  [[ -z "$denied" ]] || return 1
+  # Removing the exchanged bundle requires traversing and writing its directories.
+  denied=$(/usr/bin/find "$DEST" -flags +uchg,schg,uappnd,sappnd -print -quit -o -type d -exec /bin/zsh -f -c '
+    for entry; do [[ -r "$entry" && -w "$entry" && -x "$entry" ]] || print -r -- "$entry"; done
+  ' zsh {} +) || return 1
+  [[ -z "$denied" ]]
+}
+
 # Validate the staged copy before publishing it. Both names are on the same volume, so
 # renameatx_np can atomically exchange two populated directories (or install a new name exclusively).
 publish() {
-  /usr/bin/sudo /bin/zsh -f -s -- "$SRC" "$DEST" <<'PUBLISH'
+  local -a publisher=(/bin/zsh -f -s --)
+  if ! can_publish_as_user; then
+    print "Administrator access needed for $DEST. / Se requieren permisos de administrador para $DEST."
+    publisher=(/usr/bin/sudo "${publisher[@]}")
+  fi
+  "${publisher[@]}" "$SRC" "$DEST" <<'PUBLISH'
 set -euo pipefail
 src=$1
 dest=$2
-owner=${SUDO_USER:?Missing invoking user}
 dir=${dest:h}
-parent=/private/var/root
-for path in /private /private/var "$parent"; do
-  if [[ ! -d "$path" || -L "$path" || ! -O "$path" ]] ||
-     (( 8#$(/usr/bin/stat -f %Lp "$path") & 8#022 )); then
-    print -u2 "Unsafe staging parent: $path. / Directorio temporal inseguro: $path."
+if (( EUID == 0 )); then
+  owner=${SUDO_USER:?Missing invoking user}
+  parent=/private/var/root
+  for parent_dir in /private /private/var "$parent"; do
+    if [[ ! -d "$parent_dir" || -L "$parent_dir" || ! -O "$parent_dir" ]] ||
+       (( 8#$(/usr/bin/stat -f %Lp "$parent_dir") & 8#022 )); then
+      print -u2 "Unsafe staging parent: $parent_dir. / Directorio temporal inseguro: $parent_dir."
+      exit 1
+    fi
+  done
+  if [[ "$(/usr/bin/stat -f %d "$parent")" != "$(/usr/bin/stat -f %d "$dir")" ]]; then
+    print -u2 "Staging and $dir must share a volume. / El directorio temporal y $dir deben estar en el mismo volumen."
     exit 1
   fi
-done
-if [[ "$(/usr/bin/stat -f %d "$parent")" != "$(/usr/bin/stat -f %d "$dir")" ]]; then
-  print -u2 "Staging and $dir must share a volume. / El directorio temporal y $dir deben estar en el mismo volumen."
-  exit 1
+else
+  parent=$(/usr/bin/getconf DARWIN_USER_TEMP_DIR) || parent=
+  parent=${parent%/}
+  if [[ ! -d "$parent" || -L "$parent" || ! -O "$parent" ]] ||
+     (( 8#$(/usr/bin/stat -f %Lp "$parent") & 8#022 )) ||
+     [[ "$(/usr/bin/stat -f %d "$parent")" != "$(/usr/bin/stat -f %d "$dir")" ]]; then
+    parent=$dir
+  fi
 fi
 zmodload zsh/stat
 zmodload zsh/system
-stage=$(/usr/bin/mktemp -d "$parent/.cala-install.XXXXXXXX")
-staged="$stage/Cala.app"
-incoming_identity=
-validated_identity=
-swap_attempted=0
 identity() {
   local -A info
   zstat -LH info -- "$1" || return
   print -r -- "$info[device]:$info[inode]"
 }
+stage=$(/usr/bin/mktemp -d "$parent/.cala-install.XXXXXXXX")
+stage_identity=$(identity "$stage")
+# Use the pinned working directory for the copy, exchange and cleanup.
+cd -P -- "$stage"
+if [[ ! -O . || "$(identity .)" != "$stage_identity" ]] ||
+   (( 8#$(/usr/bin/stat -f %Lp .) & 8#077 )); then
+  print -u2 "Unsafe staging directory: $stage. / Directorio temporal inseguro: $stage."
+  exit 1
+fi
+staged=./Cala.app
+incoming_identity=
+validated_identity=
+swap_attempted=0
 cleanup() {
   if (( swap_attempted )) && [[ -e "$staged" || -L "$staged" ]]; then
     local moved_identity
     moved_identity=$(identity "$staged") || moved_identity=
     if [[ -z "$moved_identity" || ( "$moved_identity" != "$validated_identity" &&
                                    "$moved_identity" != "$incoming_identity" ) ]]; then
-      print -u2 "Unexpected bundle preserved at $staged. / Se conservó el paquete inesperado en $staged."
+      print -u2 "Unexpected bundle preserved at $stage/Cala.app. / Se conservó el paquete inesperado en $stage/Cala.app."
       return 1
     fi
   fi
-  /bin/rm -rf "$stage"
+  /bin/rm -rf "$staged" || return 1
+  [[ "$(identity "$stage" 2>/dev/null)" == "$stage_identity" ]] || return 1
+  /bin/rmdir "$stage"
 }
 trap 'cleanup || exit 1' EXIT
 /usr/bin/ditto --noacl "$src" "$staged"
@@ -83,7 +128,11 @@ if [[ ! -d "$staged" || -n "$unusual" ]]; then
   exit 1
 fi
 /bin/chmod -RN "$staged"
-/usr/sbin/chown -Rh "${owner}:admin" "$staged"
+if (( EUID == 0 )); then
+  /usr/sbin/chown -Rh "${owner}:admin" "$staged"
+else
+  /usr/bin/chgrp -Rh admin "$staged"
+fi
 /bin/chmod -R u-s,g-s,u+rwX,g+rwX,o-w "$staged"
 /usr/bin/codesign --verify --deep --strict "$staged"
 
@@ -115,7 +164,7 @@ else
 fi
 incoming_identity=$(identity "$staged")
 swap_attempted=1
-/usr/bin/ruby --disable-gems -rfiddle/import - "$stage" "$dir" "$flags" <<'RUBY'
+/usr/bin/ruby --disable-gems -rfiddle/import - . "$dir" "$flags" <<'RUBY'
 module Darwin
   extend Fiddle::Importer
   dlload Fiddle::Handle::DEFAULT
@@ -136,7 +185,6 @@ PUBLISH
 }
 
 # Publish while Cala is still running, so a failed copy or cancelled password prompt leaves it alone.
-print "Administrator access needed for $DEST. / Se requieren permisos de administrador para $DEST."
 publish
 
 # Keep the old bundle available until the new one has opened.

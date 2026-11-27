@@ -18,34 +18,43 @@ Copia únicamente la línea de clave pública que imprime el comando a `packagin
 
 Para tener una clave de recuperación, ejecuta el mismo comando con `--out ~/Desktop/update-recovery-key.json`, agrega su clave pública en la segunda línea y guarda el archivo cifrado y su frase en el gestor. Elimina la copia del Escritorio. Si pierdes la clave principal, firma la próxima versión con una copia de la clave de recuperación en `~/.config/cala/update-signing-key.json`. Esa versión lleva la clave pública de recuperación y la nueva clave pública principal. Después puedes firmar con la nueva principal y rotar también la de recuperación.
 
-### Preparar y publicar el borrador
+### Configurar otra Mac
 
-Usa una versión numérica mayor al último tag `vX.Y.Z`. Prepara las dos [notas de release](releases/README.md) y haz commit de la versión y las notas antes de compilar.
-
-```bash
-echo 1.1.0 > VERSION
-git add VERSION docs/releases/1.1.0.{en,es}.md
-git commit -m "Version 1.1.0"
-./scripts/release.sh
-git push
-git tag v1.1.0
-./scripts/publish-github.sh --dry-run v1.1.0
-git push origin tag v1.1.0
-./scripts/publish-github.sh v1.1.0
-```
-
-`release.sh [commit]` compila siempre en un checkout temporal del commit elegido (HEAD por defecto). Pide la frase de la clave en la Terminal y produce `build/Cala-1.1.0.dmg`, su `.sha256` y `build/latest.json`. El manifiesto firmado requiere el SHA completo del commit en el campo `commit`. Crea el tag en el commit que imprime el script, después del build. Si compilaste un commit distinto de HEAD, pásalo a `git tag v1.1.0 <commit>`.
-
-`publish-github.sh` toma la versión, las claves y las notas del commit del tag. Verifica que el SHA del manifiesto firmado coincida con el commit del tag. También verifica la firma del feed, el tamaño y el SHA-256 de una copia privada del DMG. Monta esa copia en solo lectura y comprueba que la versión coincida con el tag y el manifiesto, que el build coincida con el manifiesto y que la app lleve las claves comprometidas y la URL de producción. Rechaza los ajustes de prueba. `--dry-run` hace estas mismas comprobaciones locales. Al publicar, el script exige que el tag de GitHub apunte al mismo commit y sube los tres archivos verificados a un borrador con las notas en ambos idiomas.
-
-Abre el borrador con `gh release view v1.1.0 --web`, revísalo y pulsa **Publish release**. Ese paso activa la distribución para los usuarios que ya tienen el actualizador. Desde una máquina sin sesión iniciada en GitHub, descarga y verifica el feed publicado.
+Crea el directorio con modo 700 y copia `update-signing-key.json` desde tu gestor de contraseñas a `~/.config/cala/update-signing-key.json`. Desde la raíz del repositorio, deja el archivo con modo 600 y guarda la frase una vez en el Llavero.
 
 ```bash
-feed=$(mktemp)
-curl -fsSL https://github.com/MineiToshio/cala-taskbar/releases/latest/download/latest.json -o "$feed" &&
-  swift scripts/update-sign.swift verify --keys packaging/update-public-keys --feed "$feed"
-rm -f "$feed"
+mkdir -p -m 700 ~/.config/cala
+# Copia aquí el archivo desde tu gestor de contraseñas.
+chmod 600 ~/.config/cala/update-signing-key.json
+./scripts/ship.sh --save-passphrase
 ```
+
+Pega la frase de firma de Cala en los dos avisos de `security`. El comando la guarda en el Llavero de inicio de sesión, que es el predeterminado en macOS, y comprueba que abre el archivo cifrado. Si la comprobación falla, borra el registro. En cada publicación, `/usr/bin/security` lee la frase y la entrega al firmante por una tubería. Si falta el registro o la frase guardada no abre la clave, el firmante pide la frase en la Terminal.
+
+Inicia sesión en GitHub con `gh auth login` si es la primera vez.
+
+Para borrar el registro guardado, por ejemplo al rotar la clave, ejecuta:
+
+```bash
+./scripts/ship.sh --forget-passphrase
+```
+
+### Publicar e instalar
+
+Escribe las dos [notas de release](releases/README.md) de la próxima versión y haz commit de ambas junto con el cambio en `main`. Por ejemplo, para la versión 1.0.1 escribe `docs/releases/1.0.1.en.md` y `docs/releases/1.0.1.es.md`. Mantén ambas breves, en lenguaje sencillo y centradas en los cambios para el usuario.
+
+```bash
+./scripts/ship.sh --dry-run
+./scripts/ship.sh
+```
+
+El incremento por defecto es `patch`. Puedes indicar `minor`, `major` o una versión explícita como `1.2.0`. La simulación ejecuta los checks en una copia temporal y muestra el plan sin crear el commit, publicar ni instalar. Admite cambios locales para poder probar el flujo antes de hacer commit.
+
+`ship.sh` exige `main` limpio para publicar. Comprueba los correos de autor y committer del historial, ejecuta los checks y exige las notas en ambos idiomas. Luego crea el commit `Release <versión>` y sube `main` por HTTPS usando la sesión de `gh`.
+
+`release.sh [commit]` compila en un checkout temporal del commit elegido (HEAD por defecto) y genera el DMG, su `.sha256` y `build/latest.json` firmado con el SHA completo del commit. `ship.sh` crea y sube el tag de ese commit. `publish-github.sh` monta y verifica una copia privada del DMG, comprueba el manifiesto y el tag, y sube los archivos y las notas a un borrador. `ship.sh` publica el borrador como la última versión, descarga el manifiesto desde la URL pública sin autenticación, verifica su firma y ejecuta `./install.sh`.
+
+Si falla un paso después del commit, revisa el commit, el tag y la publicación en GitHub antes de continuar desde el paso que falló.
 
 Cala 1.0.0 se actualiza a mano una vez para instalar la primera versión que incluye el actualizador.
 
@@ -113,22 +122,17 @@ Comprobado en la máquina de desarrollo: `spctl` rechaza el build ad-hoc y su DM
 ### Cada release firmado
 
 ```bash
-# 1. Sube la versión y prepara las notas como en el flujo gratuito
-echo 1.1.0 > VERSION
-git add VERSION docs/releases/1.1.0.{en,es}.md
-git commit -m "Version 1.1.0"
-
-# 2. Variables (ponlas en tu shell o en un archivo que NO esté en el repo)
+# Variables (ponlas en tu shell o en un archivo fuera del repo)
 export CALA_SIGN_IDENTITY="Developer ID Application: Tu Nombre (TEAMID)"
 export CALA_NOTARY_PROFILE=cala-notary
 export CALA_BUNDLE_ID=com.tudominio.cala      # el que decidiste
 export CALA_SENTRY_DSN="https://…@….ingest.sentry.io/…"   # opcional
 
-# 3. Build universal, notarización, DMG, SHA-256 y feed firmado
-./scripts/release.sh
+# Publica e instala desde main, con las notas ya comprometidas
+./scripts/ship.sh minor
 ```
 
-El resultado incluye el DMG notarizado, su `.sha256` y `latest.json`. Sube el borrador con `./scripts/publish-github.sh` y sigue la misma verificación pública del feed.
+La publicación incluye el DMG notarizado, su `.sha256` y `latest.json`.
 
 Para probar la firma antes de tener las credenciales de notarización:
 ```bash
@@ -137,7 +141,7 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 
 #### Qué comprueba `release.sh`
 
-- Ejecuta todos los `scripts/check-*.sh` antes del build y se detiene si falla alguno. El [inventario de checks](architecture.md#automated-checks) incluye `scripts/check-settings.sh` y `scripts/check-statusline.sh`. El checkout temporal contiene solo los archivos del commit, incluidos el código, la versión, las claves y las notas.
+- Ejecuta todos los `scripts/check-*.sh` antes del build y se detiene si falla alguno. Con `ship.sh`, los mismos checks se ejecutan antes del commit de versión y el build comprueba que el commit solo modificó `VERSION`. El checkout temporal contiene solo los archivos del commit, incluidos el código, la versión, las claves y las notas. [Inventario de checks](architecture.md#automated-checks)
 - Vía `build.sh`: que el ayudante del Llavero sea el del repo (SHA-256 y, en ad-hoc, cdhash) y que bundle id, identificadores de firma y Team ID cuadren.
 - Que la firma sea válida y que las entitlements estén puestas (`packaging/Cala.entitlements`: Apple Events para Finder, Calendario y Ubicación; nada más).
 - Que notarytool devuelva *Accepted*. Si no, imprime el `id` para pedir el log con `xcrun notarytool log <id> --keychain-profile cala-notary`.
@@ -168,6 +172,8 @@ CALA_SKIP_NOTARIZE=1 ./scripts/release.sh
 
 ## Desarrollo local
 
-`./install.sh` compila (ad-hoc) y pide sudo. Prepara el bundle en un directorio privado de root en el mismo volumen que `/Applications`. Ahí asigna el dueño que invocó sudo y el grupo `admin` con permiso de escritura. Publica con un intercambio atómico, que también permite reemplazar la copia antigua de root, y abre Cala en la sesión que ejecuta el instalador. Las sesiones que ya usan la copia compartida detectan una compilación más nueva y se reinician cuando pueden hacerlo. Véase [setup.md](setup.md#other-user-profiles). El build ad-hoc fija el *designated requirement* al bundle id, así macOS conserva los permisos entre recompilaciones. Un build firmado con Developer ID tiene otro requisito, así que la primera vez que pases de uno a otro macOS vuelve a pedir los permisos (y el aviso del Llavero de Correo, una vez por cuenta).
+`./install.sh` compila y usa un directorio privado del mismo volumen que `/Applications` para intercambiar el bundle de forma atómica. Instala sin sudo cuando el usuario tiene acceso suficiente a `/Applications` y al bundle anterior. Si encuentra una copia antigua sin permisos de escritura, pide sudo. La copia nueva queda a nombre del usuario, con grupo `admin` y escritura para el grupo, y Cala se abre en la sesión que ejecutó el instalador. Las otras sesiones detectan el build nuevo y se reinician cuando pueden hacerlo. [Configuración de otras cuentas](setup.md#other-user-profiles)
+
+El build ad-hoc fija el *designated requirement* al bundle id, así macOS conserva los permisos entre recompilaciones. Un build firmado con Developer ID tiene otro requisito, así que la primera vez que pases de uno a otro macOS vuelve a pedir los permisos (y el aviso del Llavero de Correo, una vez por cuenta).
 
 Para la [prueba integral del actualizador](updates.md#11-end-to-end-plan-the-fixture-ladder), `swift scripts/update-sign.swift testkey "$T/keys"` genera un par desechable y `scripts/make-update-fixture.sh --out "$T/f2" --version 0.0.2 --build 2 --keys "$T/keys"` prepara el DMG y el feed para el servidor local. Usa un `$T` temporal fuera del repositorio y bórralo al terminar. El firmante de producción solo acepta claves cifradas.

@@ -2,14 +2,14 @@
 
 ## Install every change
 
-Every change to the app ends installed, with no need to ask:
+Every change to the app ends published on GitHub and installed, with no need to ask.
 
 1. Build passes and the `scripts/check-*.sh` checks pass.
-2. Commit the change.
-3. Run `./install.sh` from the repo root. It builds, publishes `/Applications/Cala.app` and relaunches it. It asks for sudo, so run it in the owner's Terminal panel (never type the password yourself) and wait until it finishes.
-4. Tell the owner the new build is installed, or what failed.
+2. Write `docs/releases/<version>.en.md` and `docs/releases/<version>.es.md` and commit them with the change. Keep both sets of notes short, user-facing and in plain language.
+3. Run `./scripts/ship.sh` from the repo root in the owner's Terminal panel and wait for it to finish. It verifies the signed public GitHub release, installs Cala and relaunches it. After setup, shipping normally needs no password. If prompted, let the owner type it.
+4. Tell the owner the version published and installed, or which step failed.
 
-This applies to every change to the app, whoever makes it. Docs-only changes do not need an install.
+This applies to every change to the app, whoever makes it. Docs-only changes need neither ship nor install.
 
 Exceptions:
-- Parallel workers or subagents never install or launch Cala themselves; only the main session installs, once their work is merged. Never open `build/Cala.app` directly: a second instance, killed afterwards, deletes the Dock autohide delay.
+- Only the main session ships, installs or launches Cala, after merging any parallel workers' or subagents' changes. Never open `build/Cala.app` directly: a second instance, killed afterwards, deletes the Dock autohide delay.
