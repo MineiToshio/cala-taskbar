@@ -33,7 +33,9 @@ struct UsagePaceHistory {
         }
     }
 
+    // Legacy display data has no account or reset anchor and never enters forecast history.
     mutating func restore(_ raw: [String: [[Double]]], now: Date) {
+        samples.removeAll()
         for (key, rows) in raw where Self.hasStableScope(key) {
             let list = rows.compactMap { row -> (date: Date, used: Double)? in
                 guard row.count == 2, row[0].isFinite, row[1].isFinite else { return nil }
@@ -41,7 +43,7 @@ struct UsagePaceHistory {
                 return date <= now.addingTimeInterval(5) && now.timeIntervalSince(date) <= 43_200
                     ? (date, min(100, max(0, row[1]))) : nil
             }.sorted { $0.date < $1.date }
-            if !list.isEmpty { samples[key] = list }
+            if !list.isEmpty { samples[key] = Array(list.suffix(600)) }
         }
     }
 

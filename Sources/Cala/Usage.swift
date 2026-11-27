@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Combine
 import CoreServices
@@ -212,6 +213,12 @@ final class UsageFileWatcher {
     deinit { source?.cancel() }
 }
 
+enum UsageQuotaEvent {
+    case observations([QuotaObservation])
+    case discontinuity
+    case importUpdated
+}
+
 final class UsageService: ObservableObject {
     static let shared = UsageService()
     @Published private(set) var providers = UsageProvider.allCases.map { UsageState(provider: $0) }
@@ -242,7 +249,7 @@ final class UsageService: ObservableObject {
     private var lastCredentialCheck = Date.distantPast
     private var lastAttempt: [UsageProvider: Date] = [:]
     private var consumedResets = Set<String>()
-    private var visible = false, alwaysVisible = false
+    private var visible = false
     // These two are accessed only by the main-thread visibility hook.
     private var mainVisible = false, mainAlwaysVisible = false
     private var mainRun: ModuleCancellation?
@@ -251,6 +258,27 @@ final class UsageService: ObservableObject {
     private var active = Set<UsageProvider>()
     private var refreshAfterDetection = false
     private let support = AppPaths.supportDirectory
+    private let quotaHistory = UsageQuotaHistory(directory: AppPaths.supportDirectory.appendingPathComponent("usage-forecast-v1"),
+                                                report: { log($0) })
+    private var quotaLogins: [UsageProvider: QuotaLogin] = [:]
+    private var quotaAccounts: [UsageProvider: QuotaAccount] = [:]
+    private var quotaLocalSince: [UsageProvider: Date] = [:]
+    private var quotaWakeObservers: [NSObjectProtocol] = []
+    private var asleep = false
+    private var lastQuotaWake = Date.distantPast
+    private var quotaEpoch = 0
+    private var quotaContext: [UsageProvider: Set<QuotaSeries>] = [:]
+    private struct BackfillJob {
+        let key: QuotaImportKey
+        let cancel: ModuleCancellation
+        let scanner: UsageCodexBackfill
+    }
+    private var backfill: BackfillJob?
+    private let quotaFeed = PassthroughSubject<UsageQuotaEvent, Never>()
+    var quotaEvents: AnyPublisher<UsageQuotaEvent, Never> { quotaFeed.eraseToAnyPublisher() }
+
+    /// The next wave can take an immutable history snapshot from its forecast worker.
+    func quotaHistorySnapshot() -> QuotaHistorySnapshot { quotaHistory.snapshot() }
 
     private func index(_ p: UsageProvider) -> Int { p == .claude ? 0 : 1 }
     private func publish() {
@@ -274,6 +302,12 @@ final class UsageService: ObservableObject {
         guard mainRun == nil else { return }
         let run = ModuleCancellation()
         mainRun = run
+        let workspace = NSWorkspace.shared.notificationCenter
+        quotaWakeObservers = [NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification].map { name in
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.workspacePowerChanged(asleep: name == NSWorkspace.willSleepNotification, run: run)
+            }
+        }
         let alwaysVisible = !store.config.autoHide
         mainVisible = visible; mainAlwaysVisible = alwaysVisible
         resourceQueue.sync {
@@ -290,7 +324,8 @@ final class UsageService: ObservableObject {
         queue.async {
             guard !run.isCancelled else { return }
             self.run = run
-            self.visible = visible; self.alwaysVisible = alwaysVisible
+            self.asleep = false
+            self.visible = visible
             self.lastDetection = .distantPast
         }
         subscription = store.$config.removeDuplicates().sink { [weak self] config in
@@ -305,6 +340,10 @@ final class UsageService: ObservableObject {
         guard let run = mainRun else { return }
         mainRun = nil
         run.cancel()
+        for observer in quotaWakeObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        quotaWakeObservers.removeAll()
+        quotaHistory.breakCoverage(at: Date(), allowsQuiet: true, flush: true)
+        quotaFeed.send(.discontinuity)
         subscription?.cancel()
         subscription = nil
         resourceQueue.sync {
@@ -325,7 +364,8 @@ final class UsageService: ObservableObject {
         queue.async {
             guard self.run === run else { return }
             self.run = nil
-            self.visible = false; self.alwaysVisible = false
+            self.cancelBackfill()
+            self.visible = false
             self.nextPeriodic = .distantPast
             for provider in self.active {
                 self.lastAttempt[provider] = nil
@@ -380,7 +420,8 @@ final class UsageService: ObservableObject {
     func refresh(_ provider: UsageProvider? = nil, force: Bool = false) {
         guard let run = mainRun else { return }
         queue.async {
-            guard !run.isCancelled else { return }
+            guard !run.isCancelled, !self.asleep else { return }
+            if provider == nil && !force && Date().timeIntervalSince(self.lastQuotaWake) < 1 { return }
             self.detect(force: false)
             for p in provider.map({ [$0] }) ?? UsageProvider.allCases { self.fetch(p, force: force) }
         }
@@ -391,7 +432,7 @@ final class UsageService: ObservableObject {
         mainVisible = visible; mainAlwaysVisible = alwaysVisible
         queue.async {
             guard !run.isCancelled else { return }
-            self.visible = visible; self.alwaysVisible = alwaysVisible
+            self.visible = visible
             if revealed { for p in UsageProvider.allCases { self.fetch(p, force: false) } }
         }
     }
@@ -418,6 +459,10 @@ final class UsageService: ObservableObject {
         }
         if !first && !changedProviders.isEmpty {
             for p in changedProviders {
+                if let old = quotaLogins.removeValue(forKey: p) { quotaHistory.deactivate(old, at: Date()) }
+                quotaLocalSince[p] = Date()
+                quotaContext[p] = nil
+                if p == .codex { cancelBackfill() }
                 let i = index(p), cooldown = states[index(p)].cooldownUntil
                 generations[p] = (generations[p] ?? 0) + 1
                 states[i] = UsageState(provider: p)
@@ -487,6 +532,9 @@ final class UsageService: ObservableObject {
         states[1].signedIn = auth
         states[1].detection = auth ? tx("Detected, signed in", "Detectado, con sesión iniciada") : (executable != nil ? tx("Found but not signed in — open Codex and sign in with ChatGPT", "Encontrado, pero sin sesión: abre Codex e inicia sesión con ChatGPT") : tx("Codex not found — install Codex CLI or app and sign in with ChatGPT", "No se encontró Codex: instala la CLI o la app e inicia sesión con ChatGPT"))
         if !states[1].enabled { states[1].detection = tx("Usage disabled", "Uso desactivado") }
+        for provider in UsageProvider.allCases {
+            updateQuotaLogin(provider, signedIn: states[index(provider)].signedIn)
+        }
         let codexPath = UsageWatcher.resolvedPath(codexHome + "/sessions")
         let claudePath = states[0].enabled && config.usageClaudeStatusLine == true
             ? support.appendingPathComponent("claude-usage.json").path : nil
@@ -568,14 +616,13 @@ final class UsageService: ObservableObject {
         return candidates.first { !$0.isEmpty && fm.isExecutableFile(atPath: $0) }
     }
     private func maintenance() {
-        guard let run, !run.isCancelled else { return }
+        guard let run, !run.isCancelled, !asleep else { return }
         resourceQueue.async { [weak self] in
             if !run.isCancelled { self?.claudeWatcher?.refresh() }
         }
         detect(force: false)
-        guard visible else { return }
         let now = Date()
-        for state in states where state.available {
+        for state in states where visible && state.available {
             for w in state.reading?.windows ?? [] where w.isResetting(now) {
                 let key = state.id + w.id + String(w.resetsAt?.timeIntervalSince1970 ?? 0)
                 if !consumedResets.contains(key), canFetch(state.provider, force: false) {
@@ -583,14 +630,14 @@ final class UsageService: ObservableObject {
                 }
             }
         }
-        if alwaysVisible && now >= nextPeriodic {
+        if config.usageEnabled && now >= nextPeriodic {
             nextPeriodic = now.addingTimeInterval(900 + Double.random(in: 0...90))
-            for p in UsageProvider.allCases { fetch(p, force: false) }
+            for p in UsageProvider.allCases { fetch(p, force: false, scheduled: true) }
         }
     }
     private func canFetch(_ p: UsageProvider, force: Bool) -> Bool {
         let s = states[index(p)], now = Date()
-        guard s.available, !s.fetching, !active.contains(p), (s.cooldownUntil ?? .distantPast) <= now else { return false }
+        guard !asleep, s.available, !s.fetching, !active.contains(p), (s.cooldownUntil ?? .distantPast) <= now else { return false }
         if p == .claude, let blockedClaudeStamp, blockedClaudeStamp == knownClaudeStamp { return false }
         if force {
             return (errorCounts[p] ?? 0) == 0 || now.timeIntervalSince(lastAttempt[p] ?? .distantPast) >= 15
@@ -599,8 +646,9 @@ final class UsageService: ObservableObject {
         return (retryNotBefore[p] ?? .distantPast) <= now && now.timeIntervalSince(sourceDate ?? .distantPast) >= p.interval && now.timeIntervalSince(lastAttempt[p] ?? .distantPast) >= p.interval
     }
     private static func failureDelay(_ count: Int) -> TimeInterval { min(1800, 120 * pow(2, Double(max(0, min(count, 4))))) }
-    private func recordOutcome(_ result: FetchResult, provider p: UsageProvider) {
+    private func recordOutcome(_ result: FetchResult, provider p: UsageProvider, captureQuota: Bool, scheduled: Bool) {
         let i = index(p)
+        if result.skipped { return }
         if result.status == 429 {
             let count = failures[p] ?? 0
             let delay = min(1800, max(60, result.retryAfter, 60 * pow(2, Double(min(count, 5)))))
@@ -609,12 +657,12 @@ final class UsageService: ObservableObject {
             failures[p] = 0; states[i].cooldownUntil = nil
             errorCounts[p] = 0; retryNotBefore[p] = nil
             if p == .claude { blockedClaudeStamp = nil }
-            accept(reading, provider: p)
+            accept(reading, provider: p, source: captureQuota ? .api : nil)
         } else {
             let count = errorCounts[p] ?? 0
             retryNotBefore[p] = Date().addingTimeInterval(Self.failureDelay(count))
             errorCounts[p] = min(30, count + 1)
-            if p == .claude && result.expired {
+            if p == .claude && result.expired && !scheduled {
                 knownClaudeStamp = result.credentialStamp ?? CredentialStamp()
                 blockedClaudeStamp = knownClaudeStamp
             }
@@ -628,14 +676,17 @@ final class UsageService: ObservableObject {
         var retryAfter: TimeInterval = 0
         var expired = false
         var credentialStamp: CredentialStamp?
+        var skipped = false
     }
-    private func fetch(_ p: UsageProvider, force: Bool) {
-        guard let run, !run.isCancelled else { return }
+    private func fetch(_ p: UsageProvider, force: Bool, scheduled: Bool = false) {
+        guard let run, !run.isCancelled, !asleep else { return }
+        if scheduled, p == .claude, knownClaudeStamp?.expiresAt.map({ $0 / 1_000 <= Date().timeIntervalSince1970 }) == true { return }
         if p == .claude, states[0].available, blockedClaudeStamp != nil, !active.contains(p), Date().timeIntervalSince(lastCredentialCheck) >= 15 {
             observeCredential(Self.readClaudeCredential(directory: claudeDir, services: services, cancel: run))
         }
         guard !run.isCancelled, canFetch(p, force: force) else { return }
         let i = index(p), started = Date(), currentGeneration = generations[p] ?? 0
+        let login = quotaLogins[p], epoch = quotaEpoch
         active.insert(p)
         states[i].fetching = true; lastAttempt[p] = started; publish()
         // Capture paths on the service queue. The independent worker never touches mutable service state.
@@ -647,8 +698,10 @@ final class UsageService: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             let result: FetchResult
             if p == .claude {
-                let renew: (() -> Void)? = claudeExe.map { exe in { Self.renewClaudeCredential(executable: exe, environment: processEnvironment, cancel: run) } }
-                result = Self.fetchClaude(directory: dir, services: keychainServices, cancel: run, renew: renew)
+                let renew: (() -> Void)? = scheduled ? nil : claudeExe.map { exe in
+                    { Self.renewClaudeCredential(executable: exe, environment: processEnvironment, cancel: run) }
+                }
+                result = Self.fetchClaude(directory: dir, services: keychainServices, cancel: run, renew: renew, scheduled: scheduled)
             }
             else { result = Self.fetchCodex(home: home, executable: exe, environment: processEnvironment, cancel: run) }
             self.queue.async {
@@ -656,8 +709,15 @@ final class UsageService: ObservableObject {
                 self.active.remove(p)
                 self.states[i].fetching = false
                 guard currentGeneration == (self.generations[p] ?? 0) else { self.publish(); self.fetch(p, force: false); return }
+                if result.skipped {
+                    self.lastAttempt[p] = nil
+                    self.publish()
+                    return
+                }
+                if result.reading != nil { self.updateQuotaLogin(p, signedIn: self.states[i].signedIn) }
                 self.states[i].error = result.error
-                self.recordOutcome(result, provider: p)
+                self.recordOutcome(result, provider: p, captureQuota: login?.profile == self.quotaLogins[p]?.profile
+                                   && epoch == self.quotaEpoch && !self.asleep, scheduled: scheduled)
                 if result.expired { self.states[i].detection = p == .claude ? tx("Session expired — open Claude Code to refresh", "Sesión caducada: abre Claude Code para renovarla") : tx("Session expired — open Codex to refresh", "Sesión caducada: abre Codex para renovarla") }
                 let cooldown = max(0, self.states[i].cooldownUntil?.timeIntervalSinceNow ?? 0)
                 log("usage: \(p.rawValue) fetch status=\(result.status) duration=\(Int(Date().timeIntervalSince(started) * 1000))ms cooldown=\(Int(cooldown))s outcome=\(result.reading == nil ? "unavailable" : "ok")")
@@ -703,10 +763,11 @@ final class UsageService: ObservableObject {
     }
     private static func fetchClaude(directory: String, services: [String], cancel: ModuleCancellation, credentialReader: (() -> Credential?)? = nil,
                                     transport: ((String, [String: String]) -> (Data, HTTPURLResponse?))? = nil,
-                                    renew: (() -> Void)? = nil) -> FetchResult {
+                                    renew: (() -> Void)? = nil, scheduled: Bool = false) -> FetchResult {
         let read = credentialReader ?? { readClaudeCredential(directory: directory, services: services, cancel: cancel) }
         let send = transport ?? { http($0, headers: $1, cancel: cancel) }
         var credential = read()
+        if scheduled && (credential == nil || credential?.expired == true) { return FetchResult(skipped: true) }
         if let renew, credential?.expired == true { renew(); credential = read() }
         for attempt in 0...1 {
             guard !cancel.isCancelled else { return FetchResult() }
@@ -761,7 +822,210 @@ final class UsageService: ObservableObject {
         return UsageJSON.object(data)
     }
     private func readJSON(_ url: URL) -> [String: Any]? { Self.readJSON(url) }
-    private func accept(_ reading: UsageReading, provider: UsageProvider) {
+
+    private static func quotaIdentifier(_ value: Any?) -> String? {
+        guard let text = value as? String, !text.isEmpty, text.utf8.count <= 256 else { return nil }
+        return text
+    }
+
+    private static func codexAccount(_ auth: [String: Any]?) -> QuotaAccount? {
+        guard let tokens = auth?["tokens"] as? [String: Any],
+              let account = quotaIdentifier(tokens["account_id"]) else { return nil }
+        var subject = quotaIdentifier(tokens["user_id"])
+        // Claims are used only as a local partition hint, never as authentication.
+        if subject == nil, let token = tokens["id_token"] as? String, token.utf8.count <= 32_768,
+           let payload = token.split(separator: ".").dropFirst().first {
+            var base64 = payload.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+            if let bytes = Data(base64Encoded: base64) { subject = quotaIdentifier(UsageJSON.object(bytes)?["sub"]) }
+        }
+        return QuotaAccount(account: account, subject: subject)
+    }
+
+    private func updateQuotaLogin(_ provider: UsageProvider, signedIn: Bool, rotate: Bool = false) {
+        let state = states[index(provider)]
+        let now = Date()
+        let previous = quotaLogins[provider]
+        guard state.enabled else {
+            if let previous {
+                quotaHistory.deactivate(previous, at: now)
+                quotaFeed.send(.discontinuity)
+            }
+            quotaLogins[provider] = nil
+            quotaAccounts[provider] = nil
+            quotaContext[provider] = nil
+            quotaLocalSince[provider] = now
+            quotaContext[provider] = nil
+            if provider == .codex { cancelBackfill() }
+            return
+        }
+        let directory = UsageWatcher.resolvedPath(provider == .codex ? codexHome : claudeDir)
+        var signedIn = signedIn
+        var account: QuotaAccount?
+        if signedIn && provider == .codex {
+            let auth = readJSON(URL(fileURLWithPath: directory).appendingPathComponent("auth.json"))
+            account = Self.codexAccount(auth)
+            if let auth, (auth["tokens"] == nil || auth["tokens"] is NSNull), auth["OPENAI_API_KEY"] == nil || auth["OPENAI_API_KEY"] is NSNull {
+                signedIn = false
+            }
+        } else if signedIn {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let configHome = URL(fileURLWithPath: directory).appendingPathComponent(".claude.json")
+            let standard = UsageWatcher.resolvedPath(home.appendingPathComponent(".claude").path)
+            let metadata = readJSON(configHome) ?? (directory == standard ? readJSON(home.appendingPathComponent(".claude.json")) : nil)
+            if let oauth = metadata?["oauthAccount"] as? [String: Any],
+               let user = Self.quotaIdentifier(oauth["accountUuid"]).flatMap(UUID.init(uuidString:)) {
+                let org = Self.quotaIdentifier(oauth["organizationUuid"]).flatMap(UUID.init(uuidString:))
+                account = QuotaAccount(account: user.uuidString, subject: org?.uuidString)
+            }
+        }
+        let login = quotaHistory.login(provider: provider, directory: directory, account: account, signedIn: signedIn, now: now, rotate: rotate)
+        quotaLogins[provider] = login
+        quotaAccounts[provider] = account
+        if (previous != nil && previous?.profile != login?.profile) || login?.switchedAt != previous?.switchedAt {
+            quotaLocalSince[provider] = now
+            if provider == .codex { cancelBackfill() }
+            quotaFeed.send(.discontinuity)
+        }
+    }
+
+    private func captureQuota(_ reading: UsageReading, provider: UsageProvider, source: QuotaSource, rolloutAccount: QuotaAccount?) {
+        guard let run, !run.isCancelled, !asleep, reading.quota != nil else { return }
+        // Local events can arrive between periodic identity checks.
+        if source != .api { updateQuotaLogin(provider, signedIn: states[index(provider)].signedIn) }
+        guard let login = quotaLogins[provider] else { return }
+        let now = Date()
+        let zone = TimeZone.current.identifier
+        let key = QuotaImportKey(profile: login.profile, timeZoneID: zone)
+        if source != .api && reading.date < (quotaLocalSince[provider] ?? login.switchedAt ?? .distantPast) { return }
+        if source == .statusLine {
+            // The existing hook writes one shared file. Require the installation record for this CLI profile.
+            let record = support.appendingPathComponent("claude-statusline-directory")
+            guard let size = (try? record.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= 4096,
+                  let path = try? String(contentsOf: record, encoding: .utf8),
+                  UsageWatcher.resolvedPath(path) == UsageWatcher.resolvedPath(claudeDir) else { return }
+        }
+        let fallback = provider == .claude ? states[index(provider)].plan : nil
+        var observations: [QuotaObservation]
+        if source == .rollout {
+            if let rolloutAccount, quotaAccounts[.codex]?.matches(rolloutAccount) != true { return }
+            observations = UsageCodexBackfill.attributed(
+                [.init(reading: reading, identified: rolloutAccount != nil)], key: key,
+                anchors: quotaHistory.liveAnchors(for: key), switchedAt: login.switchedAt, now: now, realtime: true
+            )
+            // A labeled event from the currently active login is positive live evidence.
+            if rolloutAccount != nil {
+                for i in observations.indices { observations[i].attribution = .live }
+            }
+        } else {
+            observations = UsageQuotaCapture.observations(reading, provider: provider, profile: login.profile,
+                                                          timeZoneID: zone, source: source, attribution: .live,
+                                                          now: now, fallbackPlan: fallback)
+        }
+        if source != .api {
+            observations.removeAll { $0.date < (quotaLocalSince[provider] ?? login.switchedAt ?? .distantPast) }
+        }
+        let previousAPI = !login.identified && source == .api ? quotaHistory.liveAnchors(for: key) : []
+        if observations.contains(where: { observation in
+            guard let previous = previousAPI.first(where: { $0.series == observation.series }),
+                  observation.date > previous.date else { return false }
+            return (previous.reset == observation.reset && observation.used < previous.used - 1) || observation.reset < previous.reset
+        }) {
+            updateQuotaLogin(provider, signedIn: true, rotate: true)
+            guard let rotated = quotaLogins[provider] else { return }
+            observations = UsageQuotaCapture.observations(reading, provider: provider, profile: rotated.profile,
+                                                          timeZoneID: zone, source: source, attribution: .live,
+                                                          now: now, fallbackPlan: fallback)
+        }
+        if source == .api && !observations.isEmpty {
+            let current = Set(observations.map(\.series))
+            if let previous = quotaContext[provider],
+               Set(previous.map(\.plan)) != Set(current.map(\.plan)) || Set(previous.map(\.timeZoneID)) != Set(current.map(\.timeZoneID)) {
+                quotaHistory.breakCoverage(for: login.profile, at: observations.map(\.date).min() ?? now)
+                quotaFeed.send(.discontinuity)
+            }
+            quotaContext[provider] = current
+        }
+        let epoch = quotaEpoch
+        quotaHistory.ingest(observations, now: now) { [weak self] accepted in
+            self?.queue.async { [weak self] in
+                guard let self, self.run === run, !run.isCancelled, self.quotaEpoch == epoch,
+                      self.quotaLogins[provider]?.profile == accepted.first?.series.profile else { return }
+                self.quotaFeed.send(.observations(accepted))
+            }
+        }
+        if provider == .codex, source == .api, !observations.isEmpty { startBackfill(now: now) }
+    }
+
+    private func workspacePowerChanged(asleep: Bool, run: ModuleCancellation) {
+        let date = Date()
+        queue.async {
+            guard self.run === run, !run.isCancelled else { return }
+            self.asleep = asleep
+            self.quotaEpoch += 1
+            self.quotaHistory.breakCoverage(at: date, allowsQuiet: true, flush: asleep)
+            self.quotaFeed.send(.discontinuity)
+            if asleep { self.cancelBackfill() }
+            else {
+                self.lastQuotaWake = date
+                for provider in UsageProvider.allCases { self.quotaLocalSince[provider] = date }
+                self.detect(force: false)
+                self.nextPeriodic = date.addingTimeInterval(900 + Double.random(in: 0...90))
+                for provider in UsageProvider.allCases { self.fetch(provider, force: false, scheduled: true) }
+            }
+        }
+    }
+
+    private func cancelBackfill() {
+        backfill?.cancel.cancel()
+        backfill = nil
+    }
+
+    private func startBackfill(now: Date) {
+        guard let run, !run.isCancelled, !asleep, let login = quotaLogins[.codex] else { return }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let key = QuotaImportKey(profile: login.profile, timeZoneID: calendar.timeZone.identifier)
+        if let backfill, backfill.key == key { return }
+        cancelBackfill()
+        guard !quotaHistory.importComplete(key) else { return }
+        let cancel = ModuleCancellation()
+        let scanner = UsageCodexBackfill(sessionsRoot: URL(fileURLWithPath: codexHome).appendingPathComponent("sessions"),
+                                         now: now, calendar: calendar, account: quotaAccounts[.codex],
+                                         cancelled: { cancel.isCancelled || run.isCancelled })
+        let job = BackfillJob(key: key, cancel: cancel, scanner: scanner)
+        backfill = job
+        scanBackfill(job, login: login, run: run, final: false)
+    }
+
+    private func scanBackfill(_ job: BackfillJob, login: QuotaLogin, run: ModuleCancellation, final: Bool) {
+        let cancelled = { job.cancel.isCancelled || run.isCancelled }
+        job.scanner.scanNextPass { [weak self] pass in
+            guard let self, !cancelled() else { return }
+            let now = Date()
+            let observations = UsageCodexBackfill.attributed(pass.candidates, key: job.key,
+                                                            anchors: self.quotaHistory.liveAnchors(for: job.key),
+                                                            switchedAt: login.switchedAt, now: now)
+            self.quotaHistory.replaceImport(observations, for: job.key, complete: final || !pass.moreFiles,
+                                            now: now, cancelled: cancelled,
+                                            updated: { [weak self] in self?.quotaFeed.send(.importUpdated) })
+            if pass.truncated { log("usage forecast: Codex history reached a backfill budget") }
+            if !final && pass.moreFiles { self.continueBackfillWhenIdle(job, login: login, run: run) }
+        }
+    }
+
+    private func continueBackfillWhenIdle(_ job: BackfillJob, login: QuotaLogin, run: ModuleCancellation) {
+        queue.asyncAfter(deadline: .now() + 1) {
+            guard !job.cancel.isCancelled, !run.isCancelled, !self.asleep, self.backfill?.cancel === job.cancel else { return }
+            if self.active.isEmpty {
+                self.scanBackfill(job, login: login, run: run, final: true)
+            } else { self.continueBackfillWhenIdle(job, login: login, run: run) }
+        }
+    }
+
+    private func accept(_ reading: UsageReading, provider: UsageProvider, source: QuotaSource? = nil,
+                        original: UsageReading? = nil, rolloutAccount: QuotaAccount? = nil) {
+        if let source { captureQuota(original ?? reading, provider: provider, source: source, rolloutAccount: rolloutAccount) }
         let i = index(provider)
         guard reading.date <= Date().addingTimeInterval(5), reading.date > (states[i].reading?.date ?? .distantPast) else { return }
         var reading = reading
@@ -771,7 +1035,7 @@ final class UsageService: ObservableObject {
         saveCache()
     }
     private func localEvents(_ paths: [String]) {
-        guard run?.isCancelled == false else { return }
+        guard run?.isCancelled == false, !asleep else { return }
         let root = UsageWatcher.resolvedPath(codexHome + "/sessions")
         let local = UsageWatcher.resolvedPath(support.appendingPathComponent("claude-usage.json").path)
         let resolved = paths.map(UsageWatcher.resolvedPath)
@@ -788,7 +1052,7 @@ final class UsageService: ObservableObject {
         return merged
     }
     private func readLocal(codex: Bool = true, claude: Bool = true) {
-        guard let run, !run.isCancelled else { return }
+        guard let run, !run.isCancelled, !asleep else { return }
         let fm = FileManager.default
         let root = URL(fileURLWithPath: codexHome + "/sessions")
         var newest: [(URL, Date)] = []
@@ -805,7 +1069,7 @@ final class UsageService: ObservableObject {
                 }
             }
         }
-        var best: UsageReading?
+        var best: (reading: UsageReading, account: String?, subject: String?)?
         for (url, _) in newest {
             guard !run.isCancelled else { return }
             guard let h = try? FileHandle(forReadingFrom: url) else { continue }
@@ -816,21 +1080,23 @@ final class UsageService: ObservableObject {
             var lines = data.split(separator: 10)
             if offset > 0 && !lines.isEmpty { lines.removeFirst() }
             for line in lines {
-                guard line.range(of: Data("token_count".utf8)) != nil,
-                      let obj = UsageJSON.object(Data(line)), obj["type"] as? String == "event_msg",
-                      let payload = obj["payload"] as? [String: Any], payload["type"] as? String == "token_count",
-                      let limits = payload["rate_limits"] as? [String: Any],
-                      limits["limit_id"] == nil || limits["limit_id"] is NSNull || limits["limit_id"] as? String == "codex",
-                      let date = UsageJSON.date(obj["timestamp"]), date > (best?.date ?? .distantPast) else { continue }
-                let reading = UsageJSON.codex(limits, at: date, format: "local")
-                if !reading.windows.isEmpty { best = reading }
+                guard let event = UsageJSON.codexRollout(Data(line)), !event.reading.windows.isEmpty,
+                      event.reading.date > (best?.reading.date ?? .distantPast) else { continue }
+                best = event
             }
         }
-        if let best { accept(best, provider: .codex) }
+        if let best {
+            let account = best.account.map { QuotaAccount(account: $0, subject: best.subject) }
+            accept(best.reading, provider: .codex, source: best.account == nil && best.subject != nil ? nil : .rollout,
+                   rolloutAccount: account)
+        }
         if claude && states[0].enabled && config.usageClaudeStatusLine == true, let obj = readJSON(support.appendingPathComponent("claude-usage.json")),
            let date = UsageJSON.date(obj["timestamp"]), let limits = obj["rate_limits"] as? [String: Any] {
             let reading = UsageJSON.claude(limits, at: date, local: true)
-            if !reading.windows.isEmpty { accept(Self.mergingClaudeLocal(reading, previous: states[0].reading), provider: .claude) }
+            if !reading.windows.isEmpty {
+                accept(Self.mergingClaudeLocal(reading, previous: states[0].reading), provider: .claude,
+                       source: .statusLine, original: reading)
+            }
         }
         publish()
     }

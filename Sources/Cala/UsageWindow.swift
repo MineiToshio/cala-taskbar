@@ -1,7 +1,7 @@
 import Foundation
 
 // Usage values are safe to cache. Credentials never enter a published or persisted object.
-enum UsageProvider: String, Codable, CaseIterable {
+enum UsageProvider: String, Codable, CaseIterable, Sendable {
     case claude, codex
     var title: String { self == .claude ? "Claude" : "Codex" }
     var glyph: String { self == .claude ? "✳" : "⬡" }
@@ -14,6 +14,30 @@ struct UsageReading: Codable {
     var plan: String?
     var date: Date
     var apiDate: Date? = nil
+    // Capture metadata belongs only to the original payload. Display caches never replay it.
+    var quota: Payload? = nil
+
+    private enum CodingKeys: String, CodingKey { case windows, plan, date, apiDate }
+
+    struct Payload {
+        var windows: [Meter] = []
+        var plan: String?
+        var short: Applicability = .unknown
+        var weekly: Applicability = .unknown
+        var hardBlockUntil: Date?
+    }
+
+    struct Meter {
+        let id: String
+        let durationMinutes: Double?
+        let used: Double?
+        let reset: Date?
+        let date: Date
+        var calculated = false
+        var inactive = false
+    }
+
+    enum Applicability { case unknown, absent, present, inactive }
 }
 
 struct UsageWindow: Codable, Identifiable {
