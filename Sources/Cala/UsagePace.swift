@@ -3,6 +3,85 @@ import Combine
 import Foundation
 import UserNotifications
 
+/// Display metadata travels with the accepted balance, including across a cache round trip.
+struct UsageWindowObservation: Codable {
+    let observedAt: Date
+    let meter: QuotaMeter?
+    let reset: Date?
+    var inactive = false
+
+    static func capture(_ reading: UsageReading, provider: UsageProvider) -> [String: Self] {
+        var observations: [String: Self] = [:]
+        for window in reading.windows {
+            let duration = window.durationMinutes ?? window.presentationOrder.1
+            let candidates = (reading.quota?.windows ?? []).filter { raw in
+                if provider == .claude { return raw.id == window.id }
+                guard raw.durationMinutes == duration, raw.used == window.used else { return false }
+                let displayedReset = raw.calculated ? raw.reset?.addingTimeInterval(reading.date.timeIntervalSince(raw.date)) : raw.reset
+                if let displayedReset, let shownReset = window.resetsAt {
+                    return abs(displayedReset.timeIntervalSince(shownReset)) < 0.001
+                }
+                return displayedReset == window.resetsAt
+            }
+            let raw = candidates.count == 1 ? candidates.first : nil
+            let canonicalMeter = raw.flatMap { meter(id: $0.id, minutes: $0.durationMinutes, provider: provider) }
+            observations[window.id] = Self(
+                observedAt: raw?.date ?? reading.date, meter: canonicalMeter, reset: cycleReset(raw?.reset),
+                inactive: raw?.inactive == true || (duration == 300 && reading.quota?.short == .inactive)
+            )
+        }
+        return observations
+    }
+
+    static func cached(_ window: UsageWindow, in reading: UsageReading, provider: UsageProvider) -> Self {
+        // In old Claude caches a scoped meter may have been retained from the last API reading.
+        let scoped = provider == .claude && window.presentationOrder.0 == 2
+        let observedAt = scoped ? min(reading.date, reading.apiDate ?? .distantPast) : reading.date
+        let canonicalMeter = provider == .claude
+            ? meter(id: window.id, minutes: window.presentationOrder.1, provider: provider) : nil
+        return Self(observedAt: observedAt, meter: canonicalMeter, reset: cycleReset(window.resetsAt))
+    }
+
+    private static func cycleReset(_ reset: Date?) -> Date? {
+        UsageJSON.boundedDate(reset).map { Date(timeIntervalSince1970: floor($0.timeIntervalSince1970)) }
+    }
+
+    private static func meter(id: String, minutes: Double?, provider: UsageProvider) -> QuotaMeter? {
+        guard let seconds = minutes.map({ $0 * 60 }), (1...31_536_000).contains(seconds), id.utf8.count <= 180,
+              let scope = scope(id, provider: provider) else { return nil }
+        return QuotaMeter(scope: scope, durationSeconds: Int(seconds.rounded()))
+    }
+
+    private static func scope(_ id: String, provider: UsageProvider) -> QuotaMeterScope? {
+        if provider == .codex {
+            if id == "shared" { return .shared }
+            return id.hasPrefix("model:") ? .modelID(String(id.dropFirst(6))) : nil
+        }
+        switch id {
+        case "session", "five_hour", "weekly_all", "seven_day": return .shared
+        case "seven_day_opus", "seven_day_sonnet": return .legacyClaude(id)
+        default:
+            if id.hasPrefix("weekly_scoped:id:") { return .modelID(String(id.dropFirst(17))) }
+            if id.hasPrefix("weekly_scoped:name:") { return .modelName(String(id.dropFirst(19))) }
+            return nil
+        }
+    }
+
+    func alertBase(provider: UsageProvider) -> String? {
+        guard let meter, let reset = Self.cycleReset(reset) else { return nil }
+        let scope: String
+        switch meter.scope {
+        case .shared: scope = "shared"
+        case .modelID(let id): scope = "id:" + id
+        case .modelName(let name): scope = "name:" + name
+        case .legacyClaude(let id): scope = "legacy:" + id
+        }
+        // Keep the alert cycle at minute precision for resets estimated from a countdown.
+        let cycle = Int(reset.timeIntervalSince1970 / 60)
+        return "\(provider.rawValue)|\(meter.durationSeconds)|\(cycle)|\(scope)"
+    }
+}
+
 /// Coordinates learned quota forecasts. State and cache access stay on main; snapshots and replay run on a worker.
 final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     static let shared = UsagePace()
@@ -17,38 +96,39 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         let meter: QuotaMeter
     }
 
-    private struct ForecastKey: Equatable {
-        let series: QuotaSeries
+    struct ForecastKey: Equatable {
+        let observation: QuotaObservation
         let cycle: QuotaCycle
         let generation = UUID()
     }
 
-    private struct CachedForecast {
+    struct CachedForecast {
         let result: ForecastResult
         let calculatedAt: Date
     }
 
-    private struct Entry {
-        let key: ForecastKey
-        var current: QuotaObservation
-        var highWater: Double
-        var cached: CachedForecast?
-    }
+    struct Entry {
+        private(set) var key: ForecastKey
+        var current: QuotaObservation { key.observation }
+        private(set) var highWater: Double
+        private(set) var cached: CachedForecast?
 
-    private struct WindowKey: Hashable {
-        let provider: UsageProvider
-        let id: String
-    }
+        init(key: ForecastKey) {
+            self.key = key
+            highWater = key.observation.used
+        }
 
-    private struct DisplayWindow {
-        let readingDate: Date
-        let used: Double
-        let reset: Date?
-        let observedAt: Date
-        let meter: QuotaMeter?
-        let observedReset: Date?
-        let plan: String?
-        let inactive: Bool
+        mutating func update(_ observation: QuotaObservation) {
+            if current != observation {
+                key = ForecastKey(observation: observation, cycle: key.cycle)
+                cached = nil
+            }
+            highWater = max(highWater, observation.used)
+        }
+
+        mutating func cache(_ forecast: CachedForecast, for completedKey: ForecastKey) {
+            if key == completedKey { cached = forecast }
+        }
     }
 
     private enum CapRegime: Equatable {
@@ -58,7 +138,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     private let worker = DispatchQueue(label: "local.cala.usage.forecast", qos: .utility)
     private var entries: [MeterKey: Entry] = [:]
     private var nextAllowed: [MeterKey: TimeInterval] = [:]
-    private var windows: [WindowKey: DisplayWindow] = [:]
+    private var legacyHistory: UsageLegacyHistory? // worker only
     private var states: [UsageState] = []
     private var refreshTimer: Timer?
     private var computing = false
@@ -77,6 +157,12 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         self.store = store
         let run = ModuleCancellation()
         self.run = run
+        worker.async {
+            if self.legacyHistory == nil {
+                let url = AppPaths.supportDirectory.appendingPathComponent("usage-history.json")
+                self.legacyHistory = UsageLegacyHistory(url: url, now: Date())
+            }
+        }
         if canNotify { UNUserNotificationCenter.current().delegate = self }
 
         let service = UsageService.shared
@@ -113,9 +199,9 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         bag.removeAll()
         refreshTimer?.invalidate()
         refreshTimer = nil
+        worker.async { self.legacyHistory?.save(now: Date(), force: true) }
         entries.removeAll()
         nextAllowed.removeAll()
-        windows.removeAll()
         states.removeAll()
         sleeping = false
         refreshedAfter = .distantPast
@@ -132,19 +218,22 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         for state in states where !state.available && self.states.contains(where: { $0.provider == state.provider && $0.available }) {
             entries = entries.filter { $0.key.provider != state.provider }
         }
-        self.states = states
-        let now = Date()
-        var visible: [WindowKey: DisplayWindow] = [:]
-        for state in states where state.available {
-            guard let reading = state.reading else { continue }
-            for window in reading.windows {
-                let key = WindowKey(provider: state.provider, id: window.id)
-                visible[key] = Self.displayWindow(window, in: reading, provider: state.provider,
-                                                  plan: state.plan, previous: windows[key])
+        let changed = states.filter { state in
+            state.available && !self.states.contains {
+                $0.provider == state.provider && $0.available && $0.reading?.date == state.reading?.date
             }
+        }
+        let now = Date()
+        if !changed.isEmpty {
+            worker.async {
+                for state in changed { self.legacyHistory?.ingest(state, now: now) }
+                self.legacyHistory?.save(now: now)
+            }
+        }
+        self.states = states
+        for state in states where state.available {
             evaluateThreshold(state, now: now)
         }
-        windows = visible
         refreshForecasts()
     }
 
@@ -154,25 +243,19 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         for current in readings where current.attribution == .live && current.date >= refreshedAfter && current.reset > now {
             let series = current.series
             entries = entries.filter { $0.key.provider != series.provider ||
-                ($0.value.key.series.profile == series.profile && $0.value.key.series.timeZoneID == series.timeZoneID) }
+                ($0.value.current.series.profile == series.profile && $0.value.current.series.timeZoneID == series.timeZoneID) }
             let meter = MeterKey(provider: series.provider, meter: series.meter)
             let previous = entries[meter]
             if let old = previous?.current, old.date > current.date ||
                 (old.date == current.date && old.source.rawValue > current.source.rawValue) { continue }
 
-            if var entry = previous, entry.key.series == series, entry.key.cycle.reset == current.reset,
+            if var entry = previous, entry.current.series == series, entry.key.cycle.reset == current.reset,
                current.used >= entry.highWater - 1 {
-                if Self.capChanged(from: entry.current, to: current) {
-                    entry = Entry(key: ForecastKey(series: series, cycle: entry.key.cycle),
-                                  current: current, highWater: entry.highWater)
-                }
-                entry.current = current
-                entry.highWater = max(entry.highWater, current.used)
+                entry.update(current)
                 entries[meter] = entry
             } else {
                 let cycle = QuotaCycle(reset: current.reset, segmentStart: current.date)
-                entries[meter] = Entry(key: ForecastKey(series: series, cycle: cycle),
-                                       current: current, highWater: current.used)
+                entries[meter] = Entry(key: ForecastKey(observation: current, cycle: cycle))
             }
         }
     }
@@ -191,18 +274,6 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    private static func capChanged(from prior: QuotaObservation, to next: QuotaObservation) -> Bool {
-        func band(_ used: Double) -> Int {
-            if used >= 100 { return 100 }
-            if used >= 80 { return 80 }
-            return used >= 50 ? 50 : 0
-        }
-        return capRegime(prior.companion, at: prior.date) != capRegime(next.companion, at: next.date)
-            || capRegime(prior.bindingWeekly, at: prior.date) != capRegime(next.bindingWeekly, at: next.date)
-            || prior.hardBlockUntil != next.hardBlockUntil
-            || (prior.series.meter.durationSeconds == 18_000 && band(prior.used) != band(next.used))
-    }
-
     private func refreshForecasts() {
         refreshTimer?.invalidate()
         refreshTimer = nil
@@ -211,12 +282,14 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         let uptime = ProcessInfo.processInfo.systemUptime
         nextAllowed = nextAllowed.filter { $0.value > uptime }
         entries = entries.filter { $0.value.current.reset > now }
-        let ready = Set(windows.compactMap { key, display -> MeterKey? in
-            guard display.used < 100, let meter = display.meter,
-                  meter.durationSeconds == 18_000 || meter.durationSeconds == 604_800 else { return nil }
-            let meterKey = MeterKey(provider: key.provider, meter: meter)
-            guard let entry = entries[meterKey], matches(entry, display: display, now: now) else { return nil }
-            return meterKey
+        let ready = Set(states.filter(\.available).flatMap { state in
+            (state.reading?.windows ?? []).compactMap { window -> MeterKey? in
+                guard window.used < 100, let meter = state.observation(for: window)?.meter,
+                      meter.durationSeconds == 18_000 || meter.durationSeconds == 604_800 else { return nil }
+                let meterKey = MeterKey(provider: state.provider, meter: meter)
+                guard let entry = entries[meterKey], matches(entry, state, window, now: now) else { return nil }
+                return meterKey
+            }
         })
         let due = ready.filter { nextAllowed[$0] == nil }
         guard !due.isEmpty else {
@@ -258,9 +331,10 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
 
     private func complete(_ results: [(ForecastKey, CachedForecast, TimeInterval)]) {
         for (key, forecast, started) in results {
-            let meter = MeterKey(provider: key.series.provider, meter: key.series.meter)
+            let series = key.observation.series
+            let meter = MeterKey(provider: series.provider, meter: series.meter)
             nextAllowed[meter] = started + (meter.meter.durationSeconds == 18_000 ? 60 : 300)
-            if entries[meter]?.key == key { entries[meter]?.cached = forecast }
+            entries[meter]?.cache(forecast, for: key)
         }
         let now = Date()
         for state in states where state.available {
@@ -270,74 +344,28 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
 
     // MARK: Display identity and freshness
 
-    private static func displayWindow(_ window: UsageWindow, in reading: UsageReading, provider: UsageProvider,
-                                      plan: String?, previous: DisplayWindow?) -> DisplayWindow {
-        let duration = window.durationMinutes ?? window.presentationOrder.1
-        let payload = reading.quota?.windows ?? []
-        let candidates = payload.filter { raw in
-            if provider == .claude { return raw.id == window.id }
-            guard raw.durationMinutes == duration, raw.used == window.used else { return false }
-            let displayedReset = raw.calculated ? raw.reset?.addingTimeInterval(reading.date.timeIntervalSince(raw.date)) : raw.reset
-            if let displayedReset, let shownReset = window.resetsAt {
-                return abs(displayedReset.timeIntervalSince(shownReset)) < 0.001
-            }
-            return displayedReset == window.resetsAt
-        }
-        if candidates.isEmpty, provider == .claude, window.presentationOrder.0 == 2,
-           let previous, previous.used == window.used, previous.reset == window.resetsAt {
-            // Claude's status line can keep an older scoped API window alongside fresh shared counters.
-            return DisplayWindow(readingDate: reading.date, used: window.used, reset: window.resetsAt,
-                                 observedAt: previous.observedAt, meter: previous.meter, observedReset: previous.observedReset,
-                                 plan: previous.plan, inactive: previous.inactive)
-        }
-        let raw = candidates.count == 1 ? candidates.first : nil
-        let meter = raw.flatMap { raw -> QuotaMeter? in
-            guard let seconds = raw.durationMinutes.map({ ($0 * 60).rounded() }),
-                  (1...31_536_000).contains(seconds), let scope = scope(raw.id, provider: provider) else { return nil }
-            return QuotaMeter(scope: scope, durationSeconds: Int(seconds))
-        }
-        let observedReset = raw?.reset.map { Date(timeIntervalSince1970: floor($0.timeIntervalSince1970)) }
-        let normalizedPlan = UsageQuotaCapture.plan(reading.quota?.plan) ?? UsageQuotaCapture.plan(reading.plan)
-            ?? UsageQuotaCapture.plan(plan)
-        let explicitlyInactive = duration == 300 && reading.quota?.short == .inactive
-        return DisplayWindow(readingDate: reading.date, used: window.used, reset: window.resetsAt,
-                             observedAt: raw?.date ?? reading.date, meter: meter, observedReset: observedReset,
-                             plan: normalizedPlan, inactive: raw?.inactive == true || explicitlyInactive)
-    }
-
-    private static func scope(_ id: String, provider: UsageProvider) -> QuotaMeterScope? {
-        if provider == .codex {
-            if id == "shared" { return .shared }
-            return id.hasPrefix("model:") ? .modelID(String(id.dropFirst(6))) : nil
-        }
-        switch id {
-        case "session", "five_hour", "weekly_all", "seven_day": return .shared
-        case "seven_day_opus", "seven_day_sonnet": return .legacyClaude(id)
-        default:
-            if id.hasPrefix("weekly_scoped:id:") { return .modelID(String(id.dropFirst(17))) }
-            if id.hasPrefix("weekly_scoped:name:") { return .modelName(String(id.dropFirst(19))) }
-            return nil
-        }
-    }
-
     private static func isStale(_ date: Date, meter: QuotaMeter?, now: Date, short: Bool = false) -> Bool {
         let short = meter.map { $0.durationSeconds == 18_000 } ?? short
         return now.timeIntervalSince(date) > (short ? 600 : 1800)
     }
 
-    private func matches(_ entry: Entry, display: DisplayWindow, now: Date) -> Bool {
+    private func matches(_ entry: Entry, _ state: UsageState, _ window: UsageWindow, now: Date) -> Bool {
+        guard let observation = state.observation(for: window) else { return false }
         let current = entry.current
-        return !sleeping && !display.inactive && current.date >= refreshedAfter && current.date == display.observedAt
-            && current.used == display.used && current.reset == display.observedReset
-            && (display.plan == nil || current.series.plan == display.plan)
-            && current.reset > now && (display.reset ?? .distantPast) > now
+        let plan = UsageQuotaCapture.plan(state.reading?.quota?.plan) ?? UsageQuotaCapture.plan(state.reading?.plan)
+            ?? UsageQuotaCapture.plan(state.plan)
+        return !sleeping && !observation.inactive && current.date >= refreshedAfter && current.date == observation.observedAt
+            && current.used == window.used && current.reset == observation.reset
+            && (plan == nil || current.series.plan == plan)
+            && current.reset > now && (window.resetsAt ?? .distantPast) > now
             && current.series.timeZoneID == TimeZone.current.identifier
             && !Self.isStale(current.date, meter: current.series.meter, now: now)
     }
 
-    private func forecast(_ provider: UsageProvider, _ display: DisplayWindow, now: Date) -> ForecastResult? {
-        guard let meter = display.meter, let entry = entries[MeterKey(provider: provider, meter: meter)],
-              matches(entry, display: display, now: now), let cached = entry.cached else { return nil }
+    private func forecast(_ state: UsageState, _ window: UsageWindow, now: Date) -> ForecastResult? {
+        guard let meter = state.observation(for: window)?.meter,
+              let entry = entries[MeterKey(provider: state.provider, meter: meter)],
+              matches(entry, state, window, now: now), let cached = entry.cached else { return nil }
         let current = entry.current
         // Time can change a cap regime without a new provider observation.
         for cap in [current.companion, current.bindingWeekly] {
@@ -347,28 +375,22 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         return cached.result
     }
 
-    private func display(_ state: UsageState, _ window: UsageWindow) -> DisplayWindow? {
-        let display = windows[WindowKey(provider: state.provider, id: window.id)]
-        guard display?.readingDate == state.reading?.date, display?.used == window.used,
-              display?.reset == window.resetsAt else { return nil }
-        return display
-    }
-
     func staleReadingDate(_ state: UsageState, _ window: UsageWindow, now: Date) -> Date? {
-        guard let date = display(state, window)?.observedAt ?? state.reading?.date else { return nil }
-        if sleeping || date < refreshedAfter || Self.isStale(date, meter: nil, now: now, short: window.presentationOrder.0 == 0) {
+        guard let observation = state.observation(for: window) else { return nil }
+        let date = observation.observedAt
+        if sleeping || date < refreshedAfter || Self.isStale(date, meter: observation.meter, now: now, short: window.presentationOrder.0 == 0) {
             return date
         }
         return nil
     }
 
     func line(_ state: UsageState, _ window: UsageWindow, now: Date) -> Line? {
-        let display = display(state, window)
-        guard !window.isResetting(now), display?.inactive != true,
+        let observation = state.observation(for: window)
+        guard !window.isResetting(now), observation?.inactive != true,
               staleReadingDate(state, window, now: now) == nil else { return nil }
         if window.used == 100 { return Line(text: tx("Quota used up", "Cuota agotada")) }
         let learning = Line(text: tx("Learning your usage pattern…", "Aprendiendo tu patrón de uso…"))
-        guard let display, let result = forecast(state.provider, display, now: now) else { return learning }
+        guard let observation, let result = forecast(state, window, now: now) else { return learning }
         switch result.readiness {
         case .learning: return learning
         case .exhausted: return learning
@@ -381,25 +403,26 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
             }
             return Line(text: tx("Usual use · ~\(used)% used at reset", "Uso habitual · ~\(used)% usado al reinicio"))
         case .risk, .likely:
-            if let eta = validETA(result, display: display, now: now), let phrase = etaPhrase(eta, display: display, now: now) {
+            if let eta = validETA(result, reset: window.resetsAt, observation: observation, now: now),
+               let phrase = etaPhrase(eta, reset: window.resetsAt, observation: observation, now: now) {
                 return Line(text: tx("Likely to hit the limit \(phrase)", "Probablemente agotes la cuota \(phrase)"), warn: true)
             }
             return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"), warn: true)
         }
     }
 
-    private func validETA(_ result: ForecastResult, display: DisplayWindow, now: Date) -> Date? {
-        guard result.readiness == .likely, let eta = result.eta, let reset = display.reset,
-              now < eta, eta < min(reset, display.observedReset ?? reset) else { return nil }
+    private func validETA(_ result: ForecastResult, reset: Date?, observation: UsageWindowObservation, now: Date) -> Date? {
+        guard result.readiness == .likely, let eta = result.eta, let reset,
+              now < eta, eta < min(reset, observation.reset ?? reset) else { return nil }
         return eta
     }
 
-    private func etaPhrase(_ eta: Date, display: DisplayWindow, now: Date) -> String? {
-        if display.meter?.durationSeconds == 18_000 {
+    private func etaPhrase(_ eta: Date, reset: Date?, observation: UsageWindowObservation, now: Date) -> String? {
+        if observation.meter?.durationSeconds == 18_000 {
             let offset = Double(TimeZone.current.secondsFromGMT(for: eta))
             let rounded = ((eta.timeIntervalSince1970 + offset) / 1800).rounded() * 1800 - offset
             let time = Date(timeIntervalSince1970: rounded)
-            guard let reset = display.reset, now < time, time < min(reset, display.observedReset ?? reset) else { return nil }
+            guard let reset, now < time, time < min(reset, observation.reset ?? reset) else { return nil }
             let clock = time.formatted(.dateTime.hour().minute())
             return tx("around \(clock)", "alrededor de las \(clock)")
         }
@@ -419,9 +442,8 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     private func alertContext(_ state: UsageState, _ window: UsageWindow, now: Date) -> (base: String, resetIn: String)? {
         guard store?.config.usageAlertsEnabled == true, window.used < 100,
               let reset = window.resetsAt, reset > now,
-              let key = UsagePaceHistory.key(state.provider, window) else { return nil }
-        let cycle = String(Int(reset.timeIntervalSince1970 / 60))
-        return (key + "|" + cycle, UsagePaceProjection.formatted(reset.timeIntervalSince(now)))
+              let key = state.observation(for: window)?.alertBase(provider: state.provider) else { return nil }
+        return (key, UsagePaceProjection.formatted(reset.timeIntervalSince(now)))
     }
 
     private func evaluateThreshold(_ state: UsageState, now: Date) {
@@ -431,15 +453,15 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
             guard remaining <= threshold, let context = alertContext(state, window, now: now) else { continue }
             fire(context.base + "|thr",
                  title: tx("\(state.provider.title): \(Int(remaining.rounded()))% left", "\(state.provider.title): te queda \(Int(remaining.rounded()))%"),
-                 body: tx("\(window.title) · resets in \(context.resetIn)", "\(window.title) · se reinicia en \(context.resetIn)"))
+                 body: tx("\(window.localizedTitle) · resets in \(context.resetIn)", "\(window.localizedTitle) · se reinicia en \(context.resetIn)"))
         }
     }
 
     private func predictiveETA(_ state: UsageState, _ window: UsageWindow, now: Date) -> Date? {
         let threshold = Double(store?.config.usageAlertThreshold ?? 20)
-        guard 100 - window.used > threshold, let display = display(state, window),
-              let result = forecast(state.provider, display, now: now),
-              let eta = validETA(result, display: display, now: now), eta.timeIntervalSince(now) <= 3600 else { return nil }
+        guard 100 - window.used > threshold, let observation = state.observation(for: window),
+              let result = forecast(state, window, now: now),
+              let eta = validETA(result, reset: window.resetsAt, observation: observation, now: now), eta.timeIntervalSince(now) <= 3600 else { return nil }
         return eta
     }
 
@@ -451,9 +473,11 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
             fire(context.base + "|proj",
                  title: tx("\(state.provider.title): estimated to hit the limit in \(remaining)",
                            "\(state.provider.title): se estima que agote la cuota en \(remaining)"),
-                 body: tx("\(window.title) · resets in \(context.resetIn)", "\(window.title) · se reinicia en \(context.resetIn)")) { [weak self] in
+                 body: tx("\(window.localizedTitle) · resets in \(context.resetIn)", "\(window.localizedTitle) · se reinicia en \(context.resetIn)")) { [weak self] in
                 guard let self, let current = self.states.first(where: { $0.provider == state.provider && $0.available }),
-                      let visible = current.orderedWindows.first(where: { $0.id == window.id && $0.resetsAt == window.resetsAt }) else { return false }
+                      let visible = current.orderedWindows.first(where: {
+                          self.alertContext(current, $0, now: Date())?.base == context.base
+                      }) else { return false }
                 return self.predictiveETA(current, visible, now: Date()) == eta
             }
         }
@@ -496,5 +520,51 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])
+    }
+}
+
+/// The rollback file keeps the original two-column format and lives independently of forecast buckets.
+struct UsageLegacyHistory {
+    private let url: URL
+    private var history = UsagePaceHistory()
+    private var dirty = false
+    private var lastSaved = Date.distantPast
+
+    init(url: URL, now: Date) {
+        self.url = url
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size < 2_000_000,
+              let data = try? Data(contentsOf: url),
+              let raw = try? JSONDecoder().decode([String: [[Double]]].self, from: data) else { return }
+        history.restore(raw, now: now)
+        dirty = raw != history.persistedSamples
+    }
+
+    mutating func ingest(_ state: UsageState, now: Date) {
+        guard let reading = state.reading else { return }
+        let samples = history.persistedSamples
+        for window in reading.windows {
+            guard let key = UsagePaceHistory.key(state.provider, window),
+                  let date = state.observation(for: window)?.observedAt,
+                  date <= now.addingTimeInterval(5), now.timeIntervalSince(date) <= 43_200,
+                  date.timeIntervalSince1970 > (samples[key]?.last?.first ?? -.infinity) else { continue }
+            history.ingest(UsageReading(windows: [window], plan: reading.plan, date: date), for: state.provider, now: now)
+            dirty = true
+        }
+    }
+
+    mutating func save(now: Date, force: Bool = false) {
+        guard force || (dirty && now.timeIntervalSince(lastSaved) >= 60) else { return }
+        let previous = history.persistedSamples
+        history.restore(previous, now: now)
+        let recent = history.persistedSamples
+        dirty = dirty || previous != recent
+        guard dirty else { return }
+        do {
+            let data = try JSONEncoder().encode(recent)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            lastSaved = now
+            dirty = false
+        } catch { log("usage: legacy history write failed") }
     }
 }
