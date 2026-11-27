@@ -696,6 +696,153 @@ func checkFeatureReviewFindings() async throws {
            both == "informe.pdf" || both == "otro nombre.txt")
 }
 
+// MARK: Review of 77dc3f0 (G-1 ... G-5): ordinary checks, failing until fixed.
+
+@MainActor
+private func manyRows(_ uids: [UInt32]) -> FakeIMAPWorld { FakeIMAPWorld(uids: uids.map { ($0, false) }) }
+
+@MainActor
+func checkGFindings() async throws {
+    func shownUIDs(_ h: MailHarness) -> [UInt32] { h.service.messages.map(\.uid).sorted(by: >) }
+    func serverUIDs(_ world: FakeIMAPWorld) -> [UInt32] { world.locked { world.messages.map(\.uid) }.sorted(by: >) }
+    func refreshAndSettle(_ h: MailHarness) async {
+        h.service.refresh()
+        _ = await waitFor(0.3) { false }
+        _ = await h.settle()
+        _ = await waitFor(0.2) { false }
+        _ = await h.settle()
+    }
+
+    // G-1: a page of older rows lands while the FLAGS refresh of the earlier older rows is still unanswered.
+    do {
+        let world = manyRows(Array(1...60))
+        let h = try MailHarness(world: world)
+        defer { h.finish() }
+        guard await h.start(rows: 25) else { expect("G-1 harness", false); return }
+        h.service.loadOlder(accountID: nil)
+        _ = await h.settle { h.service.messages.count == 50 && h.service.olderLoading.isEmpty }
+        world.on("UID FETCH 1:10 (UID FLAGS INTERNALDATE", .hold)
+        world.on("UID FETCH 11:35 (UID FLAGS)", .hold)
+        h.service.loadOlder(accountID: nil)                     // page 2 (UIDs 1-10): its answer is held
+        _ = await waitFor { world.heldCount == 1 }
+        h.service.refresh()                                     // panel opens: FLAGS refresh of rows 11-35 is queued
+        world.release()                                         // page 2 arrives first
+        _ = await waitFor(3) { world.heldCount == 1 && h.service.messages.count == 60 }
+        world.release()                                         // then the FLAGS answer, which knows nothing of page 2
+        _ = await waitFor(0.3) { false }
+        _ = await h.settle()
+        expect("G-1 an older page loaded while a FLAGS refresh was pending is still shown after the refresh answer",
+               shownUIDs(h) == serverUIDs(world) && h.service.messages.count == 60)
+    }
+
+    // G-2: a gap fill whose second page fails.
+    do {
+        let world = manyRows(Array(1...40))
+        let h = try MailHarness(world: world)
+        defer { h.finish() }
+        guard await h.start(rows: 25) else { expect("G-2 harness", false); return }
+        h.service.loadOlder(accountID: nil)
+        _ = await h.settle { h.service.messages.count == 40 && h.service.olderLoading.isEmpty }
+        world.on("UID FETCH 16:25 (UID FLAGS INTERNALDATE", .reply("§ NO [UNAVAILABLE] try later"))
+        world.mutate { for uid in UInt32(41)...75 { $0.messages.append(.init(uid: uid, unread: false, raw: FakeIMAPWorld.simpleRaw(uid), structure: nil)) } }
+        await refreshAndSettle(h)                               // window 51-75; gap 16-50: page 26-50 OK, page 16-25 refused
+        let shown = Set(shownUIDs(h))
+        let window = Set(UInt32(51)...75), first = Set(UInt32(1)...15)
+        expect("G-2 a gap fill whose second page fails adds nothing (no hole below the added rows)",
+               shown == window.union(first) || shown == Set(serverUIDs(world)))
+        await refreshAndSettle(h)
+        await refreshAndSettle(h)
+        expect("G-2 after a later successful fill, every UID between the older pages and the window is listed",
+               shownUIDs(h) == serverUIDs(world))
+    }
+
+    // G-3: UIDs 16-20 never existed; the "gap" is permanent and must not be searched every sync.
+    do {
+        let world = manyRows(Array(1...15) + Array(21...45))
+        let h = try MailHarness(world: world)
+        defer { h.finish() }
+        guard await h.start(rows: 25) else { expect("G-3 harness", false); return }
+        h.service.loadOlder(accountID: nil)
+        _ = await h.settle { h.service.messages.count == 40 && h.service.olderLoading.isEmpty }
+        let before = world.commands.filter { $0.hasPrefix("UID SEARCH UID ") }.count
+        for _ in 0..<4 { await refreshAndSettle(h) }
+        let searches = world.commands.filter { $0.hasPrefix("UID SEARCH UID ") }.count - before
+        expect("G-3 four syncs without window movement over a non-contiguous UID gap send at most one gap UID SEARCH (sent \(searches))",
+               searches <= 1 && shownUIDs(h) == serverUIDs(world))
+    }
+
+    // G-4: the 500-row cap on older pages.
+    do {
+        let world = manyRows(Array(1...600))
+        let h = try MailHarness(world: world)
+        defer { h.finish() }
+        guard await h.start(rows: 25) else { expect("G-4 harness", false); return }
+        var pages = 0
+        while h.service.messages.count < 25 + MailService.olderLimit && pages < 25 && h.service.canLoadOlder(accountID: nil) {
+            let count = h.service.messages.count
+            h.service.loadOlder(accountID: nil)
+            _ = await h.settle { h.service.messages.count > count && h.service.olderLoading.isEmpty }
+            pages += 1
+        }
+        expect("G-4 older pages fill up to the 500-row cap", h.service.messages.count == 25 + MailService.olderLimit)
+        let sent = world.log.count
+        h.service.loadOlder(accountID: nil)
+        _ = await waitFor(0.5) { false }
+        _ = await h.settle()
+        expect("G-4 at the 500-row cap, load older sends no further fetch and reports exhausted",
+               !world.commands[sent...].contains { $0.hasPrefix("UID FETCH") || $0.hasPrefix("UID SEARCH UID") }
+                   && !h.service.canLoadOlder(accountID: nil) && h.service.messages.count == 25 + MailService.olderLimit)
+    }
+
+    // G-5: chunked downloads (parts over MailIMAP.attachmentChunk).
+    func chunkWorld(bodyCount: Int) -> (FakeIMAPWorld, Data) {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".utf8)
+        var body = [UInt8](repeating: 0, count: bodyCount)
+        for index in body.indices { body[index] = alphabet[(index * 7 + index / 1000) % alphabet.count] }
+        let raw = crlfData("Content-Type: multipart/mixed; boundary=\"c\"\n\n--c\nContent-Type: text/plain\n\nHola\n--c\nContent-Type: application/octet-stream\nContent-Disposition: attachment; filename=\"big.bin\"\n\n")
+            + Data(body) + crlfData("\n--c--\n")
+        let structure = #"(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1 NIL NIL NIL NIL)("APPLICATION" "OCTET-STREAM" NIL NIL NIL "7BIT" \#(bodyCount) NIL ("ATTACHMENT" ("FILENAME" "big.bin")) NIL NIL) "MIXED" ("BOUNDARY" "c") NIL NIL NIL)"#
+        let world = FakeIMAPWorld(uids: [(1, false)])
+        world.mutate { $0.messages.append(.init(uid: 9, unread: false, raw: raw, structure: structure)) }
+        return (world, Data(body))
+    }
+    func download(_ world: FakeIMAPWorld) async throws -> (MailHarness, MailMessage, MailAttachment)? {
+        let h = try MailHarness(world: world)
+        guard await h.start(rows: 2), let row = h.row(9) else { h.finish(); return nil }
+        _ = try await h.service.content(of: row)
+        guard let part = h.service.attachments(for: row)?.first(where: { $0.section == "2" }) else { h.finish(); return nil }
+        h.service.fetchAttachment(part, of: row)
+        _ = await waitFor(10) {
+            let state = h.service.attachmentState(row, part)
+            return state == .ready || state == .failed
+        }
+        return (h, row, part)
+    }
+    do {
+        let chunk = MailIMAP.attachmentChunk
+        let (world, body) = chunkWorld(bodyCount: 2 * chunk)
+        if let (h, row, part) = try await download(world) {
+            defer { h.finish() }
+            let chunks = world.commands.filter { $0.hasPrefix("UID FETCH 9 (UID BODY.PEEK[2]<") }
+            expect("G-5 a part ending exactly on a chunk boundary downloads in 1 MB chunks and is byte-exact",
+                   h.service.attachmentState(row, part) == .ready && h.service.attachmentData(row, part) == body
+                       && chunks.first == "UID FETCH 9 (UID BODY.PEEK[2]<0.\(chunk)>)"
+                       && chunks.dropFirst().first == "UID FETCH 9 (UID BODY.PEEK[2]<\(chunk).\(chunk)>)")
+        } else { expect("G-5 boundary harness", false) }
+    }
+    do {
+        let chunk = MailIMAP.attachmentChunk
+        let (world, _) = chunkWorld(bodyCount: chunk * 5 / 2)
+        world.on("UID FETCH 9 (UID BODY.PEEK[2]<\(chunk).\(chunk)>)",
+                 .reply("* 2 FETCH (UID 9 BODY[2]<\(chunk)> {1000}\r\n" + String(repeating: "x", count: 1000) + ")\r\n§ OK done"))
+        if let (h, row, part) = try await download(world) {
+            defer { h.finish() }
+            expect("G-5 a short non-final chunk fails the download instead of producing a truncated file",
+                   h.service.attachmentState(row, part) == .failed && h.service.attachmentData(row, part) == nil)
+        } else { expect("G-5 short-chunk harness", false) }
+    }
+}
+
 // MARK: Entry point
 
 @MainActor
@@ -708,4 +855,5 @@ func runFeatureChecks() async {
     do { try await checkBulkActions() } catch { expect("Bulk action checks ran (\(error))", false) }
     do { try await checkOlderPages() } catch { expect("Older page checks ran (\(error))", false) }
     do { try await checkFeatureReviewFindings() } catch { expect("df6e985 review checks ran (\(error))", false) }
+    do { try await checkGFindings() } catch { expect("77dc3f0 review checks ran (\(error))", false) }
 }

@@ -294,9 +294,11 @@ final class FakeIMAPWorld: @unchecked Sendable {
                     var data = section(message, spec)
                     var name = "BODY[\(spec)]"
                     let rest = item[item.index(after: close)...]
-                    if rest.hasPrefix("<0."), let size = Int(rest.dropFirst(3).dropLast()) {
-                        data = Data(data.prefix(size))
-                        name += "<0>"
+                    let range = rest.dropFirst().dropLast().split(separator: ".").compactMap { Int($0) }
+                    if rest.hasPrefix("<"), range.count == 2 {
+                        let lower = min(range[0], data.count), upper = min(range[0] + range[1], data.count)
+                        data = Data(data[data.startIndex + lower..<data.startIndex + upper])
+                        name += "<\(range[0])>"
                     }
                     line.append(Data(" \(name) {\(data.count)}\r\n".utf8))
                     line.append(data)
