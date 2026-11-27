@@ -58,6 +58,8 @@ final class MailBodyCache: @unchecked Sendable {
     private var tick: UInt64 = 0
     /// Per account folder path: relative file name -> size and last use. Built on first use of that account.
     private var disk: [String: [String: DiskEntry]] = [:]
+    /// Accounts purged (removed, turned off): nothing is kept or written for them until `allow`.
+    private var forgotten: Set<String> = []
 
     init(directory: URL?, memoryLimit: Int = 24 * 1024 * 1024, memoryCount: Int = 30,
          diskLimit: Int = 100 * 1024 * 1024, maxAge: TimeInterval = 30 * 24 * 3600, now: @escaping () -> Date = Date.init) {
@@ -94,7 +96,9 @@ final class MailBodyCache: @unchecked Sendable {
     func rememberInMemory(_ content: MailContent, for key: MailBodyKey) { remember(content, for: key) }
 
     private func remember(_ content: MailContent, for key: MailBodyKey) {
+        guard !content.isBlank else { return }   // a blank body is never served again; the reader fetches it anew
         lock.withLock {
+            guard !forgotten.contains(key.account) else { return }
             let bytes = Self.size(of: content)
             guard bytes <= memoryLimit else { return }
             if let old = memory[key] { memoryBytes -= old.bytes }
@@ -116,9 +120,12 @@ final class MailBodyCache: @unchecked Sendable {
         if let content = memoryContent(for: key) { return (content, .memory) }
         guard let url = fileURL(for: key), let account = accountFolder(key.account)?.path else { return nil }
         let name = Self.relative(key)
+        ensureIndexed(account)
         guard lock.withLock({ index(account)[name] != nil }) else { return nil }
-        guard let data = try? Data(contentsOf: url), let stored = try? JSONDecoder().decode(Stored.self, from: data) else {
+        guard let data = try? Data(contentsOf: url), let stored = try? JSONDecoder().decode(Stored.self, from: data),
+              !MailContent(html: stored.html, text: stored.text).isBlank else {
             lock.withLock { disk[account]?[name] = nil }
+            try? FileManager.default.removeItem(at: url)
             return nil
         }
         let content = MailContent(html: stored.html, text: stored.text)
@@ -130,20 +137,24 @@ final class MailBodyCache: @unchecked Sendable {
     func contains(_ key: MailBodyKey) -> Bool {
         if lock.withLock({ memory[key] != nil }) { return true }
         guard let account = accountFolder(key.account)?.path else { return false }
+        ensureIndexed(account)
         return lock.withLock { index(account)[Self.relative(key)] != nil }
     }
 
     /// Stores in memory and, when a directory is set, on disk (atomic, 0600), then trims the account to its limits.
     func store(_ content: MailContent, for key: MailBodyKey) {
+        guard !content.isBlank, !lock.withLock({ forgotten.contains(key.account) }) else { return }
         remember(content, for: key)
         guard let url = fileURL(for: key), let account = accountFolder(key.account),
               let data = try? JSONEncoder().encode(Stored(html: content.html, text: content.text)) else { return }
         let folder = url.deletingLastPathComponent()
+        ensureIndexed(account.path)
         guard Self.makePrivateDirectory(folder, excludeFrom: directory) else { return }
         let temporary = folder.appendingPathComponent(".\(UUID().uuidString).tmp")
         guard FileManager.default.createFile(atPath: temporary.path, contents: data,
                                              attributes: [.posixPermissions: 0o600]) else { return }
-        guard rename(temporary.path, url.path) == 0 else {
+        // Purged while this was being written: the file must not survive.
+        guard !lock.withLock({ forgotten.contains(key.account) }), rename(temporary.path, url.path) == 0 else {
             try? FileManager.default.removeItem(at: temporary)
             return
         }
@@ -155,13 +166,32 @@ final class MailBodyCache: @unchecked Sendable {
         trim(account: account.path)
     }
 
-    /// Forgets everything for an account (removed or disabled).
+    /// Forgets everything for an account (removed or disabled), and keeps refusing its bodies until `allow`, so a
+    /// write that was already on its way cannot bring the account's files back.
     func purge(account: String) {
+        forget(account: account)
+        deleteFiles(account: account)
+    }
+
+    /// The memory half of purge, cheap enough for the main thread.
+    func forget(account: String) {
         lock.withLock {
+            forgotten.insert(account)
             for key in memory.keys where key.account == account { memoryBytes -= memory[key]!.bytes; memory[key] = nil }
             if let folder = accountFolder(account) { disk[folder.path] = [:] }
         }
-        if let folder = accountFolder(account) { try? FileManager.default.removeItem(at: folder) }
+    }
+
+    /// The disk half of purge (call off the main thread).
+    func deleteFiles(account: String) {
+        guard let folder = accountFolder(account) else { return }
+        try? FileManager.default.removeItem(at: folder)
+        lock.withLock { disk[folder.path] = [:] }
+    }
+
+    /// The account syncs again: its bodies may be cached again.
+    func allow(account: String) {
+        lock.withLock { _ = forgotten.remove(account) }
     }
 
     /// The mailbox's UIDVALIDITY changed: bodies from every other epoch belong to different messages now.
@@ -177,9 +207,47 @@ final class MailBodyCache: @unchecked Sendable {
         let epochs = (try? FileManager.default.contentsOfDirectory(at: box, includingPropertiesForKeys: nil)) ?? []
         for epoch in epochs where epoch.lastPathComponent != keep { try? FileManager.default.removeItem(at: epoch) }
         let boxName = box.lastPathComponent + "/"
+        ensureIndexed(account.path)
         lock.withLock {
             disk[account.path] = index(account.path).filter { !$0.key.hasPrefix(boxName) || $0.key.hasPrefix(boxName + keep + "/") }
         }
+    }
+
+    /// Housekeeping at launch (call off the main thread): deletes the folders of accounts not in `accounts` (removed,
+    /// or disabled while Cala was not running), half-written temporary files, and each kept account's bodies past
+    /// `maxAge` or over `diskLimit`.
+    func cleanUp(keeping accounts: [String]) {
+        guard let directory else { return }
+        let manager = FileManager.default
+        let kept = Dictionary(uniqueKeysWithValues: accounts.map { (Self.hash($0), $0) })
+        for listed in (try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] {
+            let folder = directory.appendingPathComponent(listed.lastPathComponent, isDirectory: true)
+            if kept[folder.lastPathComponent] == nil {
+                try? manager.removeItem(at: folder)
+                lock.withLock { disk[folder.path] = nil }
+                continue
+            }
+            if let walker = manager.enumerator(at: folder, includingPropertiesForKeys: nil) {
+                for case let url as URL in walker where url.pathExtension == "tmp" { try? manager.removeItem(at: url) }
+            }
+            trim(account: folder.path)
+        }
+        lock.withLock {
+            for key in memory.keys where !accounts.contains(key.account) {
+                memoryBytes -= memory[key]!.bytes
+                memory[key] = nil
+            }
+        }
+    }
+
+    /// Mail was turned off: every cached body goes.
+    func purgeAll() {
+        lock.withLock {
+            memory.removeAll()
+            memoryBytes = 0
+            disk.removeAll()
+        }
+        if let directory { try? FileManager.default.removeItem(at: directory) }
     }
 
     // MARK: Disk layout
@@ -227,9 +295,18 @@ final class MailBodyCache: @unchecked Sendable {
         return true
     }
 
-    /// Caller holds `lock`. Lists the account's files once (size and modification date = last use).
-    private func index(_ account: String) -> [String: DiskEntry] {
-        if let entries = disk[account] { return entries }
+    /// Caller holds `lock`. The account's files as listed by ensureIndexed (empty until then).
+    private func index(_ account: String) -> [String: DiskEntry] { disk[account] ?? [:] }
+
+    /// Lists the account's files once (size and modification date = last use), without holding the lock while the
+    /// folder is read, so memory lookups on the main thread never wait for the disk.
+    private func ensureIndexed(_ account: String) {
+        guard lock.withLock({ disk[account] == nil }) else { return }
+        let entries = Self.scan(account)
+        lock.withLock { if disk[account] == nil { disk[account] = entries } }
+    }
+
+    private static func scan(_ account: String) -> [String: DiskEntry] {
         var entries: [String: DiskEntry] = [:]
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
         if let walker = FileManager.default.enumerator(at: URL(fileURLWithPath: account), includingPropertiesForKeys: keys) {
@@ -240,11 +317,11 @@ final class MailBodyCache: @unchecked Sendable {
                 entries[parts.joined(separator: "/")] = DiskEntry(bytes: values.fileSize ?? 0, used: values.contentModificationDate ?? .distantPast)
             }
         }
-        disk[account] = entries
         return entries
     }
 
     private func touch(_ url: URL, name: String, account: String) {
+        ensureIndexed(account)
         let date = now()
         try? FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
         lock.withLock {
@@ -256,6 +333,7 @@ final class MailBodyCache: @unchecked Sendable {
 
     /// Drops files older than `maxAge`, then the least recently used until the account is under `diskLimit`.
     func trim(account folder: String) {
+        ensureIndexed(folder)
         let doomed: [String] = lock.withLock {
             var entries = index(folder)
             let cutoff = now().addingTimeInterval(-maxAge)
@@ -279,6 +357,7 @@ final class MailBodyCache: @unchecked Sendable {
     /// Disk bytes used by an account (for checks and logs).
     func diskBytes(account: String) -> Int {
         guard let folder = accountFolder(account)?.path else { return 0 }
+        ensureIndexed(folder)
         return lock.withLock { index(folder).values.reduce(0) { $0 + $1.bytes } }
     }
 }

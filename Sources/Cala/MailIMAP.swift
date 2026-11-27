@@ -5,7 +5,7 @@ import os
 enum MailIMAPError: Error {
     case server(MailServerError)
     case disconnected, timedOut, invalidResponse, missingMailbox, staleMessage, moveUnsupported, rejected, responseTooLarge, messageTooLarge
-    /// The server did not acknowledge DONE within MailLink.doneAckTimeout: the connection is silently dead.
+    /// The server did not acknowledge DONE in time (see MailIMAP.doneAckTimeout): the connection is silently dead.
     case linkDead
 }
 
@@ -14,6 +14,8 @@ struct MailInboxSnapshot {
     var messages: [MailMessage]
     var unread: Int
     var canArchive: Bool
+    /// Rows whose preview was not finished (the sync stepped aside): read again by the next sync.
+    var incomplete: Set<UInt32> = []
 }
 
 protocol MailIMAPTransport {
@@ -26,11 +28,14 @@ protocol MailIMAPTransport {
     func takeLinkSuspect() -> Bool
     /// The current path is Low Data Mode or expensive (cellular, personal hotspot): skip background downloads.
     var isConstrainedPath: Bool { get }
+    /// Bytes read from the network so far: a long reply that keeps arriving is not a stalled one.
+    var receivedByteCount: Int { get }
 }
 
 extension MailIMAPTransport {
     func takeLinkSuspect() -> Bool { false }
     var isConstrainedPath: Bool { false }
+    var receivedByteCount: Int { 0 }
 }
 
 /// Which command stream a connection uses. The two differ only in read-only commands; delete, archive and the flag
@@ -60,6 +65,18 @@ final class MailIMAP {
     private static let partPreviewSize = 32 * 1024
     fileprivate static let messageSizeLimit = 25 * 1024 * 1024
     private static let commandTimeout = MailLink.commandTimeout
+    /// Body downloads (fast tuning) fail only after this long without a single byte, however long the whole reply takes.
+    static let bodyStallMS = 20_000
+
+    /// How far a move got before the server refused a step (UIDPLUS servers move in three commands).
+    enum MoveStage: Equatable {
+        case none
+        /// UID COPY succeeded: a copy is in the target mailbox, the original is untouched.
+        case copied
+        /// UID STORE \Deleted succeeded too: the original is flagged but still in the inbox.
+        case flagged
+        case done
+    }
 
     private let socket: MailIMAPTransport
     private let provider: MailProvider
@@ -82,8 +99,16 @@ final class MailIMAP {
     private var revision = 0
     private var archiveAvailable: Bool?
     private var mailboxCache: [MailIMAPMailbox]?
-    /// While our own FETCH runs, its FETCH responses are answers, not news about the mailbox.
-    private var solicitedFetch = false
+    /// While our own FETCH runs, its answers are not news about the mailbox. A FETCH counts as an answer when it is for
+    /// one of the requested UIDs (or sequence numbers) and, if it carries FLAGS, FLAGS were requested.
+    private var solicitedFetch: (uids: Set<UInt32>?, sequences: ClosedRange<Int>?, flags: Bool)?
+    /// Smoothed round trip of small commands, in milliseconds (0 until measured).
+    private var roundTripMS = 0
+    /// The last command failed because the server answered it NO or BAD (the connection is fine).
+    private(set) var lastCommandRefused = false
+    private(set) var lastMoveStage = MoveStage.none
+    /// Tags of read-only commands given up on after a timeout: their late tagged answers are skipped.
+    private var abandonedTags: Set<String> = []
     // Latency instrumentation (mail-timing log lines only; no behaviour depends on these).
     /// Set by MailService: whose lines these are ("acct=... op=N" / "sync=N" / "signin" / "idle").
     var timingContext = ""
@@ -98,6 +123,10 @@ final class MailIMAP {
     /// Bumped whenever the server reports a change to the mailbox (EXISTS, EXPUNGE, flag FETCH).
     var changeRevision: Int { revision }
     var isConstrainedPath: Bool { socket.isConstrainedPath }
+    var currentValidity: UInt32? { validity }
+
+    /// How long DONE may take: never less than MailLink.doneAckTimeout, four round trips on a slow link.
+    var doneAckTimeoutMS: Int { max(MailLink.doneAckTimeout * 1000, 4 * roundTripMS) }
 
     func close() { socket.close() }
     func requestRefresh() { socket.interrupt() }
@@ -159,7 +188,7 @@ final class MailIMAP {
         guard let validity else { throw MailIMAPError.invalidResponse }
         if yielded("noop") { return nil }
         let startRevision = revision
-        let result: (messages: [UInt32: MailMessage], unseen: Set<UInt32>, fetched: Int)?
+        let result: SyncRows?
         if tuning.incrementalSync {
             result = try await incrementalMessages(accountID: accountID, validity: validity, known: known, yielded: yielded)
         } else {
@@ -172,14 +201,21 @@ final class MailIMAP {
         if quietCommands.count > 0 {
             MailTiming.line("sync-extended-previews \(timingContext) n=\(quietCommands.count) ms=\(quietCommands.ms) bytes=\(quietCommands.bytes)")
         }
-        MailTiming.line("sync-done \(timingContext) reason=\(timingReason) mode=\(mode) total_ms=\(MailTiming.ms(since: syncStart)) bytes=\(bytesTotal) messages=\(latest.count) fetched_headers=\(result.fetched) unread=\(result.unseen.count)")
+        MailTiming.line("sync-done \(timingContext) reason=\(timingReason) mode=\(mode) total_ms=\(MailTiming.ms(since: syncStart)) bytes=\(bytesTotal) messages=\(latest.count) fetched_headers=\(result.fetched) unread=\(result.unseen.count) incomplete=\(result.incomplete.count) deleted_hidden=\(result.deletedHidden)")
         return MailInboxSnapshot(validity: validity, messages: Array(latest), unread: result.unseen.count,
-                                 canArchive: archiveAvailable == true)
+                                 canArchive: archiveAvailable == true, incomplete: result.incomplete)
+    }
+
+    private struct SyncRows {
+        var messages: [UInt32: MailMessage]
+        var unseen: Set<UInt32>
+        var fetched: Int
+        var incomplete: Set<UInt32> = []
+        var deletedHidden = 0
     }
 
     /// The original sync: headers and a 16 KB preview of the newest 25, a 256 KB second try per empty preview.
-    private func fullMessages(accountID: String, validity: UInt32,
-                              yielded: (String) -> Bool) async throws -> (messages: [UInt32: MailMessage], unseen: Set<UInt32>, fetched: Int)? {
+    private func fullMessages(accountID: String, validity: UInt32, yielded: (String) -> Bool) async throws -> SyncRows? {
         var headers: [MailIMAPFetch] = []
         if exists > 0 {
             let first = max(1, exists - 24)
@@ -212,24 +248,31 @@ final class MailIMAP {
             messages[uid] = Self.message(fetch, uid: uid, fields: fields, snippet: snippet, accountID: accountID,
                                          validity: validity, unread: unseen.contains(uid))
         }
-        return (messages, unseen, headers.count)
+        return SyncRows(messages: messages, unseen: unseen, fetched: headers.count)
     }
 
     /// UID FLAGS for the newest 25, headers and previews only for UIDs not seen before (same validity), and one
-    /// BODYSTRUCTURE-guided look at a single text part for previews whose first 16 KB had nothing readable.
+    /// BODYSTRUCTURE-guided look at a single text part for previews whose first 16 KB had nothing readable. Rows flagged
+    /// \Deleted (a move that could not finish expunging) are left out.
     private func incrementalMessages(accountID: String, validity: UInt32, known: MailKnownMessages?,
-                                     yielded: (String) -> Bool) async throws -> (messages: [UInt32: MailMessage], unseen: Set<UInt32>, fetched: Int)? {
+                                     yielded: (String) -> Bool) async throws -> SyncRows? {
         var window: [UInt32] = []
+        var deleted: Set<UInt32> = []
         if let range = MailSyncPlanner.window(exists: exists) {
-            window = try await solicited { try await command("FETCH \(range.lowerBound):* (UID FLAGS)") }
-                .compactMap { $0.fetch?.uid }
+            let fetches = try await solicited(sequences: range.lowerBound...Int.max, flags: true) {
+                try await command("FETCH \(range.lowerBound):* (UID FLAGS)")
+            }.compactMap(\.fetch)
+            for fetch in fetches {
+                guard let uid = fetch.uid else { continue }
+                if fetch.flags.contains("\\DELETED") { deleted.insert(uid) } else { window.append(uid) }
+            }
         }
         let plan = MailSyncPlanner.plan(window: window, known: known, validity: validity)
         if yielded("window") { return nil }
         var headers: [MailIMAPFetch] = []
         if !plan.missing.isEmpty {
             let fields = "UID INTERNALDATE\(gmailIDs) BODY.PEEK[\(Self.header)] BODY.PEEK[TEXT]<0.\(Self.previewSize)>"
-            headers = try await solicited {
+            headers = try await solicited(uids: plan.missing) {
                 try await command("UID FETCH \(MailSyncPlanner.uidSet(plan.missing)) (\(fields))")
             }.compactMap { response in
                 let fetch = response.fetch
@@ -238,11 +281,11 @@ final class MailIMAP {
             if yielded("headers") { return nil }
         }
         let unseen = try await unseenUIDs()
-        var messages: [UInt32: MailMessage] = [:]
+        var rows = SyncRows(messages: [:], unseen: unseen, fetched: headers.count, deletedHidden: deleted.count)
         for uid in plan.known {
             guard var message = known?.message(uid) else { continue }
             message.unread = unseen.contains(uid)
-            messages[uid] = message
+            rows.messages[uid] = message
         }
         var emptyPreviews: [UInt32: [String: String]] = [:]
         for fetch in headers {
@@ -253,23 +296,28 @@ final class MailIMAP {
                 snippet = MailMIME.snippet(preview, headers: fields)
                 if snippet.isEmpty && preview.count == Self.previewSize { emptyPreviews[uid] = fields }
             }
-            messages[uid] = Self.message(fetch, uid: uid, fields: fields, snippet: snippet, accountID: accountID,
-                                         validity: validity, unread: unseen.contains(uid))
+            rows.messages[uid] = Self.message(fetch, uid: uid, fields: fields, snippet: snippet, accountID: accountID,
+                                              validity: validity, unread: unseen.contains(uid))
         }
-        if !emptyPreviews.isEmpty, !yielded("previews") {
-            for (uid, snippet) in try await partPreviews(Array(emptyPreviews.keys)) {
-                guard let message = messages[uid] else { continue }
-                messages[uid] = message.withSnippet(snippet)
+        if !emptyPreviews.isEmpty {
+            if yielded("previews") {
+                // Shown without a preview for now; the next sync fetches these rows again.
+                rows.incomplete = Set(emptyPreviews.keys)
+            } else {
+                for (uid, snippet) in try await partPreviews(Array(emptyPreviews.keys)) {
+                    guard let message = rows.messages[uid] else { continue }
+                    rows.messages[uid] = message.withSnippet(snippet)
+                }
             }
         }
-        return (messages, unseen, headers.count)
+        return rows
     }
 
     /// One BODYSTRUCTURE fetch for all of `uids`, then one partial fetch per distinct text part.
     private func partPreviews(_ uids: [UInt32]) async throws -> [UInt32: String] {
         let started = MailTiming.now()
         let bytesBefore = bytesTotal
-        let structures = try await solicited {
+        let structures = try await solicited(uids: uids) {
             try await command("UID FETCH \(MailSyncPlanner.uidSet(uids)) (UID BODYSTRUCTURE)")
         }
         var groups: [String: [(uid: UInt32, part: MailBodyPart)]] = [:]
@@ -281,7 +329,7 @@ final class MailIMAP {
         var snippets: [UInt32: String] = [:]
         for (section, members) in groups.sorted(by: { $0.key < $1.key }) {
             let set = MailSyncPlanner.uidSet(members.map(\.uid))
-            let responses = try await solicited {
+            let responses = try await solicited(uids: members.map(\.uid)) {
                 try await command("UID FETCH \(set) (UID BODY.PEEK[\(section)]<0.\(Self.partPreviewSize)>)", quiet: true)
             }
             for fetch in responses.compactMap(\.fetch) {
@@ -331,6 +379,7 @@ final class MailIMAP {
             let response = try await read(until: startDeadline)
             let words = response.line.split(separator: " ", maxSplits: 2)
             if words.first == "+" { break }
+            if skipAbandoned(words.first) { continue }
             if words.first == Substring(tag) {
                 if words.dropFirst().first?.uppercased() == "BAD" {
                     supportsIdle = false
@@ -352,6 +401,7 @@ final class MailIMAP {
             while let response = try await socket.receive(until: deadline, interruptible: true) {
                 try Task.checkCancellation()
                 let words = response.line.split(separator: " ", maxSplits: 2)
+                if skipAbandoned(words.first) { continue }
                 if words.first == Substring(tag) {
                     guard words.dropFirst().first?.uppercased() == "OK" else { throw Self.serverError(response) }
                     wakeOutcome = "idle-server-end"
@@ -369,11 +419,12 @@ final class MailIMAP {
         let exitStart = MailTiming.now()
         socket.send("DONE\r\n")
         bytesReceived = 0
+        let ackTimeout = doneAckTimeoutMS
         do {
-            // A live server answers DONE in a round trip; silence means the link died while idle.
-            _ = try await completion(tag: tag, until: DispatchTime.now() + .seconds(MailLink.doneAckTimeout))
+            // A live server answers DONE in a round trip; silence (no byte at all) means the link died while idle.
+            _ = try await completion(tag: tag, until: DispatchTime.now() + .milliseconds(ackTimeout), stallMS: ackTimeout)
         } catch MailIMAPError.timedOut {
-            MailTiming.line("link-dead \(timingContext) reason=done-ack-timeout outcome=\(outcome) idle_ms=\(MailTiming.ms(from: idleStart, to: exitStart)) waited_ms=\(MailTiming.ms(since: exitStart))")
+            MailTiming.line("link-dead \(timingContext) reason=done-ack-timeout outcome=\(outcome) idle_ms=\(MailTiming.ms(from: idleStart, to: exitStart)) waited_ms=\(MailTiming.ms(since: exitStart)) timeout_ms=\(ackTimeout) rtt_ms=\(roundTripMS)")
             throw MailIMAPError.linkDead
         }
         wakeOutcome = outcome
@@ -390,7 +441,7 @@ final class MailIMAP {
         guard tuning.partialBodies else { return try await wholeContent(of: message, started: contentStart) }
 
         // One round trip for the size and the structure, one for just the readable parts.
-        let responses = try await solicited {
+        let responses = try await solicited(uids: [message.uid]) {
             try await command("UID FETCH \(message.uid) (UID RFC822.SIZE BODYSTRUCTURE)")
         }
         guard let info = responses.lazy.compactMap(\.fetch)
@@ -403,12 +454,12 @@ final class MailIMAP {
                 MailTiming.line("content-fetched \(timingContext) imap_and_parse_ms=\(MailTiming.ms(since: contentStart))")
                 return parsed
             }
-            MailTiming.line("body-plan \(timingContext) mode=full reason=assemble full_bytes=\(size)")
+            MailTiming.line("body-plan \(timingContext) mode=full reason=assemble-or-blank full_bytes=\(size)")
         } else {
             MailTiming.line("body-plan \(timingContext) mode=full reason=\(info.structureTokens == nil ? "no-structure" : "unsure") full_bytes=\(size)")
         }
         guard size <= Self.messageSizeLimit else { throw MailIMAPError.messageTooLarge }
-        return try await fullBody(of: message, started: contentStart)
+        return try await fullBody(of: message, started: contentStart, stallMS: Self.bodyStallMS)
     }
 
     /// The original reader fetch: RFC822.SIZE, then the whole message.
@@ -419,11 +470,11 @@ final class MailIMAP {
             throw MailIMAPError.staleMessage
         }
         guard size <= Self.messageSizeLimit else { throw MailIMAPError.messageTooLarge }
-        return try await fullBody(of: message, started: contentStart)
+        return try await fullBody(of: message, started: contentStart, stallMS: nil)
     }
 
-    private func fullBody(of message: MailMessage, started contentStart: UInt64) async throws -> MailContent {
-        let responses = try await command("UID FETCH \(message.uid) (UID BODY.PEEK[])", timeout: 60)
+    private func fullBody(of message: MailMessage, started contentStart: UInt64, stallMS: Int?) async throws -> MailContent {
+        let responses = try await command("UID FETCH \(message.uid) (UID BODY.PEEK[])", timeout: 60, stallMS: stallMS)
         for response in responses {
             guard let fetch = response.fetch, fetch.uid == message.uid, let bytes = fetch.body("") else { continue }
             guard bytes.count <= Self.messageSizeLimit else { throw MailIMAPError.messageTooLarge }
@@ -437,14 +488,23 @@ final class MailIMAP {
     }
 
     /// Fetches the planned parts with their MIME headers and reads them as MailMIME reads the whole message.
-    /// nil: a part was missing or the rebuild was unsafe, so the caller fetches the whole message.
+    /// nil: a part was missing, the rebuild was unsafe, or it read as blank, so the caller fetches the whole message.
     private func partialContent(uid: UInt32, structure: MailBodyPart, plan: MailPartPlan) async throws -> MailContent? {
-        let items = plan.sections.map { "BODY.PEEK[\($0).MIME] BODY.PEEK[\($0)]" }.joined(separator: " ")
-        let responses = try await solicited { try await command("UID FETCH \(uid) (UID \(items))", timeout: 60) }
+        // A multipart's section asks only for its MIME header (its Content-ID); leaves come with their bodies.
+        let headerOnly = Set(plan.sections.filter { structure.part(at: $0)?.isMultipart == true })
+        let items = plan.sections.map {
+            headerOnly.contains($0) ? "BODY.PEEK[\($0).MIME]" : "BODY.PEEK[\($0).MIME] BODY.PEEK[\($0)]"
+        }.joined(separator: " ")
+        let responses = try await solicited(uids: [uid]) {
+            try await command("UID FETCH \(uid) (UID \(items))", timeout: 60, stallMS: Self.bodyStallMS, abandonOnTimeout: true)
+        }
         var parts: [String: MailPartAssembler.Part] = [:]
         for fetch in responses.compactMap(\.fetch) where fetch.uid == uid {
             for section in plan.sections where parts[section] == nil {
-                if let header = fetch.body(section + ".MIME"), let body = fetch.body(section) {
+                guard let header = fetch.body(section + ".MIME") else { continue }
+                if headerOnly.contains(section) {
+                    parts[section] = MailPartAssembler.Part(header: header, body: Data())
+                } else if let body = fetch.body(section) {
                     parts[section] = MailPartAssembler.Part(header: header, body: body)
                 }
             }
@@ -454,8 +514,9 @@ final class MailIMAP {
         guard let message = MailPartAssembler.assemble(structure, parts: parts, boundary: seed) else { return nil }
         let parseStart = MailTiming.now()
         let parsed = MailMIME.content(message)
-        MailTiming.line("mime-parse \(timingContext) ms=\(MailTiming.ms(since: parseStart)) raw_bytes=\(message.count) partial=true")
-        return parsed
+        MailTiming.line("mime-parse \(timingContext) ms=\(MailTiming.ms(since: parseStart)) raw_bytes=\(message.count) partial=true blank=\(parsed.isBlank)")
+        // A text part was planned, so a blank result means the rebuild missed something: never show (or cache) that.
+        return parsed.isBlank ? nil : parsed
     }
 
     /// Background download of `messages`' readable parts, stopping between messages when `shouldStop` says so or the
@@ -465,8 +526,9 @@ final class MailIMAP {
         let valid = messages.filter { (try? validate($0)) != nil }
         guard tuning.partialBodies, !valid.isEmpty else { return ([], "none") }
         let startRevision = revision
-        let responses = try await solicited {
-            try await command("UID FETCH \(MailSyncPlanner.uidSet(valid.map(\.uid))) (UID RFC822.SIZE BODYSTRUCTURE)")
+        let responses = try await solicited(uids: valid.map(\.uid)) {
+            try await command("UID FETCH \(MailSyncPlanner.uidSet(valid.map(\.uid))) (UID RFC822.SIZE BODYSTRUCTURE)",
+                              stallMS: Self.bodyStallMS, abandonOnTimeout: true)
         }
         var plans: [UInt32: (structure: MailBodyPart, plan: MailPartPlan)] = [:]
         var sizes: [UInt32: (bytes: Int, largest: Int)] = [:]
@@ -488,6 +550,17 @@ final class MailIMAP {
         return (contents, revision != startRevision ? "change" : "done")
     }
 
+    /// Whether `message` is still in the selected mailbox (read-only; used after a move's answer was lost).
+    func isInInbox(_ message: MailMessage) async throws -> Bool {
+        try validate(message)
+        let responses = try await solicited(uids: [message.uid]) { try await command("UID FETCH \(message.uid) (UID)") }
+        // Only a bare (UID n) answer counts: a late reply to an abandoned body fetch must not look like one.
+        return responses.contains { response in
+            guard let fetch = response.fetch, fetch.uid == message.uid else { return false }
+            return fetch.messageSize == nil && fetch.structureTokens == nil && !fetch.hasFlags && fetch.attributeCount == 1
+        }
+    }
+
     func markRead(_ message: MailMessage) async throws {
         try validate(message)
         _ = try await command("UID STORE \(message.uid) +FLAGS.SILENT (\\Seen)")
@@ -498,8 +571,21 @@ final class MailIMAP {
         _ = try await command("UID STORE \(message.uid) -FLAGS.SILENT (\\Seen)")
     }
 
+    /// Undoes the \Deleted flag a move left behind when its UID EXPUNGE was refused.
+    func clearDeleted(_ message: MailMessage) async throws {
+        try validate(message)
+        _ = try await command("UID STORE \(message.uid) -FLAGS.SILENT (\\Deleted)")
+    }
+
     func markAllRead() async throws {
-        let uids = try await unseenUIDs().sorted()
+        try await markAllRead(through: nil, validity: nil)
+    }
+
+    /// `through`: the newest UID the person saw when they asked; mail that arrived later stays unread. `validity`: the
+    /// epoch those UIDs belong to; another epoch means they name other messages, so nothing is sent.
+    func markAllRead(through maxUID: UInt32?, validity expected: UInt32?) async throws {
+        if let expected, validity != expected { throw MailIMAPError.staleMessage }
+        let uids = try await unseenUIDs().filter { uid in maxUID.map { uid <= $0 } ?? true }.sorted()
         for first in stride(from: 0, to: uids.count, by: 300) {
             let set = uids[first..<min(first + 300, uids.count)].map(String.init).joined(separator: ",")
             _ = try await command("UID STORE \(set) +FLAGS.SILENT (\\Seen)")
@@ -517,6 +603,7 @@ final class MailIMAP {
     }
 
     private func move(_ message: MailMessage, toTrash: Bool) async throws {
+        lastMoveStage = .none
         // LIST supplies the wire name (including modified UTF-7). Only quote it for the command.
         var cached = tuning.cachesMailboxList && mailboxCache != nil
         var boxes = try await listMailboxes(reuse: true)
@@ -533,13 +620,19 @@ final class MailIMAP {
             mailbox = target(boxes)
         }
         guard var mailbox else { throw MailIMAPError.missingMailbox }
+        /// After a refusal with a cached listing: the mailbox's current name, only if it changed (else the refusal stands).
+        func renamed() async throws -> MailIMAPMailbox {
+            guard let fresh = target(try await listMailboxes(reuse: false)) else { throw MailIMAPError.missingMailbox }
+            guard fresh.name != mailbox.name else { throw MailIMAPError.rejected }
+            return fresh
+        }
         if capabilities.contains("MOVE") {
             do {
                 _ = try await command("UID MOVE \(message.uid) \(Self.quote(mailbox.name))")
             } catch MailIMAPError.rejected where cached {
-                // NO/BAD means nothing moved; a renamed mailbox is the likely cause. One retry with a fresh listing.
-                guard let fresh = target(try await listMailboxes(reuse: false)) else { throw MailIMAPError.missingMailbox }
-                _ = try await command("UID MOVE \(message.uid) \(Self.quote(fresh.name))")
+                // NO/BAD means nothing moved; a renamed mailbox is the likely cause. One retry with the new name.
+                mailbox = try await renamed()
+                _ = try await command("UID MOVE \(message.uid) \(Self.quote(mailbox.name))")
             }
         } else {
             // Ordinary EXPUNGE could permanently remove other clients' pending deletions.
@@ -547,13 +640,15 @@ final class MailIMAP {
             do {
                 _ = try await command("UID COPY \(message.uid) \(Self.quote(mailbox.name))")
             } catch MailIMAPError.rejected where cached {
-                guard let fresh = target(try await listMailboxes(reuse: false)) else { throw MailIMAPError.missingMailbox }
-                mailbox = fresh
+                mailbox = try await renamed()
                 _ = try await command("UID COPY \(message.uid) \(Self.quote(mailbox.name))")
             }
+            lastMoveStage = .copied
             _ = try await command("UID STORE \(message.uid) +FLAGS.SILENT (\\Deleted)")
+            lastMoveStage = .flagged
             _ = try await command("UID EXPUNGE \(message.uid)")
         }
+        lastMoveStage = .done
     }
 
     private var supportsMove: Bool { capabilities.contains("MOVE") || capabilities.contains("UIDPLUS") }
@@ -599,11 +694,21 @@ final class MailIMAP {
         return result
     }
 
-    /// Runs one of our own FETCH commands: its FETCH responses don't count as mailbox changes.
-    private func solicited(_ body: () async throws -> [MailIMAPResponse]) async throws -> [MailIMAPResponse] {
-        solicitedFetch = true
-        defer { solicitedFetch = false }
+    /// Runs one of our own FETCH commands for `uids` (or the sequence numbers in `sequences`). Their FETCH answers are
+    /// not mailbox news; a FETCH for any other message, or one carrying FLAGS we did not ask for, still is.
+    private func solicited(uids: [UInt32]? = nil, sequences: ClosedRange<Int>? = nil, flags: Bool = false,
+                           _ body: () async throws -> [MailIMAPResponse]) async throws -> [MailIMAPResponse] {
+        solicitedFetch = (uids.map(Set.init), sequences, flags)
+        defer { solicitedFetch = nil }
         return try await body()
+    }
+
+    private func isSolicited(_ response: MailIMAPResponse, sequence: Int) -> Bool {
+        guard let solicitedFetch, let fetch = response.fetch else { return false }
+        if !solicitedFetch.flags && fetch.hasFlags { return false }
+        if let uids = solicitedFetch.uids, let uid = fetch.uid, uids.contains(uid) { return true }
+        if let sequences = solicitedFetch.sequences, sequences.contains(sequence) { return true }
+        return false
     }
 
     private func send(_ command: String) -> String {
@@ -613,15 +718,26 @@ final class MailIMAP {
         return tag
     }
 
+    /// `stallMS`: instead of a fixed deadline, fail only after this long without any byte arriving.
+    /// `abandonOnTimeout`: a read-only FETCH whose reply is late does not end the connection; its tagged answer, if it
+    /// ever comes, is skipped (see abandonedTags).
     private func command(_ command: String, timeout: Int = commandTimeout,
-                         until deadline: DispatchTime? = nil, quiet: Bool = false) async throws -> [MailIMAPResponse] {
+                         until deadline: DispatchTime? = nil, quiet: Bool = false, stallMS: Int? = nil,
+                         abandonOnTimeout: Bool = false) async throws -> [MailIMAPResponse] {
         try Task.checkCancellation()
         let started = MailTiming.now()
         bytesReceived = 0
+        lastCommandRefused = false
+        let tag = send(command)
         do {
-            let responses = try await completion(tag: send(command), until: deadline ?? DispatchTime.now() + .seconds(timeout))
+            let responses = try await completion(tag: tag, until: deadline ?? DispatchTime.now() + .seconds(timeout),
+                                                 stallMS: stallMS)
             record(command, started: started, outcome: "ok", quiet: quiet)
             return responses
+        } catch MailIMAPError.timedOut where abandonOnTimeout {
+            abandonedTags.insert(tag)
+            record(command, started: started, outcome: "err=timedOut abandoned", quiet: false)
+            throw MailIMAPError.timedOut
         } catch {
             record(command, started: started, outcome: "err=\(MailTiming.describe(error))", quiet: false)
             throw error
@@ -631,6 +747,9 @@ final class MailIMAP {
     private func record(_ command: String, started: UInt64, outcome: String, quiet: Bool) {
         let ms = MailTiming.ms(since: started)
         bytesTotal += bytesReceived
+        if outcome == "ok" && bytesReceived < 4096 {
+            roundTripMS = roundTripMS == 0 ? ms : (roundTripMS * 3 + ms) / 4
+        }
         if quiet {
             quietCommands.count += 1
             quietCommands.ms += ms
@@ -640,19 +759,21 @@ final class MailIMAP {
         }
     }
 
-    private func completion(tag: String, until deadline: DispatchTime) async throws -> [MailIMAPResponse] {
+    private func completion(tag: String, until deadline: DispatchTime, stallMS: Int? = nil) async throws -> [MailIMAPResponse] {
         var responses: [MailIMAPResponse] = []
         var reported: MailServerError = .offline
         var temporaryFailure = false
         var retainedBytes = 0
         while true {
-            let response = try await read(until: deadline)
+            let response = try await read(until: deadline, stallMS: stallMS)
             bytesReceived += response.byteCount
             let words = response.line.split(separator: " ", maxSplits: 2)
             let status = words.dropFirst().first?.uppercased()
+            if skipAbandoned(words.first) { continue }
             if words.first == Substring(tag) {
                 if status != "OK" {
                     guard status == "NO" || status == "BAD" else { throw MailIMAPError.invalidResponse }
+                    lastCommandRefused = true
                     let reason = Self.preferredError(reported, .classify(response.line))
                     if reason == .offline && !temporaryFailure && !response.line.uppercased().contains("[UNAVAILABLE]") {
                         throw MailIMAPError.rejected
@@ -683,11 +804,33 @@ final class MailIMAP {
         }
     }
 
-    private func read(until deadline: DispatchTime) async throws -> MailIMAPResponse {
+    /// The late tagged answer of an abandoned command: consumed once, otherwise ignored.
+    private func skipAbandoned(_ first: Substring?) -> Bool {
+        guard let first, !abandonedTags.isEmpty, abandonedTags.contains(String(first)) else { return false }
+        abandonedTags.remove(String(first))
+        MailTiming.line("late-answer \(timingContext) skipped=true")
+        return true
+    }
+
+    private func read(until deadline: DispatchTime, stallMS: Int? = nil) async throws -> MailIMAPResponse {
         try Task.checkCancellation()
-        guard let response = try await socket.receive(until: deadline, interruptible: false) else { throw MailIMAPError.timedOut }
-        try Task.checkCancellation()
-        return response
+        guard let stallMS else {
+            guard let response = try await socket.receive(until: deadline, interruptible: false) else { throw MailIMAPError.timedOut }
+            try Task.checkCancellation()
+            return response
+        }
+        // Progress-based: a slow reply that keeps arriving never times out; one with no byte for `stallMS` does.
+        var seen = socket.receivedByteCount
+        while true {
+            if let response = try await socket.receive(until: DispatchTime.now() + .milliseconds(stallMS), interruptible: false) {
+                try Task.checkCancellation()
+                return response
+            }
+            try Task.checkCancellation()
+            let now = socket.receivedByteCount
+            guard now > seen else { throw MailIMAPError.timedOut }
+            seen = now
+        }
     }
 
     /// Returns whether the response warrants a new inbox snapshot.
@@ -709,7 +852,7 @@ final class MailIMAP {
         case "EXPUNGE":
             exists = max(0, exists - 1)
         case "FETCH":
-            if solicitedFetch { return false }
+            if isSolicited(response, sequence: number) { return false }
             if let fetch = response.fetch, fetch.body(Self.header) != nil
                 || fetch.body("TEXT", partial: true) != nil || fetch.body("") != nil || fetch.messageSize != nil {
                 return false
@@ -751,6 +894,11 @@ extension MailIMAPFetch {
     var bodyStructure: MailBodyPart? { structureTokens.flatMap(MailBodyStructure.parse) }
 }
 
+extension MailContent {
+    /// Nothing to show: no HTML and no text.
+    var isBlank: Bool { html == nil && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+}
+
 /// One pending read, a persistent framer, and ordered writes on the connection's serial queue.
 private final class MailIMAPSocket: MailIMAPTransport, @unchecked Sendable {
     private let queue = DispatchQueue(label: "Cala.MailIMAP")
@@ -765,6 +913,7 @@ private final class MailIMAPSocket: MailIMAPTransport, @unchecked Sendable {
     private var ready = false
     /// Read from the worker's context; written on `queue`.
     private let pathState = OSAllocatedUnfairLock(initialState: (suspect: false, constrained: false))
+    private let received = OSAllocatedUnfairLock(initialState: 0)
 
     init(host: String, port: UInt16) {
         // Keepalive probes keep NAT mappings open and turn a silently dead link into a failed connection in about
@@ -839,6 +988,7 @@ private final class MailIMAPSocket: MailIMAPTransport, @unchecked Sendable {
     }
 
     var isConstrainedPath: Bool { pathState.withLock { $0.constrained } }
+    var receivedByteCount: Int { received.withLock { $0 } }
 
     func close() {
         queue.async { [self] in fail(.disconnected) }
@@ -913,7 +1063,10 @@ private final class MailIMAPSocket: MailIMAPTransport, @unchecked Sendable {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, complete, error in
             guard let self else { return }
             readInProgress = false
-            if let data { framer.append(data) }
+            if let data {
+                framer.append(data)
+                received.withLock { $0 += data.count }
+            }
             if complete || error != nil { failure = .disconnected }
             deliver()
         }
