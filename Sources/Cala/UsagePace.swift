@@ -107,7 +107,14 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         private(set) var key: ForecastKey
         var current: QuotaObservation { key.observation }
         private(set) var highWater: Double
+        /// The result computed for exactly the current observation. Alerts use only this.
         private(set) var cached: CachedForecast?
+        /// The latest result for an earlier reading of the same series and cycle, shown while the
+        /// current reading is recomputed so the card never blanks between readings. Display only.
+        private(set) var carried: CachedForecast?
+
+        /// What the card shows: the current result, else the carried one.
+        var displayed: CachedForecast? { cached ?? carried }
 
         init(key: ForecastKey) {
             self.key = key
@@ -117,13 +124,33 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         mutating func update(_ observation: QuotaObservation) {
             if current != observation {
                 key = ForecastKey(observation: observation, cycle: key.cycle)
+                if let cached { carried = cached }
                 cached = nil
             }
             highWater = max(highWater, observation.used)
         }
 
         mutating func cache(_ forecast: CachedForecast, for completedKey: ForecastKey) {
-            if key == completedKey { cached = forecast }
+            if key == completedKey {
+                cached = forecast
+                carried = nil
+            } else if completedKey.cycle == key.cycle, completedKey.observation.series == current.series,
+                      forecast.calculatedAt >= (carried?.calculatedAt ?? .distantPast) {
+                // A result that finished after a newer reading arrived still describes this cycle.
+                carried = forecast
+            }
+        }
+
+        /// The entry after a live reading. A different series, a different reset or a counter that drops
+        /// (a reset) starts a fresh entry with nothing carried, so no pre-reset number is shown.
+        static func advanced(_ previous: Entry?, with observation: QuotaObservation) -> Entry {
+            if var entry = previous, entry.current.series == observation.series,
+               entry.key.cycle.reset == observation.reset, observation.used >= entry.highWater - 1 {
+                entry.update(observation)
+                return entry
+            }
+            let cycle = QuotaCycle(reset: observation.reset, segmentStart: observation.date)
+            return Entry(key: ForecastKey(observation: observation, cycle: cycle))
         }
     }
 
@@ -249,14 +276,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
             if let old = previous?.current, old.date > current.date ||
                 (old.date == current.date && old.source.rawValue > current.source.rawValue) { continue }
 
-            if var entry = previous, entry.current.series == series, entry.key.cycle.reset == current.reset,
-               current.used >= entry.highWater - 1 {
-                entry.update(current)
-                entries[meter] = entry
-            } else {
-                let cycle = QuotaCycle(reset: current.reset, segmentStart: current.date)
-                entries[meter] = Entry(key: ForecastKey(observation: current, cycle: cycle))
-            }
+            entries[meter] = Entry.advanced(previous, with: current)
         }
     }
 
@@ -362,10 +382,12 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
             && !Self.isStale(current.date, meter: current.series.meter, now: now)
     }
 
-    private func forecast(_ state: UsageState, _ window: UsageWindow, now: Date) -> ForecastResult? {
+    /// `display` may fall back to the carried result of an earlier reading; alerts never do.
+    private func forecast(_ state: UsageState, _ window: UsageWindow, now: Date, display: Bool = false) -> ForecastResult? {
         guard let meter = state.observation(for: window)?.meter,
               let entry = entries[MeterKey(provider: state.provider, meter: meter)],
-              matches(entry, state, window, now: now), let cached = entry.cached else { return nil }
+              matches(entry, state, window, now: now),
+              let cached = display ? entry.displayed : entry.cached else { return nil }
         let current = entry.current
         // Time can change a cap regime without a new provider observation.
         for cap in [current.companion, current.bindingWeekly] {
@@ -390,7 +412,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
               staleReadingDate(state, window, now: now) == nil else { return nil }
         if window.used == 100 { return Line(text: tx("Quota used up", "Cuota agotada")) }
         let short = observation?.meter?.durationSeconds == 18_000
-        let result = observation == nil ? nil : forecast(state, window, now: now)
+        let result = observation == nil ? nil : forecast(state, window, now: now, display: true)
         if let line = Self.coldLine(result, window: window, short: short) { return line }
         guard let observation, let result else { return nil }
         let none = Line(text: tx("No estimate yet", "Sin estimación por ahora"))

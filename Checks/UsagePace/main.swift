@@ -316,6 +316,48 @@ var resetEntry = UsagePace.Entry(key: UsagePace.ForecastKey(observation: resetRe
 resetEntry.cache(oldForecast, for: entry.key)
 expect("A reset change rejects a result from the previous cycle", resetEntry.cached == nil)
 
+// The card keeps the previous result between readings; alerts only ever see the current reading's result.
+do {
+    let quickResult = ForecastResult(expectedUsed: 25, exhaustProbability: nil, eta: nil, etaRange: nil, readiness: .quick,
+                                     hitWeeks: 0, effectiveWeeks: 0, learningDays: 1)
+    let first = QuotaObservation(series: series, date: now, used: 20, reset: weeklyReset, source: .api)
+    let second = QuotaObservation(series: series, date: now.addingTimeInterval(300), used: 21, reset: weeklyReset, source: .api)
+    var carry = UsagePace.Entry.advanced(nil, with: first)
+    expect("First launch has nothing to show until a result exists", carry.displayed == nil)
+    carry.cache(.init(result: quickResult, calculatedAt: now), for: carry.key)
+    carry = UsagePace.Entry.advanced(carry, with: second)
+    expect("A new reading keeps showing the previous result instead of blanking",
+           carry.displayed?.result == quickResult && carry.cached == nil)
+    expect("Alerts are not driven by the carried-over result", carry.cached == nil)
+    let fresh = ForecastResult(expectedUsed: 30, exhaustProbability: nil, eta: nil, etaRange: nil, readiness: .quick,
+                               hitWeeks: 0, effectiveWeeks: 0, learningDays: 1, quickWarning: true)
+    carry.cache(.init(result: fresh, calculatedAt: now.addingTimeInterval(301)), for: carry.key)
+    expect("The recompute for the new reading replaces the carried result",
+           carry.displayed?.result == fresh && carry.cached?.result == fresh && carry.carried == nil)
+
+    let third = QuotaObservation(series: series, date: now.addingTimeInterval(600), used: 22, reset: weeklyReset, source: .api)
+    let stale = UsagePace.Entry.advanced(carry, with: third)
+    let late = QuotaObservation(series: series, date: now.addingTimeInterval(900), used: 23, reset: weeklyReset, source: .api)
+    var inFlightCarry = UsagePace.Entry.advanced(stale, with: late)
+    inFlightCarry.cache(.init(result: quickResult, calculatedAt: now.addingTimeInterval(901)), for: stale.key)
+    expect("A result finishing after a newer reading is carried for display, never cached for alerts",
+           inFlightCarry.displayed?.result == quickResult && inFlightCarry.cached == nil)
+
+    let otherPlan = QuotaSeries(provider: .codex, profile: QuotaProfileID(rawValue: "test"), plan: "plus",
+                                meter: series.meter, timeZoneID: "UTC")
+    let otherAccount = QuotaSeries(provider: .codex, profile: QuotaProfileID(rawValue: "other"), plan: "pro",
+                                   meter: series.meter, timeZoneID: "UTC")
+    for changed in [otherPlan, otherAccount] {
+        let moved = QuotaObservation(series: changed, date: now.addingTimeInterval(600), used: 21, reset: weeklyReset, source: .api)
+        expect("A series change clears the carried result", UsagePace.Entry.advanced(carry, with: moved).displayed == nil)
+    }
+    let nextReset = QuotaObservation(series: series, date: now.addingTimeInterval(600), used: 0,
+                                     reset: weeklyReset.addingTimeInterval(week), source: .api)
+    expect("A new resets_at clears the pre-reset result", UsagePace.Entry.advanced(carry, with: nextReset).displayed == nil)
+    let dropped = QuotaObservation(series: series, date: now.addingTimeInterval(600), used: 2, reset: weeklyReset, source: .api)
+    expect("A counter that drops at a reset clears the pre-reset result", UsagePace.Entry.advanced(carry, with: dropped).displayed == nil)
+}
+
 var exhaustedOpus = opus
 let opusObservedAt = now.addingTimeInterval(-4 * hour)
 exhaustedOpus["percent"] = 100
