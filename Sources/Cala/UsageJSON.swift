@@ -11,6 +11,10 @@ enum UsageJSON {
         guard let value, value.timeIntervalSince1970.isFinite, value.timeIntervalSince1970 >= 0, value.timeIntervalSince1970 < 253_402_300_800 else { return nil }
         return value
     }
+    static func observationDate(_ value: Date?, now: Date) -> Date? {
+        guard let value = boundedDate(value), value <= now.addingTimeInterval(5) else { return nil }
+        return value
+    }
     private static let fractionalDates: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -43,11 +47,11 @@ enum UsageJSON {
     }
 
     private static func capture(_ object: [String: Any], id: String, duration: Double?, used: Any?, reset: Any?,
-                                received: Date, calculated: Bool = false) -> UsageReading.Meter {
+                                received: Date, calculated: Bool = false, displayID: String? = nil) -> UsageReading.Meter {
         let timestamp = object["timestamp"] ?? object["observed_at"] ?? object["observedAt"]
         return UsageReading.Meter(id: id, durationMinutes: duration, used: number(used), reset: date(reset),
                                   date: timestamp == nil ? received : (date(timestamp) ?? .distantPast),
-                                  calculated: calculated, inactive: object["status"] as? String == "inactive")
+                                  calculated: calculated, inactive: object["status"] as? String == "inactive", displayID: displayID)
     }
 
     static func claude(_ obj: [String: Any], at date: Date, local: Bool = false) -> UsageReading {
@@ -118,16 +122,17 @@ enum UsageJSON {
                 let meterDate = Self.date(d["timestamp"] ?? d["observed_at"] ?? d["observedAt"]) ?? date
                 capturedReset = meterDate.timeIntervalSince1970 + after
             }
-            let scope = d["scope"] ?? obj["scope"]
+            let scope = (d["scope"] is NSNull ? nil : d["scope"]) ?? obj["scope"]
             let scoped = scope as? [String: Any]
             let model = scoped?["model"] as? [String: Any]
-            let modelID = scopeValue(d["model_id"] ?? d["modelId"] ?? obj["model_id"] ?? model?["id"])
+            let modelID = [d["model_id"], d["modelId"], model?["id"], obj["model_id"], obj["modelId"]]
+                .lazy.compactMap(scopeValue).first
             let id: String
             if let modelID { id = "model:" + modelID }
-            else if scope == nil || scope as? String == "all" || scope as? String == "shared" { id = "shared" }
+            else if scope == nil || scope is NSNull || scope as? String == "all" || scope as? String == "shared" { id = "shared" }
             else { id = "unidentified" }
             quota.windows.append(capture(d, id: id, duration: duration.map { format == "http" ? $0 / 60 : $0 },
-                                         used: used, reset: capturedReset, received: date, calculated: calculated))
+                                         used: used, reset: capturedReset, received: date, calculated: calculated, displayID: key))
             guard let duration, duration > 0 else { continue }
             let minutes = format == "http" ? duration / 60 : duration
             let title = minutes == 300 ? "5-hour session" : (minutes == 10080 ? "Weekly" : String(format: "%g h", minutes / 60))
@@ -137,17 +142,48 @@ enum UsageJSON {
                             date: date, quota: quota)
     }
 
+    struct CodexRollout {
+        enum Identity: Int { case foreign, matching, unlabeled }
+
+        let reading: UsageReading
+        let accounts: Set<String>
+        let subjects: Set<String>
+
+        func identity(for active: QuotaAccount?) -> Identity {
+            if accounts.isEmpty && subjects.isEmpty { return .unlabeled }
+            guard let active, accounts == [active.account], subjects == Set([active.subject].compactMap { $0 }) else {
+                return .foreign
+            }
+            return .matching
+        }
+    }
+
     /// Shared filter for realtime rollout reads and bounded history import.
-    static func codexRollout(_ line: Data) -> (reading: UsageReading, account: String?, subject: String?)? {
+    static func codexRollout(_ line: Data) -> CodexRollout? {
         guard line.range(of: Data("token_count".utf8)) != nil,
               let object = object(line), object["type"] as? String == "event_msg",
               let payload = object["payload"] as? [String: Any], payload["type"] as? String == "token_count",
               let limits = payload["rate_limits"] as? [String: Any],
               limits["limit_id"] == nil || limits["limit_id"] is NSNull || limits["limit_id"] as? String == "codex",
               let time = date(object["timestamp"]) else { return nil }
-        return (codex(limits, at: time, format: "local"),
-                scopeValue(limits["account_id"] ?? payload["account_id"]),
-                scopeValue(limits["user_id"] ?? limits["subject"] ?? payload["user_id"]))
+        var accounts = Set<String>()
+        var subjects = Set<String>()
+        var nested: [Any] = [object]
+        while let value = nested.popLast() {
+            if let fields = value as? [String: Any] {
+                for key in ["account_id", "accountId"] {
+                    if let id = scopeValue(fields[key]) { accounts.insert(id) }
+                }
+                for key in ["user_id", "userId", "subject"] {
+                    if let id = scopeValue(fields[key]) { subjects.insert(id) }
+                }
+                nested.append(contentsOf: fields.values)
+            } else if let values = value as? [Any] {
+                nested.append(contentsOf: values)
+            }
+        }
+        return CodexRollout(reading: codex(limits, at: time, format: "local"),
+                            accounts: accounts, subjects: subjects)
     }
 }
 

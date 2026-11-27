@@ -35,6 +35,7 @@ struct UsageReading: Codable {
         let date: Date
         var calculated = false
         var inactive = false
+        var displayID: String? = nil
     }
 
     enum Applicability { case unknown, absent, present, inactive }
@@ -79,6 +80,10 @@ struct PaceResult {
 }
 
 enum UsagePaceProjection {
+    static func wholeSeconds(_ seconds: TimeInterval) -> Int? {
+        Int(exactly: seconds.rounded(.towardZero)).map { max(0, $0) }
+    }
+
     private static func duration(_ w: UsageWindow) -> TimeInterval? {
         let seconds = (w.durationMinutes ?? w.presentationOrder.1) * 60
         return seconds.isFinite && seconds > 0 ? seconds : nil
@@ -86,7 +91,7 @@ enum UsagePaceProjection {
 
     /// Exact remaining time, never rounded up: "2 d 3 h 12 min", "4 h 47 min", "16 min", "42 s".
     static func formatted(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds))      // truncated: a countdown never claims more time than there is
+        guard let total = wholeSeconds(seconds) else { return "—" }
         let d = total / 86400, h = (total % 86400) / 3600, m = (total % 3600) / 60
         var parts: [String] = []
         if d > 0 { parts.append("\(d) d") }
@@ -115,7 +120,7 @@ enum UsagePaceProjection {
 
         let lookback = max(1800, total * 0.05)
         let earliest = max(reset.addingTimeInterval(-total), now.addingTimeInterval(-lookback))
-        let recent = samples.filter { $0.date >= earliest && $0.date <= now }
+        let recent = samples.filter { (0...100).contains($0.used) && $0.date >= earliest && $0.date <= now }
         var rate = window.used / elapsed   // percentage points per second
         if let first = recent.first, let last = recent.last {
             let span = last.date.timeIntervalSince(first.date), delta = last.used - first.used
@@ -134,7 +139,7 @@ enum UsagePaceProjection {
                                     "A este ritmo se agota en \(Self.formatted(toEmpty)), antes del reinicio")
             return result(text, warn: true, toEmpty: toEmpty)
         }
-        let left = max(0, Int((remaining - rate * untilReset).rounded()))
+        let left = Int(max(0, remaining - rate * untilReset).rounded())
         let text = calendarText("At this pace you reach the reset with ~\(left)% left",
                                 "A este ritmo llegas al reinicio con ~\(left)% disponible")
         return result(text, toEmpty: toEmpty)

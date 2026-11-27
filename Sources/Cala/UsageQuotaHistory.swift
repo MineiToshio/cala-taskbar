@@ -30,7 +30,6 @@ struct QuotaAccount {
     let subject: String?
 
     var components: [String] { [account, subject ?? ""] }
-    func matches(_ other: QuotaAccount) -> Bool { account == other.account && subject == other.subject }
 }
 
 struct QuotaLogin: Equatable {
@@ -231,14 +230,16 @@ private struct QuotaStoredRow {
         guard let sample = cell.sample else { return }
         if sample.used == 100 && bucket.firstHit == nil { bucket.firstHit = sample.date }
         if let prior = bucket.latest, prior.companion != .unknown, bucket.series.meter.durationSeconds == 604_800 {
-            // Preserve the first and last superseded companion samples per minute, bounding very busy archives.
-            let minute = floor(prior.date.timeIntervalSince1970 / 60)
-            let count = bucket.earlierCompanionSamples.count
-            if count >= 2, floor(bucket.earlierCompanionSamples[count - 2].date.timeIntervalSince1970 / 60) == minute {
-                bucket.earlierCompanionSamples[count - 1] = prior
-            } else {
-                bucket.earlierCompanionSamples.append(prior)
+            // Keep the first observation of each forecast band and the latest sample in each minute.
+            let minute = Date(timeIntervalSince1970: floor(prior.date.timeIntervalSince1970 / 60) * 60)
+            if let last = bucket.earlierCompanionSamples.last, last.date >= minute {
+                let band = QuotaCapBand(last.companion, at: last.date)
+                let sameMinute = bucket.earlierCompanionSamples.dropLast().reversed().prefix { $0.date >= minute }
+                if sameMinute.contains(where: { QuotaCapBand($0.companion, at: $0.date) == band }) {
+                    bucket.earlierCompanionSamples.removeLast()
+                }
             }
+            bucket.earlierCompanionSamples.append(prior)
         }
         bucket.latest = sample
     }
@@ -900,7 +901,8 @@ private extension UsageQuotaHistory {
                 guard validSample(sample) else { continue }
             }
             let earlier = row.details?.companionSamples ?? []
-            guard earlier.count <= 120, earlier.allSatisfy({ validSample($0) && $0.companion != .unknown }),
+            let maxSamples = (identity.meter.bucketSeconds / 60 + 1) * QuotaCapBand.allCases.count
+            guard earlier.count <= maxSamples, earlier.allSatisfy({ validSample($0) && $0.companion != .unknown }),
                   zip(earlier, earlier.dropFirst()).allSatisfy({ $0.date < $1.date }),
                   earlier.last.map({ $0.date < (row.sample?.date ?? .distantPast) }) ?? true else { continue }
             if let hit = row.details?.firstHit {

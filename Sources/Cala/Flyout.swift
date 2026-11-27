@@ -622,8 +622,10 @@ struct UsagePane: View {
         .onAppear { UsageService.shared.refresh() }
     }
     private func age(_ date: Date?, now: Date) -> String {
-        guard let date, date != .distantPast else { return tx("Not updated yet", "Aún sin actualizar") }
-        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        guard let date = UsageJSON.observationDate(date, now: now),
+              let seconds = UsagePaceProjection.wholeSeconds(now.timeIntervalSince(date)) else {
+            return tx("Not updated yet", "Aún sin actualizar")
+        }
         if seconds < 5 { return tx("Updated just now", "Actualizado ahora mismo") }
         if seconds < 60 { return tx("Updated \(seconds) s ago", "Actualizado hace \(seconds) s") }
         if seconds < 3600 { return tx("Updated \(seconds / 60) min ago", "Actualizado hace \(seconds / 60) min") }
@@ -639,7 +641,7 @@ struct UsagePane: View {
         return tx("resets ", "se reinicia ") + formatter.string(from: reset) + tx(" · in ", " · en ") + relative
     }
     private func provider(_ state: UsageState, now: Date) -> some View {
-        let retry = max(0, Int(ceil(state.cooldownUntil?.timeIntervalSince(now) ?? 0)))
+        let retry = UsagePaceProjection.wholeSeconds(ceil(state.cooldownUntil?.timeIntervalSince(now) ?? 0)) ?? 0
         let brand = Color.primary
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {

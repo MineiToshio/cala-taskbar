@@ -199,6 +199,54 @@ do {
 }
 
 do {
+    let monday = UsageJSON.date("2026-11-02T00:00:00Z")!
+    let week: TimeInterval = 604_800
+    let hour: TimeInterval = 3_600
+    let origin = monday.addingTimeInterval(18 * hour + 30 * 60 + 30)
+    let history = store("companion-crossing", at: origin)
+    func companion(_ used: Double, on day: Date) -> QuotaCapState {
+        .present(.active(used: used, reset: day.addingTimeInterval(21 * hour)))
+    }
+    var observations: [QuotaObservation] = []
+    for priorWeek in 1...8 {
+        let start = monday.addingTimeInterval(-Double(priorWeek) * week)
+        let reset = start.addingTimeInterval(week)
+        for tick in 0..<672 {
+            let date = start.addingTimeInterval(Double(tick) * 900)
+            var reading = observation(date, Double(tick) / 10, reset: reset)
+            reading.companion = tick == 74 ? companion(79, on: start)
+                : .present(.active(used: 85, reset: date.addingTimeInterval(2 * hour)))
+            observations.append(reading)
+            if tick == 74 {
+                for (seconds, used) in [(15.0, 85.0), (45.0, 87.0)] {
+                    var followup = observation(date.addingTimeInterval(seconds), reading.used, reset: reset)
+                    followup.companion = companion(used, on: start)
+                    observations.append(followup)
+                }
+            }
+        }
+    }
+    history.ingest(observations, now: origin)
+    let crossed = buckets(history).filter { row in
+        row.earlierCompanionSamples.contains { $0.companion == companion(79, on: row.cycle.segmentStart) }
+    }
+    check(crossed.count == 8 && crossed.allSatisfy { row in
+        row.earlierCompanionSamples.contains {
+            $0.date == row.start.addingTimeInterval(30 * 60 + 15)
+                && $0.companion == companion(85, on: row.cycle.segmentStart)
+        }
+    }, "79%, 85%, and 87% in the same minute retain the first 80% crossing after the next sample")
+    check(history.flush(), "companion crossing history saves")
+    let reopened = store("companion-crossing", at: origin)
+    var calendar = Calendar(identifier: .iso8601)
+    calendar.timeZone = TimeZone(identifier: utc)!
+    var current = observation(origin, 7.4, reset: monday.addingTimeInterval(week))
+    current.companion = companion(85, on: monday)
+    let forecast = UsageForecast().forecast(snapshot: reopened.snapshot(), current: current, calendar: calendar, now: origin)
+    check(forecast.readiness == .normal, "eight persisted weeks stay normal at :30:30 after a same-minute 80% crossing")
+}
+
+do {
     let history = store("resets")
     history.ingest([observation(t, 4), observation(date(10), 3.6), observation(date(20), 4),
                     observation(date(30), 4.12, reset: reset.addingTimeInterval(2), kind: .calculated),
@@ -287,13 +335,17 @@ do {
 }
 
 func rollout(_ time: Date, _ used: Double, account: String? = nil, subject: String? = nil,
-             limitID: String = "codex", anchor: Date = reset, labeledPlan: Bool = true) throws -> Data {
+             limitID: String = "codex", anchor: Date = reset, labeledPlan: Bool = true,
+             payloadAccount: String? = nil) throws -> Data {
     var rate: [String: Any] = ["primary": limit(used, duration: 10080, reset: anchor), "secondary": NSNull(), "limit_id": limitID]
     if labeledPlan { rate["plan_type"] = "plus" }
     rate["account_id"] = account
     rate["user_id"] = subject
+    if payloadAccount != nil { rate["account_id"] = NSNull() }
+    var payload: [String: Any] = ["type": "token_count", "rate_limits": rate]
+    payload["account_id"] = payloadAccount
     return try JSONSerialization.data(withJSONObject: ["type": "event_msg", "timestamp": time.timeIntervalSince1970,
-                                                       "payload": ["type": "token_count", "rate_limits": rate]])
+                                                       "payload": payload])
 }
 
 func appendLine(_ data: Data, to destination: inout Data) { destination.append(data); destination.append(10) }
@@ -376,6 +428,28 @@ do {
     check(attributed.map(\.date).sorted() == [date(2), date(12), date(14)]
           && attributed.filter { $0.attribution == .provisional }.map(\.date) == [date(14)],
           "shared rollout home rejects unlabeled rows across explicit other-account or user evidence")
+}
+
+do {
+    let sessions = root.appendingPathComponent("null-identity-sessions")
+    let day = sessions.appendingPathComponent("2026/11/06")
+    try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+    var lines = Data()
+    appendLine(try rollout(date(2), 2, account: "account-a"), to: &lines)
+    appendLine(try rollout(date(5), 95, payloadAccount: "account-b"), to: &lines)
+    appendLine(try rollout(date(10), 4), to: &lines)
+    appendLine(try rollout(date(12), 5, account: "account-a"), to: &lines)
+    appendLine(try rollout(date(14), 6), to: &lines)
+    try lines.write(to: day.appendingPathComponent("rollout-null-identity.jsonl"))
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: utc)!
+    let reader = UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendar,
+                                    account: .init(account: "account-a", subject: nil))
+    let attributed = UsageCodexBackfill.attributed(scan(reader).candidates, key: key, anchors: [observation(date(17), 7)],
+                                                   switchedAt: nil, now: date(17))
+    check(attributed.map(\.date).sorted() == [date(2), date(12), date(14)]
+          && attributed.filter { $0.attribution == .provisional }.map(\.date) == [date(14)],
+          "null rate-limits identity imports neither payload account B at minute 5 nor its unlabeled row at minute 10")
 }
 
 do {

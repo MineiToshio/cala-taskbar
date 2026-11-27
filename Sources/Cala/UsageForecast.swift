@@ -24,7 +24,7 @@ struct UsageForecast: UsageForecasting {
         }
 
         let cap = short ? current.bindingWeekly : current.companion
-        let band = CapBand(cap, at: now)
+        let band = QuotaCapBand(cap, at: now)
         guard band != .unresolved, !short || band != .unknown else { return Self.learning }
 
         var local = calendar
@@ -48,7 +48,7 @@ struct UsageForecast: UsageForecasting {
             }.filter {
                 $0.date <= now && now.timeIntervalSince($0.date) <= 1_800 && Applicability($0.companion) != .unknown
             }.max { $0.date < $1.date }
-            if let latest, CapBand(latest.companion, at: now).nearLimit { return Self.learning }
+            if let latest, QuotaCapBand(latest.companion, at: now).nearLimit { return Self.learning }
         }
 
         if band != .unknown {
@@ -64,40 +64,23 @@ struct UsageForecast: UsageForecasting {
                                                 readiness: .learning, hitWeeks: 0, effectiveWeeks: 0)
 }
 
+private extension QuotaCapBand {
+    func matches(_ historical: QuotaCapState, origin: Date, current: QuotaCapState, now: Date,
+                 matchReset: Bool) -> Bool {
+        guard Self(historical, at: origin) == self else { return false }
+        guard nearLimit, matchReset,
+              case .present(.active(_, let oldReset)) = historical,
+              case .present(.active(_, let reset)) = current else { return true }
+        return abs(oldReset.timeIntervalSince(origin) - reset.timeIntervalSince(now)) <= 3_600
+    }
+}
+
 private extension UsageForecast {
     static let hour = 3_600.0
     static let day = 86_400.0
     static let epsilon = 0.000_001
 
     static func decay(_ seconds: Double) -> Double { exp2(-max(0, seconds) / (28 * day)) }
-
-    enum CapBand: Equatable {
-        case absent, inactive, low, near, full, unknown, unresolved
-
-        init(_ cap: QuotaCapState, at date: Date) {
-            switch cap {
-            case .absent: self = .absent
-            case .unknown: self = .unknown
-            case .present(.inactive): self = .inactive
-            case .present(.unknown): self = .unresolved
-            case .present(.active(let used, let reset)):
-                if reset <= date || !(0...100).contains(used) { self = .unresolved }
-                else if used == 100 { self = .full }
-                else { self = used >= 80 ? .near : .low }
-            }
-        }
-
-        var nearLimit: Bool { self == .near || self == .full }
-
-        func matches(_ historical: QuotaCapState, origin: Date, current: QuotaCapState, now: Date,
-                     matchReset: Bool) -> Bool {
-            guard Self(historical, at: origin) == self else { return false }
-            guard nearLimit, matchReset,
-                  case .present(.active(_, let oldReset)) = historical,
-                  case .present(.active(_, let reset)) = current else { return true }
-            return abs(oldReset.timeIntervalSince(origin) - reset.timeIntervalSince(now)) <= hour
-        }
-    }
 
     enum Applicability {
         case absent, present, unknown
@@ -550,7 +533,7 @@ private extension UsageForecast {
         let start: Date
         let grid: Grid
         let short: Bool
-        let band: CapBand
+        let band: QuotaCapBand
 
         var duration: Double { current.reset.timeIntervalSince(start) }
         var bucketSeconds: Int { current.series.meter.bucketSeconds }

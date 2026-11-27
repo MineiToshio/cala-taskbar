@@ -137,20 +137,38 @@ expect("A missing reset has no pace line", pace(inactive) == nil)
 
 let activeCodex = QuotaAccount(account: "account-a", subject: "subject-a")
 let rolloutJSON = """
-{"timestamp":1750000000,"type":"event_msg","payload":{"type":"token_count","rate_limits":{
-"account_id":"account-b","user_id":"subject-b","primary":{"used_percent":95,"window_minutes":10080,"resets_at":1750100000}}}}
+{"timestamp":1750000000,"type":"event_msg","payload":{"type":"token_count","account_id":"account-b","rate_limits":{
+"account_id":null,"primary":{"used_percent":95,"window_minutes":10080,"resets_at":1750100000}}}}
 """
-if let event = UsageJSON.codexRollout(Data(rolloutJSON.utf8)) {
-    expect("A 5%-remaining rollout from another account is ineligible for the display balance",
-           !UsageService.canAcceptRollout(account: event.account, subject: event.subject, activeAccount: activeCodex))
-} else {
-    expect("The conflicting rollout fixture parses", false)
+func parseRollout(_ json: String) -> UsageJSON.CodexRollout {
+    guard let event = UsageJSON.codexRollout(Data(json.utf8)) else { fatalError("Invalid rollout fixture") }
+    return event
 }
-expect("Only matching explicit identity or a fully unlabeled rollout can reach acceptance",
-       UsageService.canAcceptRollout(account: "account-a", subject: "subject-a", activeAccount: activeCodex)
-       && UsageService.canAcceptRollout(account: nil, subject: nil, activeAccount: activeCodex)
-       && !UsageService.canAcceptRollout(account: "account-a", subject: "subject-b", activeAccount: activeCodex)
-       && !UsageService.canAcceptRollout(account: nil, subject: "subject-b", activeAccount: activeCodex))
+let foreignRollout = parseRollout(rolloutJSON)
+let matchingRollout = parseRollout(rolloutJSON
+    .replacingOccurrences(of: "1750000000", with: "1749999990")
+    .replacingOccurrences(of: "\"account-b\"", with: "\"account-a\",\"user_id\":\"subject-a\"")
+    .replacingOccurrences(of: "\"used_percent\":95", with: "\"used_percent\":20"))
+let foreignSpanRollout = parseRollout(rolloutJSON
+    .replacingOccurrences(of: "1750000000", with: "1750000001")
+    .replacingOccurrences(of: "\"account_id\":\"account-b\",", with: ""))
+var rolloutDisplay = UsageState(provider: .codex, signedIn: true)
+if let accepted = UsageService.latestCodexRollout([foreignSpanRollout, foreignRollout, matchingRollout],
+                                                 activeAccount: activeCodex, since: nil, now: now) {
+    rolloutDisplay.acceptReading(accepted.reading, original: nil)
+}
+expect("Null rate_limits.account_id cannot show or alert on payload account B's 5% balance",
+       foreignRollout.identity(for: activeCodex) == .foreign
+       && rolloutDisplay.remaining(now) == 80
+       && rolloutDisplay.orderedWindows.allSatisfy { UsagePace.thresholdAlert(rolloutDisplay, $0, threshold: 20, now: now) == nil })
+let outerRollout = parseRollout(rolloutJSON.replacingOccurrences(of: "\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"account_id\":\"account-b\",",
+                                                                with: "\"type\":\"event_msg\",\"account_id\":\"account-b\",\"payload\":{\"type\":\"token_count\","))
+let nestedRollout = parseRollout(rolloutJSON.replacingOccurrences(of: "\"account_id\":\"account-b\",", with: "\"info\":{\"account_id\":\"account-b\"},"))
+let conflictingRollout = parseRollout(rolloutJSON.replacingOccurrences(of: "\"account_id\":null", with: "\"account_id\":\"account-a\",\"user_id\":\"subject-a\""))
+expect("Outer, nested and conflicting rollout identities fail closed",
+       [outerRollout, nestedRollout, conflictingRollout].allSatisfy {
+           UsageService.latestCodexRollout([$0], activeAccount: activeCodex, since: nil, now: now) == nil
+       } && matchingRollout.identity(for: activeCodex) == .matching && foreignSpanRollout.identity(for: activeCodex) == .unlabeled)
 
 func codexReading(_ slot: String, used: Double = 20, reset: Date, at date: Date = now, model: String? = nil,
                   minutes: Int = 10080) -> UsageReading {
@@ -161,7 +179,8 @@ func codexReading(_ slot: String, used: Double = 20, reset: Date, at date: Date 
 
 let weeklyReset = now.addingTimeInterval(day)
 func alertBase(_ reading: UsageReading) -> String? {
-    UsageWindowObservation.capture(reading, provider: .codex).values.first?.alertBase(provider: .codex)
+    guard let window = reading.windows.first else { return nil }
+    return UsageWindowObservation.capture(reading, provider: .codex)[window.id]?.alertCycle(provider: .codex, window: window)?.base
 }
 let primary = codexReading("primary", reset: weeklyReset)
 let secondary = codexReading("secondary", used: 70, reset: weeklyReset)
@@ -175,6 +194,42 @@ expect("Alert identity distinguishes meter scope, duration and cycle",
 let countdown = UsageJSON.codex(["secondary_window": ["used_percent": 70, "limit_window_seconds": week,
                                                        "reset_after_seconds": day + 1]], at: now, format: "http")
 expect("Countdown jitter within the same reset minute preserves the alert identity", sharedWeekly == alertBase(countdown))
+
+func thresholdAlerts(_ reading: UsageReading) -> [UsagePace.AlertContext] {
+    var state = UsageState(provider: .codex, signedIn: true)
+    state.acceptReading(reading, original: nil)
+    return state.orderedWindows.compactMap { UsagePace.thresholdAlert(state, $0, threshold: 20, now: now) }
+}
+
+let minute = Int(weeklyReset.timeIntervalSince1970 / 60)
+let minuteReset = Date(timeIntervalSince1970: Double(minute) * 60)
+func estimatedAlert(_ offset: TimeInterval) -> UsagePace.AlertContext? {
+    let reading = UsageJSON.codex(["primary_window": ["used_percent": 95, "limit_window_seconds": week,
+                                                        "reset_after_seconds": minuteReset.timeIntervalSince(now) + offset]],
+                                  at: now, format: "http")
+    return thresholdAlerts(reading).first
+}
+guard let beforeMinute = estimatedAlert(-1), let afterMinute = estimatedAlert(1) else { fatalError("Missing threshold candidates") }
+let firedAt = now.timeIntervalSince1970
+expect("Pre-upgrade positional and canonical alert keys suppress their original alert kind",
+       afterMinute.wasFired("thr", recorded: ["codex|primary|\(minute - 1)|thr": firedAt])
+       && beforeMinute.wasFired("proj", recorded: ["codex|604800|\(minute)|shared|proj": firedAt])
+       && !afterMinute.wasFired("proj", recorded: ["codex|primary|\(minute - 1)|thr": firedAt]))
+expect("Estimated resets at minus and plus one second across a minute deduplicate a fired alert",
+       beforeMinute.id("thr") == afterMinute.id("thr")
+       && afterMinute.wasFired("thr", recorded: [beforeMinute.id("thr"): firedAt])
+       && estimatedAlert(61)?.id("thr") != afterMinute.id("thr"))
+
+let models = UsageJSON.codex([
+    "primary": ["used_percent": 95, "window_minutes": 10080, "resets_at": scopedReset, "model_id": "o3"],
+    "secondary": ["used_percent": 95, "window_minutes": 10080, "resets_at": scopedReset, "model_id": "gpt-5"]
+], at: now, format: "local")
+let modelAlerts = thresholdAlerts(models)
+let modelObservations = UsageWindowObservation.capture(models, provider: .codex)
+expect("Equal-duration Codex models with identical 5% balances and resets both qualify for distinct alerts",
+       modelObservations["primary"]?.meter?.scope == .modelID("o3")
+       && modelObservations["secondary"]?.meter?.scope == .modelID("gpt-5")
+       && modelAlerts.count == 2 && !modelAlerts[1].wasFired("thr", recorded: [modelAlerts[0].id("thr"): firedAt]))
 
 let series = QuotaSeries(provider: .codex, profile: QuotaProfileID(rawValue: "test"), plan: "pro",
                          meter: QuotaMeter(scope: .shared, durationSeconds: Int(week)), timeZoneID: "UTC")
@@ -209,7 +264,7 @@ var exhaustedOpus = opus
 let opusObservedAt = now.addingTimeInterval(-4 * hour)
 exhaustedOpus["percent"] = 100
 exhaustedOpus["observed_at"] = opusObservedAt.timeIntervalSince1970
-let api = UsageJSON.claude(["limits": [exhaustedOpus]], at: now.addingTimeInterval(-hour))
+let api = UsageJSON.claude(["limits": [exhaustedOpus]], at: now.addingTimeInterval(-60))
 let local = UsageJSON.claude(["five_hour": ["used_percentage": 10, "resets_at": now.addingTimeInterval(hour).timeIntervalSince1970]],
                             at: now, local: true)
 var claude = UsageState(provider: .claude)
@@ -218,19 +273,50 @@ let merged = UsageService.mergingClaudeLocal(local, previous: api)
 claude.acceptReading(merged, original: local)
 let cache = UsageService.Cache(directories: [:], readings: ["claude": merged], cooldowns: [:], failures: [:],
                                observations: ["claude": claude.windowObservations])
-let reopened = try JSONDecoder().decode(UsageService.Cache.self, from: JSONEncoder().encode(cache))
-var relaunched = UsageState(provider: .claude, reading: reopened.readings["claude"],
-                            windowObservations: reopened.observations?["claude"] ?? [:])
+let cacheURL = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("usage-cache.json")
+func reopenClaudeCache(_ data: Data) throws -> UsageState {
+    try data.write(to: cacheURL)
+    let reopened = try JSONDecoder().decode(UsageService.Cache.self, from: Data(contentsOf: cacheURL))
+    var state = UsageState(provider: .claude, signedIn: true)
+    reopened.restoreReading(into: &state, now: now)
+    return state
+}
+let cacheData = try JSONEncoder().encode(cache)
+let relaunched = try reopenClaudeCache(cacheData)
 guard let retainedOpus = relaunched.orderedWindows.last else { fatalError("Missing retained quota") }
 expect("Relaunch preserves the retained quota's observation and suppresses the stale exhausted line",
        retainedOpus.used == 100 && UsagePace.shared.staleReadingDate(relaunched, retainedOpus, now: now) == opusObservedAt
        && UsagePace.shared.line(relaunched, retainedOpus, now: now) == nil)
 expect("The shared status-line meter stays fresh alongside the retained quota",
        relaunched.orderedWindows.first.map { UsagePace.shared.staleReadingDate(relaunched, $0, now: now) == nil } == true)
-relaunched.windowObservations = [:]
-expect("A pre-upgrade cache uses the last API date for a retained Claude scoped quota",
-       UsagePace.shared.staleReadingDate(relaunched, retainedOpus, now: now) == api.apiDate
-       && UsagePace.shared.line(relaunched, retainedOpus, now: now) == nil)
+var oldCache = cache
+oldCache.observations = nil
+let oldState = try reopenClaudeCache(JSONEncoder().encode(oldCache))
+expect("Old cache with a one-minute-old API date keeps the four-hour-old 100% Opus quota stale",
+       oldState.reading?.apiDate == now.addingTimeInterval(-60)
+       && UsagePace.shared.staleReadingDate(oldState, retainedOpus, now: now) == .distantPast
+       && UsagePace.shared.line(oldState, retainedOpus, now: now) == nil)
+
+func corruptOpusDate(_ value: Any) throws -> Data {
+    var json = UsageJSON.object(cacheData)!
+    var observations = json["observations"] as! [String: [String: [String: Any]]]
+    observations["claude"]?[retainedOpus.id]?["observedAt"] = value
+    json["observations"] = observations
+    return try JSONSerialization.data(withJSONObject: json)
+}
+let oldOpus = try reopenClaudeCache(corruptOpusDate(-1e30))
+let futureOpus = try reopenClaudeCache(corruptOpusDate(now.addingTimeInterval(4 * hour).timeIntervalSinceReferenceDate))
+let absurdFutureOpus = try reopenClaudeCache(corruptOpusDate(1e30))
+let nanOpus = try? reopenClaudeCache(corruptOpusDate("NaN"))
+expect("Absurd observedAt values are rejected or treated as unknown after reopening the cache",
+       nanOpus == nil && [oldOpus, futureOpus, absurdFutureOpus].allSatisfy {
+           UsagePace.shared.staleReadingDate($0, retainedOpus, now: now) == .distantPast
+           && UsagePace.shared.line($0, retainedOpus, now: now) == nil
+       })
+expect("Age and countdown conversions reject NaN and overflowing seconds without trapping",
+       [Double.nan, 1e30, -1e30, Double(Int.max), .infinity].allSatisfy {
+           UsagePaceProjection.wholeSeconds($0) == nil && UsagePaceProjection.formatted($0) == "—"
+       } && UsagePaceProjection.wholeSeconds(59.9) == 59)
 
 appLanguageOverride = "es"
 let importedInSpanish = codexReading("primary", reset: weeklyReset)

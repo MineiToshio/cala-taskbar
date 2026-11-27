@@ -14,15 +14,7 @@ struct UsageWindowObservation: Codable {
         var observations: [String: Self] = [:]
         for window in reading.windows {
             let duration = window.durationMinutes ?? window.presentationOrder.1
-            let candidates = (reading.quota?.windows ?? []).filter { raw in
-                if provider == .claude { return raw.id == window.id }
-                guard raw.durationMinutes == duration, raw.used == window.used else { return false }
-                let displayedReset = raw.calculated ? raw.reset?.addingTimeInterval(reading.date.timeIntervalSince(raw.date)) : raw.reset
-                if let displayedReset, let shownReset = window.resetsAt {
-                    return abs(displayedReset.timeIntervalSince(shownReset)) < 0.001
-                }
-                return displayedReset == window.resetsAt
-            }
+            let candidates = (reading.quota?.windows ?? []).filter { ($0.displayID ?? $0.id) == window.id }
             let raw = candidates.count == 1 ? candidates.first : nil
             let canonicalMeter = raw.flatMap { meter(id: $0.id, minutes: $0.durationMinutes, provider: provider) }
             observations[window.id] = Self(
@@ -33,13 +25,9 @@ struct UsageWindowObservation: Codable {
         return observations
     }
 
-    static func cached(_ window: UsageWindow, in reading: UsageReading, provider: UsageProvider) -> Self {
-        // In old Claude caches a scoped meter may have been retained from the last API reading.
-        let scoped = provider == .claude && window.presentationOrder.0 == 2
-        let observedAt = scoped ? min(reading.date, reading.apiDate ?? .distantPast) : reading.date
-        let canonicalMeter = provider == .claude
-            ? meter(id: window.id, minutes: window.presentationOrder.1, provider: provider) : nil
-        return Self(observedAt: observedAt, meter: canonicalMeter, reset: cycleReset(window.resetsAt))
+    static func cached(_ window: UsageWindow) -> Self {
+        // Provider dates cannot establish when an individual quota was observed.
+        Self(observedAt: .distantPast, meter: nil, reset: cycleReset(window.resetsAt))
     }
 
     private static func cycleReset(_ reset: Date?) -> Date? {
@@ -67,7 +55,12 @@ struct UsageWindowObservation: Codable {
         }
     }
 
-    func alertBase(provider: UsageProvider) -> String? {
+    struct AlertCycle {
+        let base: String
+        let previousBases: Set<String>
+    }
+
+    func alertCycle(provider: UsageProvider, window: UsageWindow) -> AlertCycle? {
         guard let meter, let reset = Self.cycleReset(reset) else { return nil }
         let scope: String
         switch meter.scope {
@@ -76,9 +69,19 @@ struct UsageWindowObservation: Codable {
         case .modelName(let name): scope = "name:" + name
         case .legacyClaude(let id): scope = "legacy:" + id
         }
-        // Keep the alert cycle at minute precision for resets estimated from a countdown.
-        let cycle = Int(reset.timeIntervalSince1970 / 60)
-        return "\(provider.rawValue)|\(meter.durationSeconds)|\(cycle)|\(scope)"
+        // Absorb countdown errors across the minute boundary, including when an explicit reset replaces an estimate.
+        let tolerance: TimeInterval = 2
+        let cycle = Int((reset.timeIntervalSince1970 + tolerance) / 60)
+        func previousMinutes(_ date: Date) -> Set<Int> {
+            Set([-tolerance, tolerance].map { Int((date.timeIntervalSince1970 + $0) / 60) })
+        }
+        let providerID = provider.rawValue
+        let duration = meter.durationSeconds
+        var previousBases = Set(previousMinutes(reset).map { "\(providerID)|\(duration)|\($0)|\(scope)" })
+        if let key = UsagePaceHistory.key(provider, window), let shownReset = Self.cycleReset(window.resetsAt) {
+            previousBases.formUnion(previousMinutes(shownReset).map { "\(key)|\($0)" })
+        }
+        return AlertCycle(base: "v2|\(providerID)|\(duration)|\(cycle)|\(scope)", previousBases: previousBases)
     }
 }
 
@@ -346,7 +349,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
 
     private static func isStale(_ date: Date, meter: QuotaMeter?, now: Date, short: Bool = false) -> Bool {
         let short = meter.map { $0.durationSeconds == 18_000 } ?? short
-        return now.timeIntervalSince(date) > (short ? 600 : 1800)
+        return UsageJSON.observationDate(date, now: now) == nil || now.timeIntervalSince(date) > (short ? 600 : 1800)
     }
 
     private func matches(_ entry: Entry, _ state: UsageState, _ window: UsageWindow, now: Date) -> Bool {
@@ -439,21 +442,46 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
 
     // MARK: Alerts
 
-    private func alertContext(_ state: UsageState, _ window: UsageWindow, now: Date) -> (base: String, resetIn: String)? {
-        guard store?.config.usageAlertsEnabled == true, window.used < 100,
-              let reset = window.resetsAt, reset > now,
-              let key = state.observation(for: window)?.alertBase(provider: state.provider) else { return nil }
-        return (key, UsagePaceProjection.formatted(reset.timeIntervalSince(now)))
+    struct AlertContext {
+        let cycle: UsageWindowObservation.AlertCycle
+        let resetIn: String
+
+        func id(_ kind: String) -> String { cycle.base + "|" + kind }
+
+        func wasFired(_ kind: String, recorded: [String: Any]) -> Bool {
+            recorded[id(kind)] != nil || cycle.previousBases.contains { recorded[$0 + "|" + kind] != nil }
+        }
+    }
+
+    private static func alertContext(_ state: UsageState, _ window: UsageWindow, now: Date) -> AlertContext? {
+        guard state.available, (0..<100).contains(window.used),
+              let reset = UsageJSON.boundedDate(window.resetsAt), reset > now,
+              let observation = state.observation(for: window), !observation.inactive,
+              !isStale(observation.observedAt, meter: observation.meter, now: now),
+              let cycle = observation.alertCycle(provider: state.provider, window: window) else { return nil }
+        return AlertContext(cycle: cycle, resetIn: UsagePaceProjection.formatted(reset.timeIntervalSince(now)))
+    }
+
+    static func thresholdAlert(_ state: UsageState, _ window: UsageWindow, threshold: Double, now: Date) -> AlertContext? {
+        guard 100 - window.used <= threshold else { return nil }
+        return alertContext(state, window, now: now)
     }
 
     private func evaluateThreshold(_ state: UsageState, now: Date) {
         let threshold = Double(store?.config.usageAlertThreshold ?? 20)
         for window in state.orderedWindows {
-            let remaining = 100 - window.used
-            guard remaining <= threshold, let context = alertContext(state, window, now: now) else { continue }
-            fire(context.base + "|thr",
-                 title: tx("\(state.provider.title): \(Int(remaining.rounded()))% left", "\(state.provider.title): te queda \(Int(remaining.rounded()))%"),
-                 body: tx("\(window.localizedTitle) · resets in \(context.resetIn)", "\(window.localizedTitle) · se reinicia en \(context.resetIn)"))
+            guard let context = Self.thresholdAlert(state, window, threshold: threshold, now: now) else { continue }
+            let remaining = Int((100 - window.used).rounded())
+            fire(context, kind: "thr",
+                 title: tx("\(state.provider.title): \(remaining)% left", "\(state.provider.title): te queda \(remaining)%"),
+                 body: tx("\(window.localizedTitle) · resets in \(context.resetIn)", "\(window.localizedTitle) · se reinicia en \(context.resetIn)")) { [weak self] in
+                guard let self, let current = self.states.first(where: { $0.provider == state.provider }) else { return false }
+                let threshold = Double(self.store?.config.usageAlertThreshold ?? 20)
+                return current.orderedWindows.contains { visible in
+                    visible.used == window.used
+                        && Self.thresholdAlert(current, visible, threshold: threshold, now: Date())?.id("thr") == context.id("thr")
+                }
+            }
         }
     }
 
@@ -467,26 +495,28 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
 
     private func evaluatePrediction(_ state: UsageState, now: Date) {
         for window in state.orderedWindows {
-            guard let context = alertContext(state, window, now: now),
+            guard let context = Self.alertContext(state, window, now: now),
                   let eta = predictiveETA(state, window, now: now) else { continue }
             let remaining = UsagePaceProjection.formatted(eta.timeIntervalSince(now))
-            fire(context.base + "|proj",
+            fire(context, kind: "proj",
                  title: tx("\(state.provider.title): estimated to hit the limit in \(remaining)",
                            "\(state.provider.title): se estima que agote la cuota en \(remaining)"),
                  body: tx("\(window.localizedTitle) · resets in \(context.resetIn)", "\(window.localizedTitle) · se reinicia en \(context.resetIn)")) { [weak self] in
                 guard let self, let current = self.states.first(where: { $0.provider == state.provider && $0.available }),
                       let visible = current.orderedWindows.first(where: {
-                          self.alertContext(current, $0, now: Date())?.base == context.base
+                          Self.alertContext(current, $0, now: Date())?.id("proj") == context.id("proj")
                       }) else { return false }
                 return self.predictiveETA(current, visible, now: Date()) == eta
             }
         }
     }
 
-    private func fire(_ id: String, title: String, body: String, stillValid: @escaping () -> Bool = { true }) {
-        guard canNotify, let run else { return }
+    private func fire(_ context: AlertContext, kind: String, title: String, body: String, stillValid: @escaping () -> Bool) {
+        guard canNotify, let run, store?.config.usageAlertsEnabled == true else { return }
         let defaults = UserDefaults.standard
-        guard defaults.dictionary(forKey: firedKey)?[id] == nil, pendingAlerts.insert(id).inserted else { return }
+        let id = context.id(kind)
+        let fired = defaults.dictionary(forKey: firedKey) ?? [:]
+        guard !context.wasFired(kind, recorded: fired), pendingAlerts.insert(id).inserted else { return }
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { [weak self] settings in
             DispatchQueue.main.async {

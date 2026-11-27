@@ -39,17 +39,18 @@ private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey
     }
     let result = pass!
     var unsupported = 0
-    let rows = result.candidates.flatMap { candidate in
+    let rows = result.candidates.flatMap { candidate -> [ArchiveRow] in
         // There is no live anchor in a replay. Admit only directly parseable, unlabeled rows,
         // with no inferred identity, plan, duration, or future same-cycle anchor.
-        UsageQuotaCapture.observations(candidate.reading, provider: .codex, profile: key.profile,
+        guard case .reading(let reading, false) = candidate else { return [] }
+        return UsageQuotaCapture.observations(reading, provider: .codex, profile: key.profile,
                                         timeZoneID: key.timeZoneID, source: .rollout, attribution: .provisional,
                                         now: asOf).compactMap { quota -> ArchiveRow? in
             guard quota.series.meter.durationSeconds == weekly || quota.series.meter.durationSeconds == short else {
                 unsupported += 1
                 return nil
             }
-            let available = max(quota.date, candidate.reading.date)
+            let available = max(quota.date, reading.date)
             return available <= asOf ? ArchiveRow(quota: quota, available: available) : nil
         }
     }

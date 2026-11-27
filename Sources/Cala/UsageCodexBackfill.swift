@@ -304,30 +304,19 @@ final class UsageCodexBackfill {
         guard let event = UsageJSON.codexRollout(line),
               event.reading.date >= now.addingTimeInterval(-UsageQuotaHistory.retention),
               event.reading.date <= now.addingTimeInterval(5) else { return }
-        if let id = event.account, id != account?.account {
-            readings.append(.foreignAccount(event.reading.date))
-            meterCount += 1
-            return
-        }
-        if let subject = event.subject, let activeSubject = account?.subject, subject != activeSubject {
+        let identity = event.identity(for: account)
+        if identity == .foreign {
+            guard meterCount < limits.observations else { truncated = true; return }
             readings.append(.foreignAccount(event.reading.date))
             meterCount += 1
             return
         }
         guard let payload = event.reading.quota, !payload.windows.isEmpty else { return }
-        let identified: Bool
-        if let id = event.account {
-            guard let account, account.matches(QuotaAccount(account: id, subject: event.subject)) else { return }
-            identified = true
-        } else {
-            guard event.subject == nil else { return }
-            identified = false
-        }
         guard meterCount + payload.windows.count <= limits.observations else { truncated = true; return }
         meterCount += payload.windows.count
         var reading = event.reading
         reading.windows.removeAll()
-        readings.append(Candidate(reading: reading, identified: identified))
+        readings.append(.reading(reading, identified: identity == .matching))
     }
 
     private func close() {

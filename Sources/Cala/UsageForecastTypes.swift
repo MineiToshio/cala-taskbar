@@ -66,6 +66,25 @@ enum QuotaCapActivity: Equatable, Codable, Sendable {
     case inactive, active(used: Double, reset: Date), unknown
 }
 
+enum QuotaCapBand: CaseIterable {
+    case absent, inactive, low, near, full, unknown, unresolved
+
+    init(_ cap: QuotaCapState, at date: Date) {
+        switch cap {
+        case .absent: self = .absent
+        case .unknown: self = .unknown
+        case .present(.inactive): self = .inactive
+        case .present(.unknown): self = .unresolved
+        case .present(.active(let used, let reset)):
+            if reset <= date || !(0...100).contains(used) { self = .unresolved }
+            else if used == 100 { self = .full }
+            else { self = used >= 80 ? .near : .low }
+        }
+    }
+
+    var nearLimit: Bool { self == .near || self == .full }
+}
+
 /// Whether the reset was advertised directly or calculated from a countdown.
 enum QuotaResetKind: Int, Codable, Sendable {
     case explicit, calculated
