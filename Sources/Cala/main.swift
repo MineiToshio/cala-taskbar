@@ -199,6 +199,20 @@ enum Snapshots {
                                      notes: ["en": "Improved window previews and more reliable keyboard shortcuts.",
                                              "es": "Vistas previas mejoradas y atajos de teclado más fiables."],
                                      notesURL: UpdateService.releases)
+        // The bar's update indicator, at rest and hovered, on a light (Snow) and a dark (Graphite) bar.
+        for (themeID, dark) in [("snow", false), ("graphite", true)] {
+            let theme = BarTheme.named(themeID)
+            let segment = HStack(spacing: 2) {
+                UpdateButton(version: fixture.version)
+                UpdateButton(version: fixture.version, hovering: true)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: CGFloat(store.config.iconSize) + 20)
+            .background(theme.background)
+            .environment(\.themeAccent, theme.accent)
+            .environment(\.colorScheme, dark ? .dark : .light)
+            write(segment, "update-indicator-\(dark ? "dark" : "light")", width: 140)
+        }
         let updateStates: [(String, UpdateState)] = [
             ("idle", .idle), ("checking", .checking), ("up-to-date", .upToDate(fixture.publishedAt)),
             ("available", .available(fixture.version)), ("skipped", .skipped(fixture.version)),

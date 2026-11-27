@@ -464,6 +464,7 @@ final class BarController {
             model.hoverSince = Date()
             model.startHover = (id == startID)
             model.deskHover = (id == deskID)
+            model.updateHover = (id == updateID)
             model.trayHover = (id?.hasPrefix("__t_") == true) ? id : nil
             model.hovered = model.items.first { $0.id == id }
         }
