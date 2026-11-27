@@ -57,7 +57,9 @@ struct UsageForecast: UsageForecasting {
             if result.readiness != .learning { return result }
         }
         let combined = History(rows: rows, gaps: gaps, since: earliest, through: availableThrough, run: run, trusted: false)
-        return run.evaluate(combined, trusted: false)
+        let result = run.evaluate(combined, trusted: false)
+        guard result.readiness == .learning else { return result }
+        return run.quick(rows, through: availableThrough)
     }
 
     private static let learning = ForecastResult(expectedUsed: nil, exhaustProbability: nil, eta: nil, etaRange: nil,
@@ -598,6 +600,111 @@ private extension UsageForecast {
                 }
             }
             return result
+        }
+
+        /// Cold-start estimate used while the learned profile is not ready. The default activity profile
+        /// spreads the remaining window by typical local hours instead of extrapolating the rate 24/7:
+        ///
+        ///     rate      = debit / (Σ observed seconds · prior(slot) / 1 h + shrink)
+        ///     slotRate  = (1 − w) · rate · prior(slot) + w · ownRate(slot)      w = min(1, liveDays / 14)
+        ///     expected  = clamp(used + Σ remaining seconds · slotRate / 1 h, used...100)
+        ///
+        /// `shrink` is a zero-debit pseudo-exposure (2 peak hours weekly, ½ hour for 5-hour sessions) that
+        /// discounts a first burst and is negligible after a few days. `ownRate` is the user's own hour-of-week
+        /// rate over the last 28 days where a slot has at least 30 minutes of evidence. The low estimate uses a
+        /// pseudo-exposure of at least half the remaining prior hours and half the own rates; it alone, or 85%
+        /// used with a quarter of the window left, raises the warning.
+        func quick(_ rows: ArraySlice<QuotaBucket>, through availableThrough: Date) -> ForecastResult {
+            guard !band.nearLimit, let horizon = grid.calendar.date(byAdding: .day, value: -28, to: now) else {
+                return UsageForecast.learning
+            }
+            var debit = 0.0
+            var exposure = 0.0
+            var ownDebit = Array(repeating: 0.0, count: 168)
+            var ownSeconds = Array(repeating: 0.0, count: 168)
+            var days: Set<Int> = []
+            var cycleStart: Date?
+            var cycleSeconds = 0.0
+            var cycleDirect = 0.0
+            var cycleDebit = 0.0
+            for row in rows where row.start >= horizon && row.start < availableThrough {
+                guard !row.flags.contains(.provisional), row.latest?.attribution != .provisional,
+                      row.deltaHundredths >= 0, row.coveredSeconds >= 0, row.quietSeconds >= 0 else { continue }
+                if let sample = row.latest, sample.attribution == .live, sample.date <= now {
+                    days.insert(grid.position(sample.date).date)
+                }
+                let start = max(row.start, row.cycle.segmentStart)
+                let end = min(row.end, row.cycle.reset, availableThrough)
+                let seconds = min(row.coveredSeconds + row.quietSeconds, max(0, end.timeIntervalSince(start)))
+                guard seconds > 0 else { continue }
+                let slot = grid.position(row.start).slot
+                debit += row.delta
+                exposure += seconds * Self.prior(slot, short: short) / hour
+                ownDebit[slot] += row.delta
+                ownSeconds[slot] += seconds
+                days.insert(grid.position(start).date)
+                if abs(row.cycle.reset.timeIntervalSince(current.reset)) <= 600 {
+                    cycleStart = min(cycleStart ?? row.cycle.segmentStart, row.cycle.segmentStart)
+                    cycleSeconds += seconds
+                    cycleDirect += min(row.coveredSeconds, seconds)
+                    cycleDebit += row.delta
+                }
+            }
+            // One hour of live readings in this cycle, or at least three (dense intervals are at most
+            // 20 minutes, so 30 resolved minutes need three readings) over 30 minutes with some use.
+            guard let cycleStart else { return UsageForecast.learning }
+            let span = current.date.timeIntervalSince(cycleStart)
+            guard (span + epsilon >= hour && cycleSeconds + epsilon >= 0.75 * hour)
+                    || (span + epsilon >= 1_800 && cycleDirect + epsilon >= 1_800 && cycleDebit > 0) else {
+                return UsageForecast.learning
+            }
+
+            var remainingPrior = 0.0
+            var spans: [(slot: Int, seconds: Double)] = []
+            var position = start
+            while position < current.reset {
+                let bounds = grid.bounds(position, seconds: 3_600)
+                let end = min(bounds.end, current.reset)
+                let slot = grid.position(bounds.start).slot
+                let seconds = end.timeIntervalSince(position)
+                spans.append((slot, seconds))
+                remainingPrior += seconds * Self.prior(slot, short: short) / hour
+                position = end
+            }
+            let shrink = short ? 0.5 : 2.0
+            let rate = debit / (exposure + shrink)
+            let lowRate = debit / (exposure + max(4 * shrink, 0.5 * remainingPrior))
+            let own = min(1, Double(days.count) / 14)
+            var expected = current.used
+            var low = current.used
+            for (slot, seconds) in spans {
+                let prior = Self.prior(slot, short: short)
+                let ownRate = ownSeconds[slot] + epsilon >= 1_800 ? ownDebit[slot] * hour / ownSeconds[slot] : nil
+                let nominal = ownRate.map { (1 - own) * rate * prior + own * $0 } ?? rate * prior
+                let conservative = ownRate.map { (1 - own) * lowRate * prior + own * 0.5 * $0 } ?? lowRate * prior
+                expected += nominal * seconds / hour
+                low += conservative * seconds / hour
+            }
+            let remaining = current.reset.timeIntervalSince(now) / Double(current.series.meter.durationSeconds)
+            let warning = low + epsilon >= 100 || (current.used >= 85 && remaining + epsilon >= 0.25)
+            return ForecastResult(expectedUsed: min(100, max(current.used, expected)), exhaustProbability: nil, eta: nil,
+                                  etaRange: nil, readiness: .quick, hitWeeks: 0, effectiveWeeks: 0,
+                                  learningDays: min(14, days.count), quickWarning: warning)
+        }
+
+        /// Default hour-of-week activity in local time (relative, peak 1). Weekdays: nights 00–07 near zero,
+        /// 07–09 waking up, 09–12 and 14–18 working peak, 12–14 lunch, 18–20 and 20–23 lighter evenings.
+        /// Weekends stay light. A 0.05 floor keeps night owls from dividing by ~0; inside a 5-hour session the
+        /// user is already active, so the shape only modulates a 0.5 floor.
+        static let weekdayActivity: [Double] = [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.4, 0.4, 1, 1, 1,
+                                                0.7, 0.7, 1, 1, 1, 1, 0.5, 0.5, 0.35, 0.35, 0.35, 0.1]
+        static let weekendActivity: [Double] = [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.15, 0.15, 0.25, 0.25,
+                                                0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.2, 0.2, 0.2, 0.05]
+
+        static func prior(_ slot: Int, short: Bool) -> Double {
+            let shape = slot >= 120 ? weekendActivity[slot % 24] : weekdayActivity[slot % 24]
+            let floor = short ? 0.5 : 0.05
+            return floor + (1 - floor) * shape
         }
 
         private func remainingSupport(_ profile: Profile) -> (sameHour: Double, repeated: Double, point: Double?) {

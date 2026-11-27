@@ -83,6 +83,8 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     struct Line {
         let text: String
         var warn = false
+        /// A smaller secondary line, e.g. the quick estimate's learning progress.
+        var detail: String? = nil
     }
 
     private struct MeterKey: Hashable {
@@ -387,15 +389,26 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         guard !window.isResetting(now), observation?.inactive != true,
               staleReadingDate(state, window, now: now) == nil else { return nil }
         if window.used == 100 { return Line(text: tx("Quota used up", "Cuota agotada")) }
-        let learning = Line(text: tx("Learning your usage pattern…", "Aprendiendo tu patrón de uso…"))
+        let learning = Line(text: tx("Calculating… a few minutes", "Calculando… unos minutos"))
         guard let observation, let result = forecast(state, window, now: now) else { return learning }
         switch result.readiness {
         case .learning: return learning
         case .exhausted: return learning
+        case .quick:
+            guard let expected = result.expectedUsed, expected.isFinite else { return learning }
+            let day = max(1, min(14, result.learningDays))
+            let detail = tx("Still learning your pattern (day \(day) of 14) · may change",
+                            "Aún aprendiendo tu patrón (día \(day) de 14) · puede variar")
+            if result.quickWarning {
+                return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"),
+                            warn: true, detail: detail)
+            }
+            let used = Self.displayedUsed(expected, window: window)
+            return Line(text: tx("Quick estimate · ~\(used)% used at reset", "Estimación rápida · ~\(used)% usado al reinicio"),
+                        detail: detail)
         case .normal, .provisional:
             guard let expected = result.expectedUsed, expected.isFinite else { return learning }
-            let rounded = (min(100, max(0, expected)) / 5).rounded() * 5
-            let used = max(Int(rounded), 100 - Int((100 - window.used).rounded()))
+            let used = Self.displayedUsed(expected, window: window)
             if result.readiness == .provisional {
                 return Line(text: tx("Early estimate · ~\(used)% used at reset", "Estimación inicial · ~\(used)% usado al reinicio"))
             }
@@ -407,6 +420,11 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
             }
             return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"), warn: true)
         }
+    }
+
+    private static func displayedUsed(_ expected: Double, window: UsageWindow) -> Int {
+        let rounded = (min(100, max(0, expected)) / 5).rounded() * 5
+        return max(Int(rounded), 100 - Int((100 - window.used).rounded()))
     }
 
     private func validETA(_ result: ForecastResult, reset: Date?, observation: UsageWindowObservation, now: Date) -> Date? {
@@ -526,10 +544,31 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         return eta
     }
 
+    /// A quick estimate warns only when exhaustion is nearly certain, and never with a time.
+    private func quickWarning(_ state: UsageState, _ window: UsageWindow, now: Date) -> Bool {
+        let threshold = Double(store?.config.usageAlertThreshold ?? 20)
+        guard 100 - window.used > threshold, let result = forecast(state, window, now: now) else { return false }
+        return result.readiness == .quick && result.quickWarning
+    }
+
     private func evaluatePrediction(_ state: UsageState, now: Date) {
         for window in state.orderedWindows {
-            guard let context = Self.alertContext(state, window, now: now),
-                  let eta = predictiveETA(state, window, now: now) else { continue }
+            guard let context = Self.alertContext(state, window, now: now) else { continue }
+            guard let eta = predictiveETA(state, window, now: now) else {
+                guard quickWarning(state, window, now: now) else { continue }
+                // Shares the predictive kind, so one cycle never gets both a quick and an ETA warning.
+                fire(context, kind: "proj",
+                     title: tx("\(state.provider.title): you may hit the limit before reset",
+                               "\(state.provider.title): podrías agotar la cuota antes del reinicio"),
+                     body: tx("\(window.localizedTitle) · resets in \(context.resetIn)", "\(window.localizedTitle) · se reinicia en \(context.resetIn)")) { [weak self] in
+                    guard let self, let current = self.states.first(where: { $0.provider == state.provider && $0.available }),
+                          let visible = current.orderedWindows.first(where: {
+                              Self.alertContext(current, $0, now: Date())?.sameCycle(as: context) == true
+                          }) else { return false }
+                    return self.quickWarning(current, visible, now: Date())
+                }
+                continue
+            }
             let remaining = UsagePaceProjection.formatted(eta.timeIntervalSince(now))
             fire(context, kind: "proj",
                  title: tx("\(state.provider.title): estimated to hit the limit in \(remaining)",

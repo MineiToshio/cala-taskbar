@@ -682,6 +682,11 @@ struct UsagePane: View {
                             .foregroundStyle(forecastLine.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityHidden(true)
+                        if let detail = forecastLine.detail {
+                            Text(detail).font(.system(size: 9.5)).flyoutSecondary()
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityHidden(true)
+                        }
                     } else if let staleDate, staleDate != state.reading?.date {
                         Text(age(staleDate, now: now)).font(.system(size: 10.5)).flyoutSecondary()
                     }
@@ -689,7 +694,7 @@ struct UsagePane: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityValue(
                     tx("\(remaining)% left, \(100 - remaining)% used", "\(remaining)% restante, \(100 - remaining)% usado")
-                    + (forecastLine.map { ". " + $0.text } ?? "")
+                    + (forecastLine.map { ". " + $0.text + ($0.detail.map { ". " + $0 } ?? "") } ?? "")
                 )
             }
             if let error = state.error {

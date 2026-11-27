@@ -237,9 +237,10 @@ struct QuotaHistorySnapshot: Sendable {
     }
 }
 
-/// Display readiness after coverage, calibration and ETA gates.
+/// Display readiness after coverage, calibration and ETA gates. `learning` has no number yet; `quick` is the
+/// cold-start estimate from a default activity profile, shown until the `provisional` gate passes.
 enum ForecastReadiness: Equatable, Sendable {
-    case learning, provisional, normal, risk, likely, exhausted
+    case learning, quick, provisional, normal, risk, likely, exhausted
 }
 
 /// Forecast values in percentage points, probability (0...1), and absolute crossing times.
@@ -251,6 +252,10 @@ struct ForecastResult: Equatable, Sendable {
     var readiness: ForecastReadiness
     var hitWeeks: Int
     var effectiveWeeks: Double
+    /// `quick` only: distinct local days with live data for the series, capped at 14.
+    var learningDays = 0
+    /// `quick` only: exhaustion before reset is nearly certain. Never carries an ETA.
+    var quickWarning = false
 }
 
 /// Pure forecast interface for the next wave. The caller supplies the current live counter and calendar.

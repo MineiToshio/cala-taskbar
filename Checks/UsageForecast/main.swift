@@ -318,6 +318,124 @@ let broad = forecast(sessions(debit: { index, cell in
 }), shortReading, at: shortNow)
 check(broad.readiness == .risk && broad.eta == nil && broad.etaRange == nil, "short ETA envelope wider than an hour suppresses ETA")
 
+// Quick estimate: live rows of the current cycle from `begin` to `end`, debiting `perHour(date)` per hour.
+func liveCycle(_ key: QuotaSeries = weekly, from begin: Date, to end: Date, reset cycleReset: Date, start used: Double = 0,
+               in cal: Calendar = calendar, perHour: (Date) -> Double) -> (rows: [QuotaBucket], used: Double) {
+    let cycle = QuotaCycle(reset: cycleReset, segmentStart: begin)
+    var rows: [QuotaBucket] = []
+    var total = used
+    var position = begin
+    while position < end {
+        let bounds = QuotaCalendarBuckets.interval(containing: position, timeZoneID: key.timeZoneID,
+                                                   seconds: key.meter.bucketSeconds)
+        let upper = min(bounds.end, end)
+        let seconds = upper.timeIntervalSince(position)
+        let delta = min(100 - total, perHour(position) * seconds / hour)
+        total += delta
+        rows.append(.init(series: key, cycle: cycle, start: bounds.start, deltaHundredths: Int((delta * 100).rounded()),
+                          coveredSeconds: delta > 0 ? seconds : 0, quietSeconds: delta > 0 ? 0 : seconds, flags: [],
+                          latest: sample(upper.addingTimeInterval(-1), total)))
+        position = upper
+    }
+    return (rows, total)
+}
+
+func quickForecast(_ key: QuotaSeries = weekly, from begin: Date, hours: Double, reset cycleReset: Date,
+                   history: [QuotaBucket] = [], in cal: Calendar = calendar, start used: Double = 0,
+                   perHour: @escaping (Date) -> Double) -> ForecastResult {
+    let end = begin.addingTimeInterval(hours * hour)
+    let live = liveCycle(key, from: begin, to: end, reset: cycleReset, start: used, in: cal, perHour: perHour)
+    let reading = current(live.used, for: key, at: end, reset: cycleReset)
+    return forecast(history + live.rows, reading, at: end, in: cal)
+}
+
+let mondayNine = monday.addingTimeInterval(9 * hour)
+let weeklyReset = mondayNine.addingTimeInterval(week)
+check(quickForecast(from: mondayNine, hours: 1 / 3, reset: weeklyReset) { _ in 3 }.readiness == .learning,
+      "twenty minutes of readings are still calculating")
+check(quickForecast(from: mondayNine, hours: 0.9, reset: weeklyReset) { _ in 0 }.readiness == .learning,
+      "under an hour without use is still calculating")
+check(quickForecast(from: mondayNine, hours: 0.6, reset: weeklyReset) { _ in 2 }.readiness == .quick,
+      "three readings over 30 minutes with some use give a quick estimate")
+let firstHour = quickForecast(from: mondayNine, hours: 1, reset: weeklyReset) { _ in 1 }
+check(firstHour.readiness == .quick && (firstHour.expectedUsed ?? 100) < 40 && (firstHour.expectedUsed ?? 0) > 1
+      && firstHour.eta == nil && !firstHour.quickWarning && firstHour.learningDays == 1,
+      "1% in the first hour on Monday morning is well below 100%, not a 24/7 extrapolation")
+let idle = quickForecast(from: mondayNine, hours: 2, reset: weeklyReset, start: 12) { _ in 0 }
+check(idle.readiness == .quick && close(idle.expectedUsed, 12, within: 0.01) && !idle.quickWarning, "zero usage stays at the current value")
+let firstDay = quickForecast(from: mondayNine, hours: 24, reset: weeklyReset) { date in
+    (9..<18).contains(calendar.component(.hour, from: date)) ? 3.33 : 0
+}
+let burstHour = quickForecast(from: mondayNine, hours: 1, reset: weeklyReset) { _ in 20 }
+check(close(burstHour.expectedUsed, 100) && !burstHour.quickWarning, "heavy first hour caps at 100% without a warning")
+let heavyStart = quickForecast(from: mondayNine, hours: 2, reset: weeklyReset) { _ in 30 }
+check(close(heavyStart.expectedUsed, 100) && heavyStart.quickWarning && heavyStart.eta == nil,
+      "60% in two hours is a near-certain warning, still without an ETA")
+let nearlyFull = quickForecast(from: mondayNine, hours: 1, reset: weeklyReset, start: 85) { _ in 1 }
+check(nearlyFull.quickWarning, "86% used with most of the window left warns")
+let lateFull = quickForecast(from: mondayNine.addingTimeInterval(6 * day), hours: 1, reset: weeklyReset, start: 85) { _ in 1 }
+check(lateFull.readiness == .quick && !lateFull.quickWarning, "86% used near reset with a low conservative estimate does not warn")
+
+func dailyHours(_ count: Int, sameCycle: Bool) -> [QuotaBucket] {
+    var rows: [QuotaBucket] = []
+    for offset in 1...count {
+        let begin: Date = mondayNine.addingTimeInterval(-Double(offset) * day)
+        let end: Date = sameCycle ? mondayNine : begin.addingTimeInterval(day)
+        rows += liveCycle(from: begin, to: begin.addingTimeInterval(hour), reset: end, perHour: { _ in 0.5 }).rows
+    }
+    return rows
+}
+let earlierDays = dailyHours(3, sameCycle: true)
+let fourDays = quickForecast(from: mondayNine, hours: 1, reset: weeklyReset, history: earlierDays) { _ in 1 }
+check(fourDays.readiness == .quick && fourDays.learningDays == 4, "day counter counts distinct live days")
+let manyDays = dailyHours(20, sameCycle: false)
+check(quickForecast(from: mondayNine, hours: 1, reset: weeklyReset, history: manyDays) { _ in 1 }.learningDays == 14,
+      "day counter caps at 14")
+let withRoutine = quickForecast(from: monday, hours: 18, reset: reset, history: weeks(3)) { date in routine(Int(date.timeIntervalSince(monday) / hour)) }
+check(withRoutine.readiness == .provisional && withRoutine.learningDays == 0, "the provisional gate replaces the quick estimate")
+check(quickForecast(from: mondayNine, hours: 1, reset: weeklyReset, history: weeks(8)) { _ in 1 }.readiness == .normal,
+      "a learned profile is unchanged by current-cycle rows")
+
+let shortStart = monday.addingTimeInterval(10 * hour)
+let shortQuick = quickForecast(short, from: shortStart, hours: 1, reset: shortStart.addingTimeInterval(5 * hour)) { _ in 20 }
+check(shortQuick.readiness == .quick && (shortQuick.expectedUsed ?? 100) < 100 && (shortQuick.expectedUsed ?? 0) > 40
+      && !shortQuick.quickWarning, "five-hour quick estimate is sane")
+let shortHeavy = quickForecast(short, from: shortStart, hours: 1, reset: shortStart.addingTimeInterval(5 * hour)) { _ in 50 }
+check(shortHeavy.quickWarning && close(shortHeavy.expectedUsed, 100), "half a session in its first hour warns")
+
+let modelScoped = series(scope: .modelID("opus"))
+check(quickForecast(modelScoped, from: mondayNine, hours: 1, reset: weeklyReset) { _ in 1 }.readiness == .quick,
+      "per-model meters get a quick estimate")
+
+var dstResults: [Double] = []
+do {
+    let zone = "America/New_York"
+    var local = Calendar(identifier: .gregorian)
+    local.timeZone = TimeZone(identifier: zone)!
+    let key = series("dst-quick", zone: zone)
+    for (month, day) in [(10, 30), (3, 6)] {
+        let begin = local.date(from: DateComponents(year: 2026, month: month, day: day, hour: 9))!
+        let end = local.date(byAdding: .day, value: 7, to: begin)!
+        let result = quickForecast(key, from: begin, hours: 1, reset: end, in: local) { _ in 1 }
+        dstResults.append(result.expectedUsed ?? .nan)
+        check(result.readiness == .quick && (result.expectedUsed ?? 100) < 40 && (result.expectedUsed ?? 0) > 1,
+              "a DST week gives a sane quick estimate")
+    }
+}
+
+var quickRows = earlierDays
+for stream in 1..<16 { quickRows += weeks(16, for: series("quick-\(stream)")) }
+let quickLive = liveCycle(from: monday.addingTimeInterval(-6 * day), to: now, reset: reset.addingTimeInterval(-6 * day)) { _ in 0.2 }
+let quickSnapshot = QuotaHistorySnapshot(buckets: quickRows + quickLive.rows)
+let quickClock = DispatchTime.now().uptimeNanoseconds
+let quickTimed = engine.forecast(snapshot: quickSnapshot, current: current(quickLive.used, at: now, reset: reset.addingTimeInterval(-6 * day)),
+                                 calendar: calendar, now: now)
+let quickMS = Double(DispatchTime.now().uptimeNanoseconds - quickClock) / 1_000_000
+check(quickTimed.readiness == .quick && quickMS < 10, "quick estimate benchmark under 10 ms")
+print(String(format: "Quick estimate: 1%% at 1 h Monday 09:00 weekly → %.1f%% (day %d); 30%% after 1 day weekly → %.1f%% (warning %@); 20%% after 1 h on 5-hour → %.1f%%; DST weeks → %.1f%% / %.1f%%; benchmark %.3f ms",
+             firstHour.expectedUsed ?? .nan, firstHour.learningDays, firstDay.expectedUsed ?? .nan,
+             firstDay.quickWarning ? "yes" : "no", shortQuick.expectedUsed ?? .nan, dstResults[0], dstResults[1], quickMS))
+
 // Build the full row-budget snapshot before the timed call. The selected short meter keeps
 // 16 weeks of half-hours; other streams fill the snapshot without entering its calculation.
 var benchmarkRows: [QuotaBucket] = []
