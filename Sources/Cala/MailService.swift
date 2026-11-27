@@ -4,6 +4,48 @@ import Foundation
 import Security
 import os
 
+/// Latency instrumentation for the mail module: log lines only (prefix "mail-timing"), never credentials, addresses,
+/// subjects or bodies. Durations are monotonic milliseconds; `op=` ties the lines of one operation together.
+enum MailTiming {
+    private static let counters = OSAllocatedUnfairLock(initialState: (ids: 0, webViews: 0))
+
+    static func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
+    static func ms(since start: UInt64) -> Int { Int((now() &- start) / 1_000_000) }
+    static func ms(from start: UInt64, to end: UInt64) -> Int { Int((end &- start) / 1_000_000) }
+    static func nextID() -> Int { counters.withLock { $0.ids += 1; return $0.ids } }
+    /// True only for the first web view created in this process.
+    static func claimFirstWebView() -> Bool { counters.withLock { $0.webViews += 1; return $0.webViews == 1 } }
+    static func line(_ text: String) { log("mail-timing " + text) }
+
+    /// Operation identity carried through the queue.
+    struct Op {
+        let id: Int
+        let kind: String
+        let tapped: UInt64
+        var enqueued: UInt64 = 0
+    }
+
+    /// The command verb only (never arguments such as mailbox names or credentials).
+    static func verb(_ command: String) -> String {
+        let words = command.split(separator: " ", maxSplits: 2).map(String.init)
+        guard let first = words.first?.uppercased() else { return "?" }
+        let name = first == "UID" && words.count > 1 ? "UID " + words[1].uppercased() : first
+        guard name.hasSuffix("FETCH") else { return name }
+        if command.contains("RFC822.SIZE") { return name + " RFC822.SIZE" }
+        if command.contains("HEADER.FIELDS") { return name + " HEADER+TEXT" }
+        if command.contains("BODY.PEEK[]") { return name + " BODY.PEEK[]" }
+        if command.contains("BODY.PEEK[TEXT]") { return name + " BODY.PEEK[TEXT]" }
+        return name
+    }
+
+    static func describe(_ error: Error) -> String {
+        if error is CancellationError { return "cancelled" }
+        if let error = error as? MailIMAPError { return "\(error)" }
+        if let error = error as? MailFailure { return error.logCode }
+        return "other"
+    }
+}
+
 enum MailAccountStatus: Equatable {
     case connecting, connected, paused
     case authFailed(String)
@@ -278,6 +320,16 @@ final class MailService: ObservableObject {
         case archive(MailMessage)
         case trash(MailMessage)
 
+        var kind: String {
+            switch self {
+            case .content: "open"
+            case .markRead: "mark-read"
+            case .markAllRead: "mark-all-read"
+            case .archive: "archive"
+            case .trash: "trash"
+            }
+        }
+
         func perform(on connection: MailIMAP) async throws -> MailContent {
             switch self {
             case let .content(message): return try await connection.content(of: message)
@@ -316,6 +368,7 @@ final class MailService: ObservableObject {
         let id: UUID
         let operation: Operation
         let contentResult: CheckedContinuation<MailContent, Error>?
+        var timing: MailTiming.Op
     }
 
     private final class AccountRun {
@@ -325,6 +378,8 @@ final class MailService: ObservableObject {
         var pending: [PendingOperation] = []
         var operationFailure: MailAccountStatus?
         var inFlight: UUID?
+        /// Timing only: what last interrupted the connection's wait (see wake).
+        var wakeCause: String?
     }
 
     private(set) var accountsLoadFailed = false
@@ -522,7 +577,7 @@ final class MailService: ObservableObject {
         guard running else { return }
         for account in accounts where account.enabled {
             if let run = runs[account.id] {
-                wake(run)
+                wake(run, cause: "refresh")
             } else {
                 launch(account.id)
             }
@@ -624,7 +679,8 @@ final class MailService: ObservableObject {
         try await content(of: message).text
     }
 
-    func content(of message: MailMessage) async throws -> MailContent {
+    func content(of message: MailMessage, timingID: Int = MailTiming.nextID(),
+                 requestedAt: UInt64 = MailTiming.now()) async throws -> MailContent {
         let id = message.accountID
         guard accounts.contains(where: { $0.id == id && $0.enabled }), running else {
             throw MailFailure.unavailable
@@ -637,8 +693,12 @@ final class MailService: ObservableObject {
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
-                run.pending.append(PendingOperation(id: operationID, operation: .content(message), contentResult: continuation))
-                wake(run)
+                var timing = MailTiming.Op(id: timingID, kind: "open", tapped: requestedAt)
+                timing.enqueued = MailTiming.now()
+                MailTiming.line("enqueue op=\(timingID) kind=open acct=\(logName(id)) since_request_ms=\(MailTiming.ms(from: requestedAt, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil)")
+                run.pending.append(PendingOperation(id: operationID, operation: .content(message), contentResult: continuation,
+                                                    timing: timing))
+                wake(run, cause: "operation")
             }
         } onCancel: {
             Task { @MainActor in
@@ -649,13 +709,15 @@ final class MailService: ObservableObject {
     }
 
     func markRead(_ message: MailMessage) {
-        enqueue(.markRead(currentValidity(for: message)), for: message.accountID)
+        let tapped = MailTiming.now()
+        enqueue(.markRead(currentValidity(for: message)), for: message.accountID, tapped: tapped)
     }
 
     func markAllRead(accountID: String?) {
+        let tapped = MailTiming.now()
         let id = accountID.map(Self.normalize)
         for account in accounts where account.enabled && (id == nil || account.id == id) {
-            enqueue(.markAllRead, for: account.id)
+            enqueue(.markAllRead, for: account.id, tapped: tapped)
         }
     }
 
@@ -665,12 +727,14 @@ final class MailService: ObservableObject {
     }
 
     func archive(_ message: MailMessage) {
+        let tapped = MailTiming.now()
         guard canArchive(message) else { return }
-        enqueue(.archive(currentValidity(for: message)), for: message.accountID)
+        enqueue(.archive(currentValidity(for: message)), for: message.accountID, tapped: tapped)
     }
 
     func trash(_ message: MailMessage) {
-        enqueue(.trash(currentValidity(for: message)), for: message.accountID)
+        let tapped = MailTiming.now()
+        enqueue(.trash(currentValidity(for: message)), for: message.accountID, tapped: tapped)
     }
 
     func webURL(for message: MailMessage) -> URL {
@@ -696,7 +760,7 @@ final class MailService: ObservableObject {
         return message
     }
 
-    private func enqueue(_ operation: Operation, for id: String) {
+    private func enqueue(_ operation: Operation, for id: String, tapped: UInt64 = MailTiming.now()) {
         guard running, accounts.contains(where: { $0.id == id && $0.enabled }) else { return }
         if runs[id] == nil { launch(id) }
         guard let run = runs[id] else { return }
@@ -704,11 +768,15 @@ final class MailService: ObservableObject {
             if case let .markRead(queued) = $0.operation { return queued.id == message.id }
             return false
         }) { return }
-        run.pending.append(PendingOperation(id: UUID(), operation: operation, contentResult: nil))
-        wake(run)
+        var timing = MailTiming.Op(id: MailTiming.nextID(), kind: operation.kind, tapped: tapped)
+        timing.enqueued = MailTiming.now()
+        MailTiming.line("enqueue op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) since_tap_ms=\(MailTiming.ms(from: tapped, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil)")
+        run.pending.append(PendingOperation(id: UUID(), operation: operation, contentResult: nil, timing: timing))
+        wake(run, cause: "operation")
     }
 
-    private func wake(_ run: AccountRun) {
+    private func wake(_ run: AccountRun, cause: String) {
+        run.wakeCause = cause
         run.connection?.requestRefresh()
         run.retryDelay?.cancel()
     }
@@ -733,6 +801,7 @@ final class MailService: ObservableObject {
 
     private func monitor(_ id: String, run: AccountRun) async {
         var backoff = 2
+        var connectAttempt = 0
         defer {
             run.worker = nil
             if runs[id] === run { runs[id] = nil }
@@ -742,13 +811,20 @@ final class MailService: ObservableObject {
             guard let account = accounts.first(where: { $0.id == id }) else { return }
             let connection = makeConnection(account.provider)
             run.connection = connection
+            connectAttempt += 1
+            if connectAttempt > 1 { MailTiming.line("reconnect acct=\(logName(id)) attempt=\(connectAttempt)") }
             var syncedAt: ContinuousClock.Instant?
+            var syncReason = "connect"
             do {
                 try await withTaskCancellationHandler {
                     defer { connection.close() }
-                    try await signIn(id, on: connection)
+                    try await signIn(id, name: logName(id), on: connection)
                     while runs[id] === run && !Task.isCancelled {
+                        let hadOperations = !run.pending.isEmpty
                         try await performOperations(for: id, run: run, on: connection)
+                        if hadOperations { syncReason = syncReason == "connect" ? "connect+after-operations" : "after-operations" }
+                        connection.timingContext = "acct=\(logName(id)) sync=\(MailTiming.nextID())"
+                        connection.timingReason = syncReason
                         let snapshot = try await connection.synchronize(accountID: id)
                         guard runs[id] === run, !Task.isCancelled else { return }
                         let previous = snapshots[id]
@@ -760,7 +836,13 @@ final class MailService: ObservableObject {
                         if syncedAt == nil { syncedAt = .now }
                         publishInbox()
                         if run.pending.isEmpty {
+                            connection.timingContext = "acct=\(logName(id)) idle"
                             try await connection.waitForInboxChange()
+                            let outcome = connection.wakeOutcome
+                            syncReason = outcome == "interrupt" ? (run.wakeCause ?? "interrupt") : outcome
+                            run.wakeCause = nil
+                        } else {
+                            syncReason = "queued-operations"
                         }
                     }
                 } onCancel: {
@@ -772,6 +854,7 @@ final class MailService: ObservableObject {
                 run.connection = nil
                 guard runs[id] === run, !Task.isCancelled else { return }
                 let failure = MailFailure.from(error)
+                MailTiming.line("connection-lost acct=\(logName(id)) failure=\(failure.logCode) timed_out=\({ if case MailIMAPError.timedOut = error { return true }; return false }()) context=\(connection.timingContext)")
                 if failure == .keychainNeedsNotice {
                     failOperations(in: run, with: .unavailable)
                     explainKeychainAgain(for: id)
@@ -787,6 +870,7 @@ final class MailService: ObservableObject {
 
                 if let syncedAt, syncedAt.duration(to: .now) >= .seconds(60) { backoff = 2 }
                 let wait = backoff
+                MailTiming.line("retry-wait acct=\(logName(id)) seconds=\(wait)")
                 let retry = Task { _ = try? await Task.sleep(for: .seconds(wait)) }
                 run.retryDelay = retry
                 await retry.value
@@ -801,18 +885,33 @@ final class MailService: ObservableObject {
         "account[\(accounts.firstIndex { $0.id == id }.map(String.init) ?? "?")]"
     }
 
-    private nonisolated func signIn(_ id: String, on connection: MailIMAP) async throws {
-        await beginCredentialRead(id)
-        let stored: String?
-        do { stored = try readCredential(id) } catch { await endCredentialRead(id); throw error }
-        await endCredentialRead(id)
-        guard let password = stored else { throw MailFailure.appPasswordRequired }
-        try await connection.open(email: id, password: password)
+    private nonisolated func signIn(_ id: String, name: String, on connection: MailIMAP) async throws {
+        let began = MailTiming.now()
+        MailTiming.line("signin-start acct=\(name)")
+        connection.timingContext = "acct=\(name) signin"
+        var keychainMS = 0
+        do {
+            await beginCredentialRead(id)
+            let stored: String?
+            do { stored = try readCredential(id) } catch { await endCredentialRead(id); throw error }
+            await endCredentialRead(id)
+            keychainMS = MailTiming.ms(since: began)
+            guard let password = stored else { throw MailFailure.appPasswordRequired }
+            try await connection.open(email: id, password: password)
+        } catch {
+            MailTiming.line("signin-end acct=\(name) err=\(MailTiming.describe(error)) keychain_ms=\(keychainMS) total_ms=\(MailTiming.ms(since: began))")
+            throw error
+        }
+        MailTiming.line("signin-end acct=\(name) ok keychain_ms=\(keychainMS) imap_ms=\(MailTiming.ms(since: began) - keychainMS) total_ms=\(MailTiming.ms(since: began))")
     }
 
     private func performOperations(for id: String, run: AccountRun, on connection: MailIMAP) async throws {
         while runs[id] === run, let pending = run.pending.first {
             run.inFlight = pending.id
+            let timing = pending.timing
+            let performStart = MailTiming.now()
+            MailTiming.line("start op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) queue_wait_ms=\(MailTiming.ms(from: timing.enqueued, to: performStart)) since_tap_ms=\(MailTiming.ms(from: timing.tapped, to: performStart))")
+            connection.timingContext = "acct=\(logName(id)) op=\(timing.id)"
             let result: Result<MailContent, MailFailure>
             do {
                 result = .success(try await pending.operation.perform(on: connection))
@@ -826,7 +925,13 @@ final class MailService: ObservableObject {
                 result = .failure(.rejected)
             } catch MailIMAPError.messageTooLarge {
                 result = .failure(.messageTooLarge)
+            } catch {
+                MailTiming.line("end op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) err=\(MailTiming.describe(error)) perform_ms=\(MailTiming.ms(since: performStart)) since_tap_ms=\(MailTiming.ms(since: timing.tapped))")
+                throw error
             }
+            let performed: String
+            if case .success = result { performed = "ok" } else { performed = "failed" }
+            MailTiming.line("end op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) result=\(performed) perform_ms=\(MailTiming.ms(since: performStart)) since_tap_ms=\(MailTiming.ms(since: timing.tapped))")
             guard runs[id] === run, !Task.isCancelled else { return }
             run.inFlight = nil
             guard let index = run.pending.firstIndex(where: { $0.id == pending.id }) else { continue }
@@ -839,6 +944,9 @@ final class MailService: ObservableObject {
                     pending.operation.apply(to: &snapshot)
                     snapshots[id] = snapshot
                 }
+                if pending.contentResult != nil {
+                    MailTiming.line("content-resume op=\(timing.id) acct=\(logName(id)) since_request_ms=\(MailTiming.ms(since: timing.tapped))")
+                }
                 pending.contentResult?.resume(returning: content)
             case let .failure(error):
                 if pending.contentResult == nil {
@@ -847,7 +955,12 @@ final class MailService: ObservableObject {
                 }
                 pending.contentResult?.resume(throwing: error)
             }
+            let publishStart = MailTiming.now()
             publishInbox()
+            if pending.contentResult == nil {
+                // For archive / trash / mark read this is when the row (or unread dot) leaves the published inbox.
+                MailTiming.line("row-gone op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) result=\(performed) publish_ms=\(MailTiming.ms(since: publishStart)) total_tap_ms=\(MailTiming.ms(since: timing.tapped))")
+            }
         }
     }
 

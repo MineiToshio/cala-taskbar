@@ -47,6 +47,16 @@ final class MailIMAP {
     private var validity: UInt32?
     private var revision = 0
     private var archiveAvailable: Bool?
+    // Latency instrumentation (mail-timing log lines only; no behaviour depends on these).
+    /// Set by MailService: whose lines these are ("acct=... op=N" / "sync=N" / "signin" / "idle").
+    var timingContext = ""
+    /// Set by MailService before synchronize: why it runs.
+    var timingReason = ""
+    /// How the last waitForInboxChange ended: change, poll, interrupt, idle-change, idle-renew, idle-server-end.
+    private(set) var wakeOutcome = ""
+    private var bytesReceived = 0
+    private var bytesTotal = 0
+    private var quietCommands = (count: 0, ms: 0, bytes: 0)
 
     func close() { socket.close() }
     func requestRefresh() { socket.interrupt() }
@@ -77,6 +87,10 @@ final class MailIMAP {
     }
 
     func synchronize(accountID: String) async throws -> MailInboxSnapshot {
+        let syncStart = MailTiming.now()
+        bytesTotal = 0
+        quietCommands = (0, 0, 0)
+        MailTiming.line("sync-start \(timingContext) reason=\(timingReason)")
         if archiveAvailable == nil && supportsMove {
             do {
                 let boxes = try await listMailboxes()
@@ -109,7 +123,7 @@ final class MailIMAP {
             if let preview = fetch.body("TEXT", partial: true) {
                 snippet = MailMIME.snippet(preview, headers: fields)
                 if snippet.isEmpty && preview.count == Self.previewSize {
-                    let responses = try await command("UID FETCH \(uid) (UID BODY.PEEK[TEXT]<0.\(Self.extendedPreviewSize)>)")
+                    let responses = try await command("UID FETCH \(uid) (UID BODY.PEEK[TEXT]<0.\(Self.extendedPreviewSize)>)", quiet: true)
                     if let extended = responses.lazy.compactMap(\.fetch)
                         .first(where: { $0.uid == uid && $0.body("TEXT", partial: true) != nil })?
                         .body("TEXT", partial: true) {
@@ -128,17 +142,24 @@ final class MailIMAP {
         // If the mailbox changed mid-snapshot, take another pass before waiting for IDLE.
         if revision != startRevision { requestRefresh() }
         let latest = messages.values.sorted { $0.uid > $1.uid }.prefix(25)
+        if quietCommands.count > 0 {
+            MailTiming.line("sync-extended-previews \(timingContext) n=\(quietCommands.count) ms=\(quietCommands.ms) bytes=\(quietCommands.bytes)")
+        }
+        MailTiming.line("sync-done \(timingContext) reason=\(timingReason) total_ms=\(MailTiming.ms(since: syncStart)) bytes=\(bytesTotal) messages=\(latest.count) unread=\(unseen.count)")
         return MailInboxSnapshot(validity: validity, messages: Array(latest), unread: unseen.count,
                                  canArchive: archiveAvailable == true)
     }
 
     func waitForInboxChange() async throws {
+        wakeOutcome = ""
         guard supportsIdle else {
             let deadline = DispatchTime.now() + .seconds(120)
+            var woke = false
             while let response = try await socket.receive(until: deadline, interruptible: true) {
                 try Task.checkCancellation()
-                if try observe(response) { break }
+                if try observe(response) { woke = true; break }
             }
+            wakeOutcome = woke ? "change" : (DispatchTime.now() >= deadline ? "poll" : "interrupt")
             return
         }
 
@@ -152,6 +173,7 @@ final class MailIMAP {
             if words.first == Substring(tag) {
                 if words.dropFirst().first?.uppercased() == "BAD" {
                     supportsIdle = false
+                    wakeOutcome = "idle-unsupported"
                     return
                 }
                 throw Self.serverError(response)
@@ -160,22 +182,31 @@ final class MailIMAP {
             if try observe(response) { changed = true }
         }
 
+        let idleStart = MailTiming.now()
+        var outcome = "idle-change"
         if !changed {
             let deadline = DispatchTime.now() + .seconds(25 * 60)
+            var woke = false
             while let response = try await socket.receive(until: deadline, interruptible: true) {
                 try Task.checkCancellation()
                 let words = response.line.split(separator: " ", maxSplits: 2)
                 if words.first == Substring(tag) {
                     guard words.dropFirst().first?.uppercased() == "OK" else { throw Self.serverError(response) }
+                    wakeOutcome = "idle-server-end"
                     return
                 }
                 guard words.first == "*" else { throw MailIMAPError.invalidResponse }
-                if try observe(response) { break }
+                if try observe(response) { woke = true; break }
             }
+            if !woke { outcome = DispatchTime.now() >= deadline ? "idle-renew" : "interrupt" }
         }
         try Task.checkCancellation()
+        let exitStart = MailTiming.now()
         socket.send("DONE\r\n")
+        bytesReceived = 0
         _ = try await completion(tag: tag, until: DispatchTime.now() + .seconds(Self.commandTimeout))
+        wakeOutcome = outcome
+        MailTiming.line("idle-exit \(timingContext) outcome=\(outcome) idle_ms=\(MailTiming.ms(from: idleStart, to: exitStart)) done_ack_ms=\(MailTiming.ms(since: exitStart)) bytes=\(bytesReceived)")
     }
 
     func body(of message: MailMessage) async throws -> String {
@@ -183,6 +214,7 @@ final class MailIMAP {
     }
 
     func content(of message: MailMessage) async throws -> MailContent {
+        let contentStart = MailTiming.now()
         try validate(message)
         let sizes = try await command("UID FETCH \(message.uid) (UID RFC822.SIZE)")
         guard let size = sizes.lazy.compactMap(\.fetch)
@@ -195,7 +227,11 @@ final class MailIMAP {
         for response in responses {
             guard let fetch = response.fetch, fetch.uid == message.uid, let bytes = fetch.body("") else { continue }
             guard bytes.count <= Self.messageSizeLimit else { throw MailIMAPError.messageTooLarge }
-            return MailMIME.content(bytes)
+            let parseStart = MailTiming.now()
+            let parsed = MailMIME.content(bytes)
+            MailTiming.line("mime-parse \(timingContext) ms=\(MailTiming.ms(since: parseStart)) raw_bytes=\(bytes.count)")
+            MailTiming.line("content-fetched \(timingContext) imap_and_parse_ms=\(MailTiming.ms(since: contentStart))")
+            return parsed
         }
         throw MailIMAPError.staleMessage
     }
@@ -284,9 +320,30 @@ final class MailIMAP {
     }
 
     private func command(_ command: String, timeout: Int = commandTimeout,
-                         until deadline: DispatchTime? = nil) async throws -> [MailIMAPResponse] {
+                         until deadline: DispatchTime? = nil, quiet: Bool = false) async throws -> [MailIMAPResponse] {
         try Task.checkCancellation()
-        return try await completion(tag: send(command), until: deadline ?? DispatchTime.now() + .seconds(timeout))
+        let started = MailTiming.now()
+        bytesReceived = 0
+        do {
+            let responses = try await completion(tag: send(command), until: deadline ?? DispatchTime.now() + .seconds(timeout))
+            record(command, started: started, outcome: "ok", quiet: quiet)
+            return responses
+        } catch {
+            record(command, started: started, outcome: "err=\(MailTiming.describe(error))", quiet: false)
+            throw error
+        }
+    }
+
+    private func record(_ command: String, started: UInt64, outcome: String, quiet: Bool) {
+        let ms = MailTiming.ms(since: started)
+        bytesTotal += bytesReceived
+        if quiet {
+            quietCommands.count += 1
+            quietCommands.ms += ms
+            quietCommands.bytes += bytesReceived
+        } else {
+            MailTiming.line("cmd \(timingContext) cmd=\"\(MailTiming.verb(command))\" ms=\(ms) bytes=\(bytesReceived) \(outcome)")
+        }
     }
 
     private func completion(tag: String, until deadline: DispatchTime) async throws -> [MailIMAPResponse] {
@@ -296,6 +353,7 @@ final class MailIMAP {
         var retainedBytes = 0
         while true {
             let response = try await read(until: deadline)
+            bytesReceived += response.byteCount
             let words = response.line.split(separator: " ", maxSplits: 2)
             let status = words.dropFirst().first?.uppercased()
             if words.first == Substring(tag) {

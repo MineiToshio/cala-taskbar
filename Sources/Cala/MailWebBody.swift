@@ -5,20 +5,25 @@ import WebKit
 struct MailWebBody: View {
     let content: MailContent
     let loadsRemoteImages: Bool
+    /// Timing only (mail-timing log): the open operation's id and when its content reached the reader.
+    var timingID = 0
+    var deliveredAt: UInt64 = 0
     let onError: (String) -> Void
     @State private var localOnlyRule: WKContentRuleList?
 
     var body: some View {
         if loadsRemoteImages || localOnlyRule != nil {
             MailWebPage(document: MailWebDocument(content: content, loadsRemoteImages: loadsRemoteImages),
-                        rule: localOnlyRule, onError: onError)
+                        rule: localOnlyRule, timingID: timingID, deliveredAt: deliveredAt, onError: onError)
         } else {
             ProgressView().controlSize(.small)
                 .accessibilityLabel(tx("Preparing message", "Preparando mensaje"))
                 .environment(\.colorScheme, .light)
                 .task {
                     do {
+                        let rulesStart = MailTiming.now()
                         let rule = try await MailWebRules.localOnly()
+                        MailTiming.line("webview-rules op=\(timingID) ms=\(MailTiming.ms(since: rulesStart)) since_delivered_ms=\(MailTiming.ms(since: deliveredAt))")
                         if !Task.isCancelled { localOnlyRule = rule }
                     } catch {
                         if !Task.isCancelled {
@@ -115,6 +120,8 @@ private enum MailWebRules {
 private struct MailWebPage: NSViewRepresentable {
     let document: MailWebDocument
     let rule: WKContentRuleList?
+    let timingID: Int
+    let deliveredAt: UInt64
     let onError: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onError: onError) }
@@ -125,6 +132,11 @@ private struct MailWebPage: NSViewRepresentable {
 
     @MainActor
     func makeView(coordinator: Coordinator) -> PageView {
+        // The body is handed to the web view here.
+        coordinator.timingID = timingID
+        coordinator.deliveredAt = deliveredAt
+        coordinator.handedAt = MailTiming.now()
+        coordinator.firstWebView = MailTiming.claimFirstWebView()
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
@@ -157,10 +169,14 @@ private struct MailWebPage: NSViewRepresentable {
         view.allowsLinkPreview = false
         view.navigationDelegate = coordinator
         view.onLayout = { [weak coordinator] view in coordinator?.fitWidth(view) }
+        let sourceStart = MailTiming.now()
         let source = document.source
+        let sourceMS = MailTiming.ms(since: sourceStart)
         config.websiteDataStore.httpCookieStore.setCookiePolicy(.disallow) { [weak view, weak coordinator] in
             guard let view, let coordinator, view.navigationDelegate != nil else { return }
+            coordinator.loadStarted = MailTiming.now()
             coordinator.documentNavigation = view.loadHTMLString(source, baseURL: nil)
+            MailTiming.line("webview-load op=\(coordinator.timingID) first_webview=\(coordinator.firstWebView) create_ms=\(MailTiming.ms(from: coordinator.handedAt, to: coordinator.loadStarted)) source_ms=\(sourceMS) html_chars=\(source.utf8.count)")
         }
         return view
     }
@@ -187,6 +203,13 @@ private struct MailWebPage: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         var onError: (String) -> Void
         var documentNavigation: WKNavigation?
+        // Timing only.
+        var timingID = 0
+        var deliveredAt: UInt64 = 0
+        var handedAt: UInt64 = 0
+        var loadStarted: UInt64 = 0
+        var firstWebView = false
+        private var reportedFinish = false
         private let openLink: (URL) -> Void
         private var initialLoad = true
         private var finished = false
@@ -211,6 +234,10 @@ private struct MailWebPage: NSViewRepresentable {
         }
 
         func webView(_ view: WKWebView, didFinish navigation: WKNavigation!) {
+            if !reportedFinish, navigation === documentNavigation {
+                reportedFinish = true
+                MailTiming.line("webview-didFinish op=\(timingID) first_webview=\(firstWebView) since_handoff_ms=\(MailTiming.ms(since: handedAt)) since_load_ms=\(MailTiming.ms(since: loadStarted)) since_delivered_ms=\(MailTiming.ms(since: deliveredAt))")
+            }
             finished = true
             fitWidth(view)
         }

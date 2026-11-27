@@ -730,6 +730,321 @@ private func checkIMAP() async throws {
 
 do { try await checkIMAP() } catch { expect("Production IMAP command transcript", false) }
 
+// MARK: Mail actions at the IMAP wire level
+// These pin what the SERVER sees for delete, archive and mark-read, independent of incidental commands (LIST, NOOP,
+// SEARCH, FETCH ...). A scripted server answers whatever the client sends, records every command with the status it
+// returned, and the checks assert the mutating commands, their order, and a set of "never" invariants.
+private final class MailActionServer: MailIMAPTransport {
+    struct Entry { let command: String; let status: String }
+
+    private let capabilities: String
+    private let list: String
+    private let unseen: [UInt32]
+    private let failing: [String: String]   // command prefix -> raw reply; "§" stands for the tag
+    private var input = MailIMAPFramer()
+    private(set) var entries: [Entry] = []
+
+    init(capabilities: String, list: String, unseen: [UInt32] = [], failing: [String: String] = [:]) {
+        self.capabilities = capabilities
+        self.list = list
+        self.unseen = unseen
+        self.failing = failing
+    }
+
+    func start() { input.append(wire("* OK ready\r\n")) }
+    func close() {}
+    func interrupt() {}
+
+    func send(_ text: String) {
+        let line = text.trimmingCharacters(in: .newlines)
+        guard let space = line.firstIndex(of: " ") else { entries.append(Entry(command: line, status: "?")); return }
+        let tag = String(line[..<space]), command = String(line[line.index(after: space)...])
+        let reply: String
+        if let key = failing.keys.filter({ command.hasPrefix($0) }).max(by: { $0.count < $1.count }) {
+            reply = failing[key]!.replacingOccurrences(of: "§", with: tag)
+        } else if command.hasPrefix("CAPABILITY") {
+            reply = "* CAPABILITY IMAP4rev1 \(capabilities)\r\n\(tag) OK capabilities\r\n"
+        } else if command.hasPrefix("SELECT") {
+            reply = "* OK [UIDVALIDITY 7] epoch\r\n* 1 EXISTS\r\n\(tag) OK [READ-WRITE] selected\r\n"
+        } else if command.hasPrefix("LIST") {
+            reply = list + "\(tag) OK listed\r\n"
+        } else if command.hasPrefix("UID SEARCH UNSEEN") {
+            reply = "* SEARCH" + unseen.map { " \($0)" }.joined() + "\r\n\(tag) OK searched\r\n"
+        } else if command.hasPrefix("UID MOVE") || command.hasPrefix("UID EXPUNGE") {
+            reply = "* 1 EXPUNGE\r\n\(tag) OK done\r\n"
+        } else {
+            reply = "\(tag) OK done\r\n"
+        }
+        let status = reply.components(separatedBy: "\r\n").last(where: { $0.hasPrefix(tag + " ") })?
+            .split(separator: " ").dropFirst().first.map(String.init) ?? "-"
+        entries.append(Entry(command: command, status: status))
+        input.append(wire(reply))
+    }
+
+    func receive(until deadline: DispatchTime, interruptible: Bool) async throws -> MailIMAPResponse? {
+        if let frame = try input.next() { return frame }
+        throw MailIMAPError.timedOut   // the client asked for a reply nobody sent
+    }
+
+    var commands: [String] { entries.map(\.command) }
+    /// Everything except commands that cannot change mailbox state. A command this list does not know counts as mutating.
+    var mutating: [String] {
+        let readOnly: Set<String> = ["LOGIN", "AUTHENTICATE", "CAPABILITY", "SELECT", "EXAMINE", "LIST", "LSUB", "NOOP",
+                                     "IDLE", "DONE", "SEARCH", "FETCH", "STATUS", "NAMESPACE", "ID", "ENABLE", "CHECK",
+                                     "LOGOUT"]
+        return entries.map(\.command).filter { command in
+            let words = command.split(separator: " ").map { $0.uppercased() }
+            let verb = words.first == "UID" ? (words.dropFirst().first ?? "") : (words.first ?? "")
+            return !readOnly.contains(verb)
+        }
+    }
+}
+
+/// Server-side safety of a command log: nothing can purge messages the user did not choose.
+/// - no plain EXPUNGE / CLOSE / DELETE, and no non-UID STORE, COPY, MOVE, EXPUNGE
+/// - STORE \Deleted only for a UID set whose UID COPY the server already accepted
+/// - UID EXPUNGE only for a UID set whose STORE \Deleted the server already accepted
+private func wireIsSafe(_ log: [(command: String, status: String)]) -> Bool {
+    var copied: Set<String> = [], flagged: Set<String> = []
+    for (command, status) in log {
+        let words = command.split(separator: " ").map(String.init)
+        guard let first = words.first else { return false }
+        let byUID = first.uppercased() == "UID" && words.count >= 3
+        let verb = (byUID ? words[1] : first).uppercased()
+        switch verb {
+        case "CLOSE", "DELETE": return false
+        case "EXPUNGE":
+            guard byUID, flagged.contains(words[2]) else { return false }
+        case "COPY":
+            guard byUID else { return false }
+            if status == "OK" { copied.insert(words[2]) }
+        case "MOVE":
+            guard byUID else { return false }
+        case "STORE":
+            guard byUID else { return false }
+            if command.lowercased().contains("\\deleted") {
+                guard copied.contains(words[2]) else { return false }
+                if status == "OK" { flagged.insert(words[2]) }
+            }
+        default: break
+        }
+    }
+    return true
+}
+
+private func errorKind(_ error: Error?) -> String {
+    switch error {
+    case nil: return "none"
+    case MailIMAPError.moveUnsupported?: return "moveUnsupported"
+    case MailIMAPError.rejected?: return "rejected"
+    case MailIMAPError.missingMailbox?: return "missingMailbox"
+    case MailIMAPError.staleMessage?: return "staleMessage"
+    case MailIMAPError.server?: return "server"
+    default: return "other(\(String(describing: error)))"
+    }
+}
+
+private func checkMailActions() async throws {
+    let message = MailMessage(id: "unit@example.test#7#42", accountID: "unit@example.test", uid: 42, fromName: "A",
+                              fromAddress: "a@example.test", subject: "S", snippet: "", date: .distantPast, unread: true,
+                              gmailThreadID: nil, gmailMessageID: nil, uidValidity: 7)
+    let gmailList = #"* LIST () "/" INBOX"# + "\r\n" + #"* LIST (\All) "/" "[Gmail]/All Mail""# + "\r\n"
+        + #"* LIST (\Sent) "/" "[Gmail]/Sent Mail""# + "\r\n" + #"* LIST (\Trash) "/" "[Gmail]/Trash""# + "\r\n"
+
+    func run(_ capabilities: String, _ list: String, provider: MailProvider = .gmail, unseen: [UInt32] = [],
+             failing: [String: String] = [:], message: MailMessage = message,
+             _ action: (MailIMAP, MailMessage) async throws -> Void) async -> (server: MailActionServer, error: Error?) {
+        let server = MailActionServer(capabilities: capabilities, list: list, unseen: unseen, failing: failing)
+        let connection = MailIMAP(socket: server, provider: provider)
+        let email = provider == .gmail ? "unit@example.test" : provider == .yahoo ? "unit@yahoo.es" : "unit@me.com"
+        do {
+            try await connection.open(email: email, password: "pw")
+            try await action(connection, message)
+            return (server, nil)
+        } catch { return (server, error) }
+    }
+    func trash(_ c: MailIMAP, _ m: MailMessage) async throws { try await c.trash(m) }
+    func archive(_ c: MailIMAP, _ m: MailMessage) async throws { try await c.archive(m) }
+    func safe(_ s: MailActionServer) -> Bool { wireIsSafe(s.entries.map { ($0.command, $0.status) }) }
+    func neverPurges(_ s: MailActionServer) -> Bool {
+        !s.commands.contains { $0.uppercased().contains("EXPUNGE") || $0.lowercased().contains("\\deleted") }
+    }
+    let copy3 = { (target: String) in
+        [#"UID COPY 42 \#(target)"#, #"UID STORE 42 +FLAGS.SILENT (\Deleted)"#, "UID EXPUNGE 42"]
+    }
+
+    // The checker itself must be able to fail: synthetic logs that purge more than they should.
+    let good = [("UID COPY 42 \"T\"", "OK"), ("UID STORE 42 +FLAGS.SILENT (\\Deleted)", "OK"), ("UID EXPUNGE 42", "OK")]
+    expect("Wire safety accepts COPY, STORE \\Deleted, UID EXPUNGE of the same UID", wireIsSafe(good))
+    expect("Wire safety accepts UID MOVE alone", wireIsSafe([("UID MOVE 42 \"T\"", "OK")]))
+    expect("Wire safety rejects a plain EXPUNGE", !wireIsSafe(good + [("EXPUNGE", "OK")]))
+    expect("Wire safety rejects CLOSE (implicit expunge)", !wireIsSafe(good + [("CLOSE", "OK")]))
+    expect("Wire safety rejects STORE \\Deleted without COPY", !wireIsSafe(Array(good.dropFirst())))
+    expect("Wire safety rejects STORE \\Deleted after a refused COPY", !wireIsSafe([("UID COPY 42 \"T\"", "NO")] + good.dropFirst()))
+    expect("Wire safety rejects STORE \\Deleted for another UID than the copied one",
+           !wireIsSafe([good[0], ("UID STORE 43 +FLAGS.SILENT (\\Deleted)", "OK")]))
+    expect("Wire safety rejects UID EXPUNGE without an accepted STORE \\Deleted",
+           !wireIsSafe([good[0], ("UID STORE 42 +FLAGS.SILENT (\\Deleted)", "NO"), good[2]]))
+    expect("Wire safety rejects UID EXPUNGE with no STORE at all", !wireIsSafe([good[0], good[2]]))
+    expect("Wire safety rejects sequence-number STORE \\Deleted", !wireIsSafe([good[0], ("STORE 42 +FLAGS (\\Deleted)", "OK")]))
+
+    // 1. Delete with MOVE.
+    let gmailMove = await run("IDLE MOVE X-GM-EXT-1", gmailList, trash)
+    expect("Delete with MOVE sends exactly UID MOVE to the \\Trash mailbox from LIST (Gmail layout)",
+           gmailMove.server.mutating == [#"UID MOVE 42 "[Gmail]/Trash""#] && errorKind(gmailMove.error) == "none")
+    expect("Delete with MOVE never sends EXPUNGE or \\Deleted", neverPurges(gmailMove.server) && safe(gmailMove.server))
+    let lowercase = await run("idle move", gmailList, trash)
+    expect("Capability names are case-insensitive for MOVE", lowercase.server.mutating == [#"UID MOVE 42 "[Gmail]/Trash""#])
+    let both = await run("MOVE UIDPLUS", gmailList, trash)
+    expect("MOVE wins over UIDPLUS: no COPY, STORE or EXPUNGE",
+           both.server.mutating == [#"UID MOVE 42 "[Gmail]/Trash""#] && neverPurges(both.server))
+    for name in ["Trash", "TRASH", "Deleted Messages", "Papelera"] {
+        let named = await run("MOVE", #"* LIST () "/" INBOX"# + "\r\n" + #"* LIST () "/" "\#(name)""# + "\r\n", provider: .yahoo, trash)
+        expect("Delete picks an unflagged mailbox named \(name)",
+               named.server.mutating == [#"UID MOVE 42 "\#(name)""#] && neverPurges(named.server))
+    }
+    let deletedItems = await run("MOVE SPECIAL-USE", #"* LIST (\Trash) "/" "Deleted Items""# + "\r\n", provider: .icloud, trash)
+    expect("Delete picks \"Deleted Items\" when it carries \\Trash (name is quoted)",
+           deletedItems.server.mutating == [#"UID MOVE 42 "Deleted Items""#] && neverPurges(deletedItems.server))
+    let unflagged = await run("MOVE", #"* LIST () "/" "Deleted Items""# + "\r\n", provider: .icloud, trash)
+    expect("\"Deleted Items\" without \\Trash is not guessed: missing mailbox and nothing mutating",
+           errorKind(unflagged.error) == "missingMailbox" && unflagged.server.mutating.isEmpty)
+    let flagWins = await run("MOVE", #"* LIST () "/" Trash"# + "\r\n" + #"* LIST (\Trash) "/" Bin"# + "\r\n", provider: .yahoo, trash)
+    expect("A \\Trash flag wins over a mailbox that is merely named Trash", flagWins.server.mutating == [#"UID MOVE 42 "Bin""#])
+    let noselect = await run("MOVE", #"* LIST (\Trash \Noselect) "/" "[Gmail]/Trash""# + "\r\n", trash)
+    expect("An unselectable \\Trash mailbox is never a target",
+           errorKind(noselect.error) == "missingMailbox" && noselect.server.mutating.isEmpty)
+    let noTrash = await run("MOVE", #"* LIST () "/" INBOX"# + "\r\n", trash)
+    expect("No trash mailbox: error and nothing mutating",
+           errorKind(noTrash.error) == "missingMailbox" && noTrash.server.mutating.isEmpty)
+    let noTrashNoMove = await run("IDLE", #"* LIST () "/" INBOX"# + "\r\n", trash)
+    expect("No trash mailbox and no MOVE/UIDPLUS: still an error and nothing mutating",
+           noTrashNoMove.error != nil && noTrashNoMove.server.mutating.isEmpty)
+
+    // 2. Delete without MOVE, with UIDPLUS.
+    let fallback = await run("IDLE UIDPLUS", gmailList, trash)
+    expect("Delete without MOVE: UID COPY, then UID STORE \\Deleted, then UID EXPUNGE of that UID only",
+           fallback.server.mutating == copy3(#""[Gmail]/Trash""#) && errorKind(fallback.error) == "none")
+    expect("Delete without MOVE never sends a plain EXPUNGE and passes the safety invariants",
+           safe(fallback.server) && !fallback.server.commands.contains { $0.uppercased() == "EXPUNGE" })
+    let fallbackNamed = await run("UIDPLUS", #"* LIST () "/" "Deleted Items""# + "\r\n" + #"* LIST (\Trash) "/" "Deleted Items""# + "\r\n",
+                                  provider: .icloud, trash)
+    expect("The UIDPLUS path copies to the same mailbox the MOVE path would use",
+           fallbackNamed.server.mutating == copy3(#""Deleted Items""#) && safe(fallbackNamed.server))
+
+    // 3. Delete with neither MOVE nor UIDPLUS.
+    for caps in ["IDLE", "IDLE X-GM-EXT-1 SPECIAL-USE", ""] {
+        let unsupported = await run(caps, gmailList, trash)
+        expect("Delete with neither MOVE nor UIDPLUS (\(caps.isEmpty ? "no extensions" : caps)) fails as unsupported with nothing mutating",
+               errorKind(unsupported.error) == "moveUnsupported" && unsupported.server.mutating.isEmpty
+                   && neverPurges(unsupported.server))
+    }
+
+    // 4. Archive.
+    let archiveMove = await run("MOVE", gmailList, archive)
+    expect("Gmail archive with MOVE: UID MOVE to the \\All mailbox",
+           archiveMove.server.mutating == [#"UID MOVE 42 "[Gmail]/All Mail""#] && neverPurges(archiveMove.server))
+    let archiveCopy = await run("UIDPLUS", gmailList, archive)
+    expect("Gmail archive without MOVE: COPY to \\All, STORE \\Deleted, UID EXPUNGE of that UID",
+           archiveCopy.server.mutating == copy3(#""[Gmail]/All Mail""#) && safe(archiveCopy.server))
+    let archiveNone = await run("IDLE", gmailList, archive)
+    expect("Archive with neither MOVE nor UIDPLUS: unsupported, nothing mutating",
+           errorKind(archiveNone.error) == "moveUnsupported" && archiveNone.server.mutating.isEmpty)
+    let gmailNamed = await run("MOVE", #"* LIST () "/" Archive"# + "\r\n", archive)
+    expect("Gmail archive ignores mailboxes named Archive: only \\All counts",
+           errorKind(gmailNamed.error) == "missingMailbox" && gmailNamed.server.mutating.isEmpty)
+    let gmailTrashOnly = await run("MOVE", #"* LIST (\Trash) "/" Trash"# + "\r\n", archive)
+    expect("Archive never targets the trash mailbox", gmailTrashOnly.server.mutating.isEmpty)
+    let appleArchive = await run("MOVE SPECIAL-USE", #"* LIST () "/" Archive"# + "\r\n" + #"* LIST (\Archive) "/" Saved"# + "\r\n",
+                                 provider: .icloud, archive)
+    expect("Non-Gmail archive: the \\Archive flag wins over a mailbox named Archive",
+           appleArchive.server.mutating == [#"UID MOVE 42 "Saved""#])
+    for name in ["Archive", "ARCHIVO"] {
+        let named = await run("MOVE", #"* LIST () "/" "\#(name)""# + "\r\n", provider: .yahoo, archive)
+        expect("Non-Gmail archive falls back to a mailbox named \(name)", named.server.mutating == [#"UID MOVE 42 "\#(name)""#])
+    }
+    let appleAll = await run("MOVE", #"* LIST (\All) "/" "All Mail""# + "\r\n", provider: .yahoo, archive)
+    expect("Non-Gmail archive does not use \\All", errorKind(appleAll.error) == "missingMailbox" && appleAll.server.mutating.isEmpty)
+    let appleCopy = await run("UIDPLUS", #"* LIST (\Archive) "/" Saved"# + "\r\n", provider: .yahoo, archive)
+    expect("Non-Gmail archive without MOVE: COPY, STORE \\Deleted, UID EXPUNGE",
+           appleCopy.server.mutating == copy3(#""Saved""#) && safe(appleCopy.server))
+
+    // 5. Mark read.
+    let read = await run("IDLE MOVE", gmailList) { c, m in try await c.markRead(m) }
+    expect("Mark read: exactly UID STORE +FLAGS.SILENT (\\Seen) for that UID",
+           read.server.mutating == [#"UID STORE 42 +FLAGS.SILENT (\Seen)"#] && errorKind(read.error) == "none")
+    let readAll = await run("IDLE", gmailList, unseen: [42, 8, 42, 5]) { c, _ in try await c.markAllRead() }
+    expect("Mark all read: searches UNSEEN, then one STORE of the sorted unique set",
+           readAll.server.mutating == [#"UID STORE 5,8,42 +FLAGS.SILENT (\Seen)"#]
+               && readAll.server.commands.contains("UID SEARCH UNSEEN"))
+    let many = (1...650).map { UInt32($0) }
+    let bulk = await run("IDLE", gmailList, unseen: many.reversed()) { c, _ in try await c.markAllRead() }
+    func set(_ r: ClosedRange<Int>) -> String { #"UID STORE \#(r.map(String.init).joined(separator: ",")) +FLAGS.SILENT (\Seen)"# }
+    expect("Mark all read splits 650 unseen UIDs into sorted batches of 300, 300 and 50",
+           bulk.server.mutating == [set(1...300), set(301...600), set(601...650)])
+    let none = await run("IDLE", gmailList) { c, _ in try await c.markAllRead() }
+    expect("Mark all read with nothing unseen sends no STORE at all",
+           none.server.mutating.isEmpty && errorKind(none.error) == "none")
+    for result in [read, readAll, bulk, none] {
+        expect("Mark read flags only add \\Seen, never \\Deleted, never remove flags, never expunge",
+               neverPurges(result.server) && !result.server.commands.contains { $0.contains("-FLAGS") || $0.contains(" FLAGS ") })
+    }
+
+    // 6. A refusing server stops the sequence.
+    let moveRefused = await run("MOVE", gmailList, failing: ["UID MOVE": "§ NO [OVERQUOTA] cannot move\r\n"], trash)
+    expect("MOVE answered NO: the error surfaces and MOVE is the only mutating command",
+           errorKind(moveRefused.error) == "rejected" && moveRefused.server.mutating == [#"UID MOVE 42 "[Gmail]/Trash""#]
+               && neverPurges(moveRefused.server))
+    let moveBad = await run("MOVE", gmailList, failing: ["UID MOVE": "§ BAD unknown command\r\n"], archive)
+    expect("MOVE answered BAD: the error surfaces and nothing follows",
+           errorKind(moveBad.error) == "rejected" && moveBad.server.mutating == [#"UID MOVE 42 "[Gmail]/All Mail""#]
+               && neverPurges(moveBad.server))
+    let moveBye = await run("MOVE", gmailList, failing: ["UID MOVE": "* BYE [UNAVAILABLE] going away\r\n"], trash)
+    expect("Connection dropped by the server during MOVE: the error surfaces and nothing follows",
+           errorKind(moveBye.error) == "server" && moveBye.server.mutating == [#"UID MOVE 42 "[Gmail]/Trash""#])
+    let copyRefused = await run("UIDPLUS", gmailList, failing: ["UID COPY": "§ NO [OVERQUOTA] copy failed\r\n"], trash)
+    expect("COPY answered NO: the error surfaces and neither STORE \\Deleted nor EXPUNGE follows",
+           errorKind(copyRefused.error) == "rejected" && copyRefused.server.mutating == [#"UID COPY 42 "[Gmail]/Trash""#]
+               && neverPurges(copyRefused.server))
+    let copyArchiveRefused = await run("UIDPLUS", gmailList, failing: ["UID COPY": "§ NO [TRYCREATE] no such mailbox\r\n"], archive)
+    expect("COPY answered NO while archiving: nothing is flagged or expunged",
+           errorKind(copyArchiveRefused.error) == "rejected" && neverPurges(copyArchiveRefused.server)
+               && copyArchiveRefused.server.mutating == [#"UID COPY 42 "[Gmail]/All Mail""#])
+    let storeRefused = await run("UIDPLUS", gmailList, failing: ["UID STORE": "§ NO cannot store\r\n"], trash)
+    expect("STORE \\Deleted answered NO: the error surfaces and no EXPUNGE follows",
+           errorKind(storeRefused.error) == "rejected"
+               && storeRefused.server.mutating == Array(copy3(#""[Gmail]/Trash""#).prefix(2))
+               && !storeRefused.server.commands.contains { $0.uppercased().contains("EXPUNGE") } && safe(storeRefused.server))
+    let expungeRefused = await run("UIDPLUS", gmailList, failing: ["UID EXPUNGE": "§ NO cannot expunge\r\n"], trash)
+    expect("UID EXPUNGE answered NO: the error surfaces after the full sequence",
+           errorKind(expungeRefused.error) == "rejected" && expungeRefused.server.mutating == copy3(#""[Gmail]/Trash""#)
+               && safe(expungeRefused.server))
+    let storeSeenRefused = await run("MOVE", gmailList, failing: ["UID STORE": "§ NO read-only\r\n"]) { c, m in try await c.markRead(m) }
+    expect("Mark read answered NO: the error surfaces", errorKind(storeSeenRefused.error) == "rejected"
+           && storeSeenRefused.server.mutating == [#"UID STORE 42 +FLAGS.SILENT (\Seen)"#])
+    let listRefused = await run("MOVE", gmailList, failing: ["LIST": "§ NO list failed\r\n"], trash)
+    expect("LIST answered NO: the delete fails before any mutating command",
+           listRefused.error != nil && listRefused.server.mutating.isEmpty)
+
+    // Stale identity: nothing is sent for a UID from another UIDVALIDITY epoch, or UID 0.
+    var oldEpoch = message
+    oldEpoch.uidValidity = 6
+    var noEpoch = message
+    noEpoch.uidValidity = nil
+    let zero = MailMessage(id: "z", accountID: message.accountID, uid: 0, fromName: "", fromAddress: "", subject: "", snippet: "",
+                           date: .distantPast, unread: true, gmailThreadID: nil, gmailMessageID: nil, uidValidity: 7)
+    for (label, stale) in [("another UIDVALIDITY", oldEpoch), ("no UIDVALIDITY", noEpoch), ("UID 0", zero)] {
+        let deleted = await run("MOVE UIDPLUS", gmailList, message: stale, trash)
+        let archived = await run("MOVE UIDPLUS", gmailList, message: stale, archive)
+        let marked = await run("MOVE UIDPLUS", gmailList, message: stale) { c, m in try await c.markRead(m) }
+        expect("A stale message (\(label)) is refused by delete, archive and mark read before any command is sent",
+               [deleted, archived, marked].allSatisfy { errorKind($0.error) == "staleMessage" && $0.server.mutating.isEmpty }
+                   && !deleted.server.commands.contains { $0.hasPrefix("LIST") })
+    }
+}
+
+do { try await checkMailActions() } catch { expect("Mail action wire checks ran", false) }
+
 expect("Preview tolerates a truncated Base64 padding pair",
        MailMIME.snippet(wire("TQ="), headers: ["content-transfer-encoding": "base64"]) == "M")
 

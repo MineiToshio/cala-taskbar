@@ -634,6 +634,8 @@ private struct MailReader: View {
     @ObservedObject private var store = ConfigStore.shared
     @State private var state = LoadState.loading
     @State private var attempt = 0
+    /// Timing only: the operation id and the monotonic stamp of the moment the content reached the view.
+    @State private var openTiming: (id: Int, delivered: UInt64) = (0, 0)
 
     private enum LoadState {
         case loading
@@ -664,10 +666,18 @@ private struct MailReader: View {
         .frame(height: height, alignment: .top)
         .task(id: attempt) {
             state = .loading
+            let timingID = MailTiming.nextID()
+            let requested = MailTiming.now()
+            MailTiming.line("ui-request op=\(timingID) kind=open attempt=\(attempt)")
             do {
-                let content = try await service.content(of: message)
-                if !Task.isCancelled { state = .loaded(content) }
+                let content = try await service.content(of: message, timingID: timingID, requestedAt: requested)
+                MailTiming.line("ui-content-delivered op=\(timingID) since_request_ms=\(MailTiming.ms(since: requested)) cancelled=\(Task.isCancelled)")
+                if !Task.isCancelled {
+                    openTiming = (timingID, MailTiming.now())
+                    state = .loaded(content)
+                }
             } catch {
+                MailTiming.line("ui-content-failed op=\(timingID) since_request_ms=\(MailTiming.ms(since: requested)) err=\(MailTiming.describe(error))")
                 if !Task.isCancelled { state = .failed(error.localizedDescription) }
             }
         }
@@ -726,7 +736,8 @@ private struct MailReader: View {
             .foregroundStyle(.secondary)
             .environment(\.colorScheme, .light)
         case let .loaded(content):
-            MailWebBody(content: content, loadsRemoteImages: store.config.mailLoadsRemoteImages) { error in
+            MailWebBody(content: content, loadsRemoteImages: store.config.mailLoadsRemoteImages,
+                        timingID: openTiming.id, deliveredAt: openTiming.delivered) { error in
                 state = .failed(error)
             }
             .id(store.config.mailLoadsRemoteImages)
