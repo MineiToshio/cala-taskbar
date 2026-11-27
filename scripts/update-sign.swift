@@ -172,7 +172,10 @@ private func decodeSecurityHex(_ data: Data) -> Data? {
 }
 
 private func unlockFromDescriptor(_ encrypted: EncryptedKey, fd: Int32) throws -> PrivateKey {
-    let passphrase = try readPassphrase(from: fd)
+    try unlockFromDescriptor(readPassphrase(from: fd), encrypted: encrypted)
+}
+
+private func unlockFromDescriptor(_ passphrase: Data, encrypted: EncryptedKey) throws -> PrivateKey {
     do {
         return try encrypted.unlock(passphrase)
     } catch let failure as Failure where failure.errorDescription == wrongPassphraseMessage {
@@ -237,8 +240,12 @@ private func loadKey(_ url: URL, passphraseFD: Int32?) throws -> PrivateKey {
     }
     #endif
     let encrypted = try JSONDecoder().decode(EncryptedKey.self, from: data)
-    if let passphraseFD, let key = try? unlockFromDescriptor(encrypted, fd: passphraseFD) {
-        return key
+    if let passphraseFD, let passphrase = try? readPassphrase(from: passphraseFD) {
+        do {
+            return try unlockFromDescriptor(passphrase, encrypted: encrypted)
+        } catch let failure as Failure where failure.errorDescription == wrongPassphraseMessage {
+            fputs("La frase guardada en el Llavero no abre la clave; ejecuta ./scripts/ship.sh --save-passphrase / Saved Keychain passphrase did not unlock the key\n", stderr)
+        }
     }
     let prompt = "Frase de la clave de firma de Cala (\(url.lastPathComponent)) — NO es la contraseña del Mac / Cala signing-key passphrase, not your Mac password: "
     let attempts = 3

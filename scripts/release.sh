@@ -55,10 +55,13 @@ if (( $# > 1 )); then
 fi
 commit=$(git rev-parse --verify --end-of-options "${1:-HEAD}^{commit}")
 if [[ -n "$checked_parent" ]]; then
-  # ship.sh checks the parent before committing the version bump.
+  # ship.sh checks the tree before building, including when resuming a release commit.
+  version=$(git show "$commit:VERSION" | tr -d '[:space:]')
+  [[ "$version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || { echo "VERSION must be numeric x.y.z" >&2; exit 1; }
   [[ "$(git rev-list --parents -n 1 "$commit")" == "$commit $checked_parent" ]] &&
-    git diff --quiet "$checked_parent" "$commit" -- . ':(exclude)VERSION' ||
-    { echo "The release commit must change only VERSION since the checked parent." >&2; exit 1; }
+    git diff --quiet "$checked_parent" "$commit" -- . ':(exclude)VERSION' \
+      ":(exclude,literal)docs/releases/$version.en.md" ":(exclude,literal)docs/releases/$version.es.md" ||
+    { echo "The release commit must change only VERSION and its notes since the checked parent." >&2; exit 1; }
 fi
 output=${CALA_BUILD_DIR:-build}
 output=${output:a}
@@ -83,12 +86,12 @@ BUILD_DIR="$CALA_BUILD_DIR"
 
 CALA_VERSION=$(tr -d '[:space:]' < VERSION)
 export CALA_VERSION
-python3 - "$CALA_VERSION" <<'PY'
+python3 - "$CALA_VERSION" "$commit" "$checked_parent" <<'PY'
 import re
 import subprocess
 import sys
 
-version = sys.argv[1]
+version, commit, checked_parent = sys.argv[1:]
 if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
     sys.exit("VERSION must be numeric x.y.z")
 
@@ -96,7 +99,15 @@ def number(value):
     return tuple(map(int, value.split(".")))
 
 tags = subprocess.check_output(["git", "tag", "--list", "v*"], text=True).splitlines()
-versions = [(number(tag[1:]), tag) for tag in tags if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag)]
+versions = []
+for tag in tags:
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+        continue
+    if checked_parent and tag == f"v{version}":
+        tagged = subprocess.check_output(["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"], text=True).strip()
+        if tagged == commit:
+            continue
+    versions.append((number(tag[1:]), tag))
 if versions:
     highest, tag = max(versions)
     if number(version) <= highest:
@@ -189,12 +200,16 @@ PY
 signer=(swift -module-cache-path "$work/modules" scripts/update-sign.swift)
 needs_passphrase=0
 if /usr/bin/security find-generic-password -s local.cala.update-signing -a update-signing-key.json -w 2>/dev/null |
-  "${signer[@]}" sign --key "$key" --manifest "$work/manifest.json" --out "$work/latest.json" --passphrase-fd 0; then
+  "${signer[@]}" sign --key "$key" --manifest "$work/manifest.json" --out "$work/latest.json" --passphrase-fd 0 2>&1 |
+  /usr/bin/tee "$work/sign.log"; then
   :
 else
   # A missing item sends EOF to the signer, which prompts on the controlling terminal.
-  signing_status=${pipestatus[2]}
-  (( signing_status == 0 )) || exit "$signing_status"
+  signing_pipeline=("${pipestatus[@]}")
+  (( signing_pipeline[2] == 0 && signing_pipeline[3] == 0 )) || exit 1
+  needs_passphrase=1
+fi
+if grep -Fq 'Saved Keychain passphrase did not unlock the key' "$work/sign.log"; then
   needs_passphrase=1
 fi
 "${signer[@]}" verify --keys "$keys" --feed "$work/latest.json" --dmg "$DMG"

@@ -106,6 +106,7 @@ staged=./Cala.app
 incoming_identity=
 validated_identity=
 swap_attempted=0
+swap_succeeded=0
 cleanup() {
   if (( swap_attempted )) && [[ -e "$staged" || -L "$staged" ]]; then
     local moved_identity
@@ -120,7 +121,12 @@ cleanup() {
   [[ "$(identity "$stage" 2>/dev/null)" == "$stage_identity" ]] || return 1
   /bin/rmdir "$stage"
 }
-trap 'cleanup || exit 1' EXIT
+trap '
+  if ! cleanup; then
+    (( swap_succeeded )) || exit 1
+    print -u2 "Cala was installed. Could not finish cleaning up $stage. / Cala se instaló. No se pudo terminar de limpiar $stage."
+  fi
+' EXIT
 /usr/bin/ditto --noacl "$src" "$staged"
 unusual=$(/usr/bin/find "$staged" ! \( -type d -o \( -type f -links 1 \) \) -print)
 if [[ ! -d "$staged" || -n "$unusual" ]]; then
@@ -181,24 +187,14 @@ end
 RUBY
 # After a successful exchange only the validated old inode can be deleted.
 incoming_identity=
+swap_succeeded=1
 PUBLISH
 }
 
 # Publish while Cala is still running, so a failed copy or cancelled password prompt leaves it alone.
 publish
 
-# Keep the old bundle available until the new one has opened.
-recover_on_exit() {
-  local result=$1
-  if (( result != 0 )); then
-    if [[ -d "$DEST" ]] && open "$DEST"; then return "$result"; fi
-    if [[ -d "$LEGACY_DIR/Cala.app" ]]; then open "$LEGACY_DIR/Cala.app" || true; fi
-  fi
-  return "$result"
-}
-trap 'recover_on_exit $?' EXIT
-
-# Scope legacy jobs and process signals to this user, including the wait for normal quit.
+# The new bundle is on disk. Wait for the running copy to quit before opening it.
 launchctl bootout "gui/$uid/local.mactaskbar" 2>/dev/null || true
 launchctl bootout "gui/$uid/local.cala" 2>/dev/null || true
 pkill -u "$uid" -x MacTaskbar || true
@@ -208,7 +204,9 @@ for _ in {1..50}; do
   sleep 0.1
 done
 if pgrep -u "$uid" -x Cala >/dev/null; then
-  print -u2 "Cala did not quit within 5 s. / Cala no se cerró en 5 s."
+  print -u2 "The new bundle is installed at $DEST. The previous Cala did not quit within 5 s. Quit it from its menu before running the command below."
+  print -u2 "La nueva versión está instalada en $DEST. La Cala anterior no se cerró en 5 s. Ciérrala desde su menú antes de ejecutar el comando de abajo."
+  print -u2 "  open $DEST"
   exit 1
 fi
 
@@ -221,9 +219,14 @@ if [[ -f "$OLD_PLIST" ]]; then
     rm -f "$OLD_PLIST"
   fi
 fi
-open "$DEST"
-trap - EXIT
-rm -rf "$LEGACY_DIR/MacTaskbar.app" "$LEGACY_DIR/Cala.app"
+if ! open "$DEST"; then
+  print -u2 "Cala was installed. Use the command below to open it. / Cala se instaló. Usa el comando de abajo para abrirla."
+  print -u2 "  open $DEST"
+  exit 1
+fi
+if ! rm -rf "$LEGACY_DIR/MacTaskbar.app" "$LEGACY_DIR/Cala.app"; then
+  print -u2 "Cala is installed. Could not remove a legacy bundle in $LEGACY_DIR. / Cala está instalada. No se pudo borrar una copia anterior en $LEGACY_DIR."
+fi
 
 print "Installed / Instalado: $DEST"
 print 'In each other account, quit the old Cala, then run: / En cada otra cuenta, cierra la Cala antigua y ejecuta:'

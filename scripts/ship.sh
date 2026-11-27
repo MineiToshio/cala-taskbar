@@ -90,7 +90,27 @@ for role in AUTHOR COMMITTER; do
     fail 'Configura en Git un correo sin Gmail antes de publicar.' 'Configure a non-Gmail Git email before shipping.'
 done
 
-version=$(python3 - "$requested" <<'PY'
+current=$(git show "$base:VERSION" | tr -d '[:space:]') ||
+  fail 'No se pudo leer VERSION.' 'Could not read VERSION.'
+release_parent=
+if [[ "$current" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' && "$(git show -s --format=%s "$base")" == "Release $current" ]]; then
+  parents=($(git rev-list --parents -n 1 "$base"))
+  if (( ${#parents} == 2 )) &&
+     [[ "$(git show "${parents[2]}:VERSION" | tr -d '[:space:]')" != "$current" ]] &&
+     git diff --quiet "${parents[2]}" "$base" -- . ':(exclude)VERSION' \
+       ":(exclude,literal)docs/releases/$current.en.md" ":(exclude,literal)docs/releases/$current.es.md"; then
+    release_parent=${parents[2]}
+  fi
+fi
+
+if [[ -n "$release_parent" ]]; then
+  version=$current
+  if [[ "$requested" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' && "$requested" != "$version" ]]; then
+    fail "La versión en curso es $version. Reanúdala con ./scripts/ship.sh $version." \
+         "The current release is $version. Resume it with ./scripts/ship.sh $version."
+  fi
+else
+  version=$(python3 - "$requested" <<'PY'
 import re
 import subprocess
 import sys
@@ -116,18 +136,26 @@ if target <= max(current, latest):
     sys.exit("La versión debe superar VERSION y todos los tags / Version must exceed VERSION and all version tags")
 print(".".join(map(str, target)))
 PY
-) || fail 'No se pudo calcular la siguiente versión.' 'Could not calculate the next version.'
+  ) || fail 'No se pudo calcular la siguiente versión.' 'Could not calculate the next version.'
+fi
 
 tag=v$version
+ref=refs/tags/$tag
 repo=MineiToshio/cala-taskbar
 remote="https://github.com/$repo.git"
 
 if (( dry_run )); then
   print -r -- "Plan para Cala $version / Plan for Cala $version"
-  print -r -- "  Commit Release $version y push de main por HTTPS / Commit Release $version and push main over HTTPS"
-  print -r -- "  Compilar y firmar, crear y subir $tag / Build and sign, then create and push $tag"
+  if [[ -n "$release_parent" ]]; then
+    print -r -- "  Reanudar el commit local Release $version si sigue pendiente / Resume the local Release $version commit if still pending"
+  else
+    print -r -- "  Crear el commit local Release $version / Create the local Release $version commit"
+  fi
+  print -r -- "  Compilar y firmar el commit local. Preparar $tag / Build and sign the local commit. Prepare $tag"
+  print -r -- "  Subir main y $tag juntos por HTTPS con push atómico / Atomically push main and $tag together over HTTPS"
+  print -r -- '  Crear o actualizar el borrador y verificar su manifiesto descargado / Create or update the draft and verify its downloaded feed'
   print -r -- "  Publicar $tag como última versión de GitHub / Publish $tag as the latest GitHub release"
-  print -r -- '  Verificar la firma del manifiesto público e instalar Cala / Verify the public feed signature and install Cala'
+  print -r -- '  Verificar el manifiesto público. Si falla, volver a borrador. Si pasa, instalar Cala / Verify the public feed. Re-draft on failure. Install Cala on success.'
 fi
 
 check_notes() {
@@ -148,77 +176,210 @@ check_notes() {
          "Write and commit these release notes: ${(j:, :)missing}."
 }
 
-./scripts/release.sh --checks-only ||
-  fail 'Fallaron los checks de Cala.' 'Cala checks failed.'
-check_notes
 if (( dry_run )); then
+  ./scripts/release.sh --checks-only ||
+    fail 'Fallaron los checks de Cala.' 'Cala checks failed.'
+  check_notes
   print 'Simulación completada. / Dry run complete.'
   exit 0
+fi
+
+check_notes
+gh_cli=$(command -v gh) ||
+  fail 'Instala GitHub CLI para publicar.' 'Install GitHub CLI to ship.'
+git_auth=(-c credential.helper= -c "credential.helper=!${(q)gh_cli} auth git-credential")
+state_dir=$(git rev-parse --path-format=absolute --git-path cala-ship) ||
+  fail 'No se pudo ubicar el estado local del release.' 'Could not locate the local release state.'
+mkdir -p -- "$state_dir" && touch "$state_dir/lock" && zmodload zsh/system ||
+  fail 'No se pudo preparar el estado local del release.' 'Could not prepare the local release state.'
+zsystem flock -t 0 -f lock_fd "$state_dir/lock" ||
+  fail 'Ya hay otro ship en curso en este checkout.' 'Another ship is already running in this checkout.'
+
+require_clean_head() {
+  check_main
+  working_tree=$(git status --porcelain=v1 --untracked-files=all) ||
+    fail 'No se pudo volver a comprobar el árbol de trabajo.' 'Could not recheck the working tree.'
+  [[ -z "$working_tree" && "$(git rev-parse HEAD)" == "$1" ]] ||
+    fail 'El árbol de trabajo o main cambió durante el release.' 'The working tree or main changed during the release.'
+}
+require_clean_head "$base"
+
+get_release_state() {
+  release_state=$("$gh_cli" api --hostname github.com --paginate "repos/$repo/releases?per_page=100" \
+    --jq ".[] | select(.tag_name == \"$tag\") | if .draft then \"draft\" else \"published\" end") ||
+    fail "No se pudo consultar el release $tag en GitHub." "Could not check release $tag on GitHub."
+  [[ "$release_state" == (''|draft|published) ]] ||
+    fail "Hay más de un release para $tag." "More than one release exists for $tag."
+}
+
+get_release_state
+release_head=$base
+if [[ -z "$release_parent" && -n "$release_state" ]]; then
+  fail "GitHub ya tiene un release para $tag. Revisa el tag antes de continuar." \
+       "GitHub already has a release for $tag. Review the tag before continuing."
+fi
+pending_feed="$state_dir/$release_head.json"
+if [[ "$release_state" == published && ! -s "$pending_feed" ]]; then
+  fail "$tag ya está publicado. Si falta instalarlo, ejecuta ./install.sh." \
+       "$tag is already published. If it still needs installation, run ./install.sh."
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/cala-ship.XXXXXXXX") ||
   fail 'No se pudo crear el directorio temporal.' 'Could not create the temporary directory.'
 trap 'rm -rf -- "$work"' EXIT
+signer=(swift -module-cache-path "$work/modules" scripts/update-sign.swift)
+build_dir=${CALA_BUILD_DIR:-build}
+asset="$build_dir/Cala-$version.dmg"
 
-check_main
-working_tree=$(git status --porcelain=v1 --untracked-files=all) ||
-  fail 'No se pudo volver a comprobar el árbol de trabajo.' 'Could not recheck the working tree.'
-[[ -z "$working_tree" && "$(git rev-parse HEAD)" == "$base" ]] ||
-  fail 'El árbol de trabajo o main cambió durante los checks.' 'The working tree or main changed during checks.'
+verify_draft() {
+  local expected=$1 downloaded="$work/draft-latest.json"
+  "$gh_cli" release download "$tag" -R "$repo" -p latest.json -O "$downloaded" --clobber &&
+    "${signer[@]}" verify --keys packaging/update-public-keys --feed "$downloaded" &&
+    cmp -s "$downloaded" "$expected"
+}
 
-print -r -- "$version" > VERSION &&
-  git add -- VERSION &&
-  git commit -m "Release $version" -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>' ||
-  fail "No se pudo crear el commit Release $version." "Could not create the Release $version commit."
-release_head=$(git rev-parse --verify HEAD) ||
-  fail 'No se pudo identificar el commit de release.' 'Could not identify the release commit.'
-[[ "$(git rev-list --parents -n 1 "$release_head")" == "$release_head $base" &&
-   "$(git show "$release_head:VERSION")" == "$version" ]] &&
-  git diff --quiet "$base" "$release_head" -- . ':(exclude)VERSION' ||
-  fail 'El commit de release debe cambiar solo VERSION.' 'The release commit must change only VERSION.'
-check_privacy "$release_head"
-
-git -c credential.helper='!gh auth git-credential' push "$remote" main:main ||
-  fail 'No se pudo subir main a GitHub por HTTPS.' 'Could not push main to GitHub over HTTPS.'
-./scripts/release.sh --checked-parent "$base" "$release_head" | /usr/bin/tee "$work/release.log" ||
-  fail "No se pudo compilar o firmar Cala $version." "Could not build or sign Cala $version."
-commit=$(sed -n 's/^CALA_RELEASE_COMMIT=//p' "$work/release.log") ||
-  fail 'No se pudo leer el commit de release.sh.' 'Could not read the commit from release.sh.'
-[[ "$commit" == "$release_head" ]] ||
-  fail 'El build no confirmó el commit de release.' 'The build did not confirm the release commit.'
-
-git tag "$tag" "$commit" &&
-  git -c credential.helper='!gh auth git-credential' push "$remote" "refs/tags/$tag:refs/tags/$tag" ||
-  fail "No se pudo crear o subir el tag $tag." "Could not create or push the $tag tag."
-./scripts/publish-github.sh "$tag" ||
-  fail "No se pudo crear el borrador de $tag." "Could not create the draft for $tag."
-gh release edit "$tag" -R "$repo" --draft=false --latest ||
-  fail "No se pudo publicar $tag." "Could not publish $tag."
-
-feed="$work/latest.json"
-url="https://github.com/$repo/releases/latest/download/latest.json"
-verified=0
-for attempt in {1..5}; do
-  if /usr/bin/curl -q -sfL --max-time 30 -o "$feed" "$url" &&
-     cmp -s "$feed" "${CALA_BUILD_DIR:-build}/latest.json" &&
-     swift -module-cache-path "$work/modules" scripts/update-sign.swift verify --keys packaging/update-public-keys --feed "$feed"; then
-    verified=1
-    break
+prepare_tag() {
+  local refs remote_object remote_commit local_object
+  refs=$(git "${git_auth[@]}" ls-remote "$remote" "$ref" "$ref^{}") ||
+    fail "No se pudo consultar el tag $tag." "Could not check tag $tag."
+  remote_object=$(awk -v ref="$ref" '$2 == ref { print $1 }' <<< "$refs")
+  remote_commit=$(awk -v ref="$ref" '$2 == ref "^{}" { print $1 }' <<< "$refs")
+  [[ -z "$remote_object" || "${remote_commit:-$remote_object}" == "$release_head" ]] ||
+    fail "El tag remoto $tag apunta a otro commit." "Remote tag $tag points to a different commit."
+  local_object=$(git rev-parse --verify --quiet "$ref" || true)
+  if [[ -n "$local_object" ]]; then
+    [[ "$(git rev-parse --verify "$ref^{commit}")" == "$release_head" &&
+       ( -z "$remote_object" || "$local_object" == "$remote_object" ) ]] ||
+      fail "El tag local $tag no coincide con el release o el tag remoto." \
+           "Local tag $tag differs from the release or remote tag."
+  elif [[ -n "$remote_object" ]]; then
+    git "${git_auth[@]}" fetch --no-tags "$remote" "$ref:$ref" &&
+      [[ "$(git rev-parse --verify "$ref")" == "$remote_object" ]] ||
+      fail "No se pudo recuperar el tag remoto $tag." "Could not recover remote tag $tag."
+  else
+    git tag "$tag" "$release_head" ||
+      fail "No se pudo crear el tag local $tag." "Could not create local tag $tag."
   fi
-  if (( attempt < 5 )); then sleep 5; fi
-done
-(( verified )) ||
-  fail "Se publicó $tag, pero falló la verificación del manifiesto público." \
-       "$tag was published, but public feed verification failed."
+}
 
-working_tree=$(git status --porcelain=v1 --untracked-files=all) ||
-  fail 'No se pudo comprobar el árbol antes de instalar.' 'Could not check the working tree before installing.'
-[[ -z "$working_tree" && "$(git rev-parse HEAD)" == "$release_head" ]] ||
-  fail 'El árbol de trabajo o HEAD cambió después de publicar. Se canceló la instalación.' \
-       'The working tree or HEAD changed after publishing. Installation stopped.'
-CALA_VERSION="$version" ./install.sh ||
-  fail "Se publicó $tag, pero falló la instalación local." "$tag was published, but local installation failed."
-print -r -- "Cala $version publicada e instalada. / Cala $version published and installed."
-if grep -Fxq 'CALA_RELEASE_NEEDS_PASSPHRASE=1' "$work/release.log"; then
+push_release_refs() {
+  require_clean_head "$release_head"
+  prepare_tag
+  git "${git_auth[@]}" push --atomic --no-follow-tags "$remote" main "$ref" ||
+    fail "No se pudo subir main y $tag juntos." "Could not push main and $tag together."
+}
+
+if [[ "$release_state" != published ]]; then
+  if [[ "$release_state" == draft && -s "$pending_feed" ]] && verify_draft "$pending_feed"; then
+    push_release_refs
+  else
+    ./scripts/release.sh --checks-only ||
+      fail 'Fallaron los checks de Cala.' 'Cala checks failed.'
+    require_clean_head "$base"
+    if [[ -z "$release_parent" ]]; then
+      release_parent=$base
+      if ! { print -r -- "$version" > VERSION &&
+        git commit -m "Release $version" -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>' --only -- VERSION; }; then
+        if [[ "$(git rev-parse HEAD)" == "$base" && "$(<VERSION)" == "$version" ]]; then
+          git restore --source "$base" --worktree -- VERSION ||
+            fail 'Falló el commit y no se pudo restaurar VERSION.' 'The commit failed and VERSION could not be restored.'
+        fi
+        fail "No se pudo crear el commit Release $version." "Could not create the Release $version commit."
+      fi
+      release_head=$(git rev-parse --verify HEAD) ||
+        fail 'No se pudo identificar el commit de release.' 'Could not identify the release commit.'
+      pending_feed="$state_dir/$release_head.json"
+    else
+      print -r -- "Reanudando $tag / Resuming $tag"
+    fi
+    check_privacy "$release_head"
+
+    ./scripts/release.sh --checked-parent "$release_parent" "$release_head" | /usr/bin/tee "$work/release.log" ||
+      fail "No se pudo compilar o firmar Cala $version." "Could not build or sign Cala $version."
+    commit=$(sed -n 's/^CALA_RELEASE_COMMIT=//p' "$work/release.log") ||
+      fail 'No se pudo leer el commit de release.sh.' 'Could not read the commit from release.sh.'
+    [[ "$commit" == "$release_head" && "$(git show "$release_head:VERSION")" == "$version" ]] ||
+      fail 'El build no confirmó el commit y la versión de release.' 'The build did not confirm the release commit and version.'
+
+    push_release_refs
+    get_release_state
+    case "$release_state" in
+      draft)
+        # Verify and upload the same private copy when updating an existing draft.
+        draft_assets="$work/draft-assets"
+        mkdir "$draft_assets" &&
+          cp "$asset" "$asset.sha256" "$build_dir/latest.json" "$draft_assets/" &&
+          CALA_BUILD_DIR="$draft_assets" ./scripts/publish-github.sh --dry-run "$tag" ||
+          fail "No se pudieron verificar los archivos para el borrador de $tag." "Could not verify the assets for draft $tag."
+        "$gh_cli" release upload "$tag" -R "$repo" --clobber \
+          "$draft_assets/${asset:t}" "$draft_assets/${asset:t}.sha256" "$draft_assets/latest.json" ||
+          fail "No se pudieron completar los archivos del borrador de $tag." "Could not complete the draft assets for $tag." ;;
+      '')
+        ./scripts/publish-github.sh "$tag" ||
+          fail "No se pudo crear el borrador de $tag." "Could not create the draft for $tag." ;;
+      published)
+        fail "$tag ya está publicado. Si falta instalarlo, ejecuta ./install.sh." \
+             "$tag is already published. If it still needs installation, run ./install.sh." ;;
+    esac
+    verify_draft "$build_dir/latest.json" ||
+      fail "El manifiesto del borrador de $tag no pasó la verificación. El release sigue como borrador." \
+           "The draft feed for $tag failed verification. The release is still a draft."
+
+    # Keep the verified feed across interruptions between publishing and the anonymous check.
+    pending_tmp=$(mktemp "$state_dir/.feed.XXXXXXXX") &&
+      cp "$work/draft-latest.json" "$pending_tmp" &&
+      mv -f -- "$pending_tmp" "$pending_feed" ||
+      fail 'No se pudo guardar la verificación local del borrador.' 'Could not save the local draft verification.'
+    if grep -Fxq 'CALA_RELEASE_NEEDS_PASSPHRASE=1' "$work/release.log"; then
+      touch "$pending_feed.needs-passphrase"
+    fi
+  fi
+  require_clean_head "$release_head"
+  "$gh_cli" release edit "$tag" -R "$repo" --draft=false --latest --verify-tag ||
+    fail "No se pudo confirmar la publicación de $tag. Reanuda esta misma versión." \
+         "Could not confirm publication of $tag. Resume this same version."
+fi
+
+verify_public() {
+  local feed="$work/public-latest.json"
+  local url="https://github.com/$repo/releases/latest/download/latest.json"
+  local deadline=$(( SECONDS + 180 )) remaining
+  while (( (remaining = deadline - SECONDS) > 0 )); do
+    if /usr/bin/curl -q -sfL --max-time "$(( remaining < 15 ? remaining : 15 ))" -o "$feed" "$url" &&
+       cmp -s "$feed" "$pending_feed" &&
+       "${signer[@]}" verify --keys packaging/update-public-keys --feed "$feed"; then
+      return 0
+    fi
+    if (( SECONDS < deadline )); then sleep 5; fi
+  done
+  return 1
+}
+
+if ! verify_public; then
+  if "$gh_cli" release edit "$tag" -R "$repo" --draft=true; then
+    fail "Falló la verificación pública de $tag. Volvió a borrador. Reanuda la misma versión con ./scripts/ship.sh." \
+         "Public verification failed for $tag. It is a draft again. Resume the same version with ./scripts/ship.sh."
+  fi
+  fail "Falló la verificación pública de $tag y GitHub no confirmó que volviera a borrador. Reanuda la misma versión con ./scripts/ship.sh." \
+       "Public verification failed for $tag and GitHub did not confirm re-drafting it. Resume the same version with ./scripts/ship.sh."
+fi
+
+if [[ -f "$pending_feed.needs-passphrase" ]]; then
   print 'Guarda la frase una vez con ./scripts/ship.sh --save-passphrase / Save the passphrase once with ./scripts/ship.sh --save-passphrase'
 fi
+if ! rm -f -- "$pending_feed" "$pending_feed.needs-passphrase"; then
+  print -u2 'El release está publicado. No se pudo limpiar el estado local. / The release is published. Could not clean up local state.'
+fi
+working_tree=$(git status --porcelain=v1 --untracked-files=all) ||
+  fail "El release $tag está publicado. Comprueba el checkout y ejecuta ./install.sh." \
+       "Release $tag is published. Check the checkout and run ./install.sh."
+if [[ "$(git symbolic-ref --quiet --short HEAD)" != main ||
+      "$(git rev-parse HEAD)" != "$release_head" ||
+      -n "$working_tree" ]]; then
+  fail "El release $tag está publicado. El checkout cambió. Desde el commit publicado, ejecuta ./install.sh." \
+       "Release $tag is published. The checkout changed. Run ./install.sh from the published commit."
+fi
+CALA_VERSION="$version" ./install.sh ||
+  fail "El release $tag está publicado. Para reintentar la instalación, ejecuta ./install.sh." \
+       "Release $tag is published. To retry installation, run ./install.sh."
+print -r -- "Cala $version publicada e instalada. / Cala $version published and installed."

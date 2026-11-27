@@ -31,6 +31,8 @@ chmod 600 ~/.config/cala/update-signing-key.json
 
 Pega la frase de firma de Cala en los dos avisos de `security`. El comando la guarda en el Llavero de inicio de sesión, que es el predeterminado en macOS, y comprueba que abre el archivo cifrado. Si la comprobación falla, borra el registro. En cada publicación, `/usr/bin/security` lee la frase y la entrega al firmante por una tubería. Si falta el registro o la frase guardada no abre la clave, el firmante pide la frase en la Terminal.
 
+Cualquier proceso que se ejecute con tu usuario puede leer la frase guardada mediante `/usr/bin/security` mientras el Llavero esté desbloqueado. Guardarla es una opción de comodidad. Puedes publicar introduciendo la frase en la Terminal cada vez.
+
 Inicia sesión en GitHub con `gh auth login` si es la primera vez.
 
 Para borrar el registro guardado, por ejemplo al rotar la clave, ejecuta:
@@ -50,11 +52,13 @@ Escribe las dos [notas de release](releases/README.md) de la próxima versión y
 
 El incremento por defecto es `patch`. Puedes indicar `minor`, `major` o una versión explícita como `1.2.0`. La simulación ejecuta los checks en una copia temporal y muestra el plan sin crear el commit, publicar ni instalar. Admite cambios locales para poder probar el flujo antes de hacer commit.
 
-`ship.sh` exige `main` limpio para publicar. Comprueba los correos de autor y committer del historial, ejecuta los checks y exige las notas en ambos idiomas. Luego crea el commit `Release <versión>` y sube `main` por HTTPS usando la sesión de `gh`.
+`ship.sh` exige `main` limpio para publicar. Comprueba los correos de autor y committer del historial, ejecuta los checks, exige las notas en ambos idiomas y crea el commit local `Release <versión>`.
 
-`release.sh [commit]` compila en un checkout temporal del commit elegido (HEAD por defecto) y genera el DMG, su `.sha256` y `build/latest.json` firmado con el SHA completo del commit. `ship.sh` crea y sube el tag de ese commit. `publish-github.sh` monta y verifica una copia privada del DMG, comprueba el manifiesto y el tag, y sube los archivos y las notas a un borrador. `ship.sh` publica el borrador como la última versión, descarga el manifiesto desde la URL pública sin autenticación, verifica su firma y ejecuta `./install.sh`.
+`release.sh [commit]` compila en un checkout temporal del commit elegido (HEAD por defecto) y genera el DMG, su `.sha256` y `build/latest.json` firmado con el SHA completo del commit. Una vez terminado el build, `ship.sh` prepara el tag local y sube `main` y el tag juntos con un push atómico por HTTPS usando la sesión de `gh`.
 
-Si falla un paso después del commit, revisa el commit, el tag y la publicación en GitHub antes de continuar desde el paso que falló.
+`publish-github.sh` monta y verifica una copia privada del DMG, comprueba el manifiesto y el tag, y sube los archivos y las notas a un borrador. Antes de publicarlo, `ship.sh` descarga el manifiesto del borrador, verifica la firma y lo compara con `build/latest.json`. Tras publicar, repite la comprobación desde la URL pública sin autenticación durante un máximo aproximado de tres minutos. Si falla, intenta devolver la publicación a borrador. Si pasa, ejecuta `./install.sh`.
+
+Si falla el build, la subida o la verificación, vuelve a ejecutar `./scripts/ship.sh` con el commit `Release <versión>` en HEAD. El script conserva la versión y reutiliza el tag y el borrador si ya existen. Si se interrumpió durante la comprobación pública, retoma esa comprobación. Cuando el release ya se publicó y solo falla la instalación, vuelve a ejecutar `./install.sh`.
 
 Cala 1.0.0 se actualiza a mano una vez para instalar la primera versión que incluye el actualizador.
 
