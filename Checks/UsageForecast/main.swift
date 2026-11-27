@@ -423,6 +423,54 @@ do {
     }
 }
 
+// Review scenarios: one ordinary-to-heavy first hour must not read as "~100%".
+let saturdayTen = monday.addingTimeInterval(5 * day + 10 * hour)
+let mondayEleven = monday.addingTimeInterval(23 * hour)
+let firstHours: [(String, Date, Double)] = [("3% Mon 09:00", mondayNine, 3), ("4% Mon 09:00", mondayNine, 4),
+                                            ("3% Sat 10:00", saturdayTen, 3), ("3% Mon 23:00", mondayEleven, 3)]
+var scenarioText: [String] = []
+for (name, begin, amount) in firstHours {
+    let result = quickForecast(from: begin, hours: 1, reset: begin.addingTimeInterval(week)) { _ in amount }
+    scenarioText.append(String(format: "%@ → %.1f%%", name, result.expectedUsed ?? .nan))
+    check(result.readiness == .quick && (result.expectedUsed ?? 100) < 40 && !result.quickWarning,
+          "\(name) in the first hour stays well below 100%")
+}
+let tenPercent = quickForecast(from: mondayNine, hours: 1, reset: weeklyReset) { _ in 10 }
+check((tenPercent.expectedUsed ?? 100) < 90 && !tenPercent.quickWarning, "10% in the first weekly hour is not shown near 100%")
+let warmUp = quickForecast(from: mondayNine, hours: 0.25, reset: weeklyReset) { _ in 1 }
+check(warmUp.readiness == .learning && warmUp.hold == .warmingUp, "a short warm-up is marked as calculating")
+check(forecast([], current()).hold == .warmingUp, "no current-cycle rows are a warm-up")
+check(forecast(ordinary, current(companion: .present(.unknown))).hold == .capLimited, "an unresolved companion cap is a cap hold")
+let nearLive = liveCycle(from: mondayNine, to: mondayNine.addingTimeInterval(2 * hour), reset: weeklyReset) { _ in 1 }
+let nearCap = QuotaCapState.present(.active(used: 90, reset: mondayNine.addingTimeInterval(4 * hour)))
+let nearResult = forecast(nearLive.rows, current(nearLive.used, at: mondayNine.addingTimeInterval(2 * hour), reset: weeklyReset,
+                                                 companion: nearCap), at: mondayNine.addingTimeInterval(2 * hour))
+check(nearResult.readiness == .learning && nearResult.hold == .capLimited, "a near-limit companion holds the quick estimate")
+check(forecast([], current(reset: now)).hold == .none, "an invalid reading is neither warm-up nor cap hold")
+
+// Only live readings count as days: archive samples and quiet bridges on other days do not.
+let archiveDays = dailyHours(3, sameCycle: true).map { row -> QuotaBucket in
+    var copy = row
+    copy.latest = copy.latest.map { sample($0.date, $0.used, .absent, .absent, .verifiedArchive) }
+    return copy
+}
+let quietBridge = QuotaBucket(series: weekly, cycle: QuotaCycle(reset: weeklyReset, segmentStart: mondayNine.addingTimeInterval(-30 * hour)),
+                              start: mondayNine.addingTimeInterval(-30 * hour), deltaHundredths: 0, coveredSeconds: 0,
+                              quietSeconds: hour, flags: [], latest: nil)
+let liveOnly = quickForecast(from: mondayNine, hours: 1, reset: weeklyReset, history: archiveDays + [quietBridge]) { _ in 1 }
+check(liveOnly.readiness == .quick && liveOnly.learningDays == 1, "day counter ignores archive samples and quiet spans")
+
+// Past rows recorded under a different companion regime do not feed the rate.
+let foreignRegime = dailyHours(3, sameCycle: true).map { row -> QuotaBucket in
+    var copy = row
+    copy.deltaHundredths = 5_000
+    copy.latest = copy.latest.map { sample($0.date, $0.used, .present(.inactive)) }
+    return copy
+}
+let filtered = quickForecast(from: mondayNine, hours: 1, reset: weeklyReset, history: foreignRegime) { _ in 1 }
+check(filtered.readiness == .quick && close(filtered.expectedUsed, firstHour.expectedUsed ?? .nan, within: 0.001),
+      "rows with another cap applicability are excluded from the quick rate")
+
 var quickRows = earlierDays
 for stream in 1..<16 { quickRows += weeks(16, for: series("quick-\(stream)")) }
 let quickLive = liveCycle(from: monday.addingTimeInterval(-6 * day), to: now, reset: reset.addingTimeInterval(-6 * day)) { _ in 0.2 }
@@ -432,6 +480,7 @@ let quickTimed = engine.forecast(snapshot: quickSnapshot, current: current(quick
                                  calendar: calendar, now: now)
 let quickMS = Double(DispatchTime.now().uptimeNanoseconds - quickClock) / 1_000_000
 check(quickTimed.readiness == .quick && quickMS < 10, "quick estimate benchmark under 10 ms")
+print("Quick first hour (weekly): " + scenarioText.joined(separator: "; ") + String(format: "; 10%% Mon 09:00 → %.1f%%", tenPercent.expectedUsed ?? .nan))
 print(String(format: "Quick estimate: 1%% at 1 h Monday 09:00 weekly → %.1f%% (day %d); 30%% after 1 day weekly → %.1f%% (warning %@); 20%% after 1 h on 5-hour → %.1f%%; DST weeks → %.1f%% / %.1f%%; benchmark %.3f ms",
              firstHour.expectedUsed ?? .nan, firstHour.learningDays, firstDay.expectedUsed ?? .nan,
              firstDay.quickWarning ? "yes" : "no", shortQuick.expectedUsed ?? .nan, dstResults[0], dstResults[1], quickMS))

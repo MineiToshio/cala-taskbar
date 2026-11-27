@@ -400,5 +400,38 @@ let rollbackRows = try JSONDecoder().decode([String: [[Double]]].self, from: Dat
 expect("Rollback history keeps recent rows and new readings in the original format, with a 12-hour expiry",
        rollbackRows == ["codex|primary": [[recentDate, 10], [now.timeIntervalSince1970, 20]]])
 
+// Cold-start lines: calculating only during the warm-up, neutral text for holds, and the quick estimate's detail.
+do {
+    let saved = appLanguageOverride
+    appLanguageOverride = "en"
+    defer { appLanguageOverride = saved }
+    let window = quota("weekly", used: 10, duration: 604_800, elapsed: 3_600, minutes: 10_080)
+    func result(_ readiness: ForecastReadiness, expected: Double? = nil, days: Int = 0, warning: Bool = false,
+                hold: ForecastHold = .none) -> ForecastResult {
+        ForecastResult(expectedUsed: expected, exhaustProbability: nil, eta: nil, etaRange: nil, readiness: readiness,
+                       hitWeeks: 0, effectiveWeeks: 0, learningDays: days, quickWarning: warning, hold: hold)
+    }
+    func text(_ value: ForecastResult?, short: Bool = false) -> String? { UsagePace.coldLine(value, window: window, short: short)?.text }
+    expect("Only the warm-up says calculating", text(result(.learning, hold: .warmingUp)) == "Calculating… a few minutes")
+    expect("A state that never warms up has neutral text",
+           text(result(.learning)) == "No estimate yet" && text(nil) == "No estimate yet")
+    expect("Cap holds name the limiting quota",
+           text(result(.learning, hold: .capLimited)) == "Limited by the 5-hour quota"
+           && text(result(.learning, hold: .capLimited), short: true) == "Limited by the weekly quota")
+    expect("Exhausted reads as used up", text(result(.exhausted, expected: 100)) == "Quota used up")
+    let quick = UsagePace.coldLine(result(.quick, expected: 23.9, days: 3), window: window, short: false)
+    expect("Quick estimate shows its number and the learning day",
+           quick?.text == "Quick estimate · ~25% used at reset" && quick?.warn == false
+           && quick?.detail == "Still learning your pattern (day 3 of 14) · may change")
+    expect("From day 14 the detail says it is still refining",
+           UsagePace.coldLine(result(.quick, expected: 30, days: 14), window: window, short: false)?.detail == "Still refining · may change")
+    let high = UsagePace.coldLine(result(.quick, expected: 96, days: 1), window: window, short: false)
+    expect("A quick number of 90% or more without the warning is not shown as a number",
+           high?.text == "High use · may run out before reset" && high?.warn == false)
+    let warned = UsagePace.coldLine(result(.quick, expected: 100, days: 1, warning: true), window: window, short: false)
+    expect("The near-certain quick warning has no time", warned?.text == "You may hit the limit before reset" && warned?.warn == true)
+    expect("Learned readiness is not a cold line", UsagePace.coldLine(result(.normal, expected: 40), window: window, short: false) == nil)
+}
+
 print("\(passed) PASS, \(failed) FAIL")
 exit(failed == 0 ? 0 : 1)

@@ -256,6 +256,13 @@ struct ForecastResult: Equatable, Sendable {
     var learningDays = 0
     /// `quick` only: exhaustion before reset is nearly certain. Never carries an ETA.
     var quickWarning = false
+    /// `learning` only: why there is no number yet.
+    var hold: ForecastHold = .none
+}
+
+/// Why a `learning` result has no number: a short warm-up, the companion or binding quota, or neither.
+enum ForecastHold: Equatable, Sendable {
+    case none, warmingUp, capLimited
 }
 
 /// Pure forecast interface for the next wave. The caller supplies the current live counter and calendar.

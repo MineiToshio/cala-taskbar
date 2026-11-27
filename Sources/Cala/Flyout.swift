@@ -678,15 +678,16 @@ struct UsagePane: View {
                     Text(resetLabel(window, now: now)).font(.system(size: 10.5)).flyoutSecondary()
                         .fixedSize(horizontal: false, vertical: true)
                     if let forecastLine {
-                        Text(forecastLine.text).font(.system(size: 10.5, weight: forecastLine.warn ? .semibold : .regular))
-                            .foregroundStyle(forecastLine.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityHidden(true)
-                        if let detail = forecastLine.detail {
-                            Text(detail).font(.system(size: 9.5)).flyoutSecondary()
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(forecastLine.text).font(.system(size: 10.5, weight: forecastLine.warn ? .semibold : .regular))
+                                .foregroundStyle(forecastLine.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityHidden(true)
+                            if let detail = forecastLine.detail {
+                                Text(detail).font(.system(size: 9.5)).flyoutSecondary()
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
+                        .accessibilityHidden(true)
                     } else if let staleDate, staleDate != state.reading?.date {
                         Text(age(staleDate, now: now)).font(.system(size: 10.5)).flyoutSecondary()
                     }

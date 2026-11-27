@@ -25,7 +25,7 @@ struct UsageForecast: UsageForecasting {
 
         let cap = short ? current.bindingWeekly : current.companion
         let band = QuotaCapBand(cap, at: now)
-        guard band != .unresolved, !short || band != .unknown else { return Self.learning }
+        guard band != .unresolved, !short || band != .unknown else { return Self.capLimited }
 
         var local = calendar
         local.timeZone = zone
@@ -48,7 +48,7 @@ struct UsageForecast: UsageForecasting {
             }.filter {
                 $0.date <= now && now.timeIntervalSince($0.date) <= 1_800 && Applicability($0.companion) != .unknown
             }.max { $0.date < $1.date }
-            if let latest, QuotaCapBand(latest.companion, at: now).nearLimit { return Self.learning }
+            if let latest, QuotaCapBand(latest.companion, at: now).nearLimit { return Self.capLimited }
         }
 
         if band != .unknown {
@@ -62,8 +62,12 @@ struct UsageForecast: UsageForecasting {
         return run.quick(rows, through: availableThrough)
     }
 
-    private static let learning = ForecastResult(expectedUsed: nil, exhaustProbability: nil, eta: nil, etaRange: nil,
+    static let learning = ForecastResult(expectedUsed: nil, exhaustProbability: nil, eta: nil, etaRange: nil,
                                                 readiness: .learning, hitWeeks: 0, effectiveWeeks: 0)
+    static let warmingUp = ForecastResult(expectedUsed: nil, exhaustProbability: nil, eta: nil, etaRange: nil,
+                                          readiness: .learning, hitWeeks: 0, effectiveWeeks: 0, hold: .warmingUp)
+    static let capLimited = ForecastResult(expectedUsed: nil, exhaustProbability: nil, eta: nil, etaRange: nil,
+                                           readiness: .learning, hitWeeks: 0, effectiveWeeks: 0, hold: .capLimited)
 }
 
 private extension QuotaCapBand {
@@ -609,15 +613,14 @@ private extension UsageForecast {
         ///     slotRate  = (1 − w) · rate · prior(slot) + w · ownRate(slot)      w = min(1, liveDays / 14)
         ///     expected  = clamp(used + Σ remaining seconds · slotRate / 1 h, used...100)
         ///
-        /// `shrink` is a zero-debit pseudo-exposure (2 peak hours weekly, ½ hour for 5-hour sessions) that
-        /// discounts a first burst and is negligible after a few days. `ownRate` is the user's own hour-of-week
+        /// `shrink` is a zero-debit pseudo-exposure, max(2 h weekly / ½ h 5-hour, 0.2 · remaining prior hours · (1 − w)),
+        /// that discounts a first burst against what is left of the window and fades as own days accumulate. `ownRate` is the user's own hour-of-week
         /// rate over the last 28 days where a slot has at least 30 minutes of evidence. The low estimate uses a
         /// pseudo-exposure of at least half the remaining prior hours and half the own rates; it alone, or 85%
         /// used with a quarter of the window left, raises the warning.
         func quick(_ rows: ArraySlice<QuotaBucket>, through availableThrough: Date) -> ForecastResult {
-            guard !band.nearLimit, let horizon = grid.calendar.date(byAdding: .day, value: -28, to: now) else {
-                return UsageForecast.learning
-            }
+            guard !band.nearLimit else { return UsageForecast.capLimited }
+            guard let horizon = grid.calendar.date(byAdding: .day, value: -28, to: now) else { return UsageForecast.learning }
             var debit = 0.0
             var exposure = 0.0
             var ownDebit = Array(repeating: 0.0, count: 168)
@@ -627,12 +630,20 @@ private extension UsageForecast {
             var cycleSeconds = 0.0
             var cycleDirect = 0.0
             var cycleDebit = 0.0
+            // Same applicability rule as History: a cycle keeps its last known companion/binding state.
+            var applicability: [QuotaCycle: Applicability] = [:]
             for row in rows where row.start >= horizon && row.start < availableThrough {
-                guard !row.flags.contains(.provisional), row.latest?.attribution != .provisional,
-                      row.deltaHundredths >= 0, row.coveredSeconds >= 0, row.quietSeconds >= 0 else { continue }
-                if let sample = row.latest, sample.attribution == .live, sample.date <= now {
-                    days.insert(grid.position(sample.date).date)
+                guard !row.flags.contains(.provisional), row.latest?.attribution != .provisional else { continue }
+                let sample = row.latest.flatMap { $0.date <= now ? $0 : nil }
+                let observed = Applicability(sample.map { short ? $0.bindingWeekly : $0.companion } ?? .unknown)
+                if observed != .unknown { applicability[row.cycle] = observed }
+                else if !short, let prior = row.earlierCompanionSamples.last(where: { $0.date <= now }) {
+                    applicability[row.cycle] = Applicability(prior.companion)
                 }
+                guard accepts(applicability[row.cycle] ?? .unknown),
+                      row.deltaHundredths >= 0, row.coveredSeconds >= 0, row.quietSeconds >= 0 else { continue }
+                // Only days with an actual live reading count, not backfill or quiet bridges.
+                if let sample, sample.attribution == .live { days.insert(grid.position(sample.date).date) }
                 let start = max(row.start, row.cycle.segmentStart)
                 let end = min(row.end, row.cycle.reset, availableThrough)
                 let seconds = min(row.coveredSeconds + row.quietSeconds, max(0, end.timeIntervalSince(start)))
@@ -642,7 +653,6 @@ private extension UsageForecast {
                 exposure += seconds * Self.prior(slot, short: short) / hour
                 ownDebit[slot] += row.delta
                 ownSeconds[slot] += seconds
-                days.insert(grid.position(start).date)
                 if abs(row.cycle.reset.timeIntervalSince(current.reset)) <= 600 {
                     cycleStart = min(cycleStart ?? row.cycle.segmentStart, row.cycle.segmentStart)
                     cycleSeconds += seconds
@@ -652,11 +662,11 @@ private extension UsageForecast {
             }
             // One hour of live readings in this cycle, or at least three (dense intervals are at most
             // 20 minutes, so 30 resolved minutes need three readings) over 30 minutes with some use.
-            guard let cycleStart else { return UsageForecast.learning }
+            guard let cycleStart else { return UsageForecast.warmingUp }
             let span = current.date.timeIntervalSince(cycleStart)
             guard (span + epsilon >= hour && cycleSeconds + epsilon >= 0.75 * hour)
                     || (span + epsilon >= 1_800 && cycleDirect + epsilon >= 1_800 && cycleDebit > 0) else {
-                return UsageForecast.learning
+                return UsageForecast.warmingUp
             }
 
             var remainingPrior = 0.0
@@ -671,10 +681,13 @@ private extension UsageForecast {
                 remainingPrior += seconds * Self.prior(slot, short: short) / hour
                 position = end
             }
-            let shrink = short ? 0.5 : 2.0
-            let rate = debit / (exposure + shrink)
-            let lowRate = debit / (exposure + max(4 * shrink, 0.5 * remainingPrior))
             let own = min(1, Double(days.count) / 14)
+            // The zero-use allowance scales with what is left of the window and fades as own days accumulate,
+            // so one heavy first hour cannot project to ~100% (that takes ≥ ~17% in the first weekly hour).
+            let base = short ? 0.5 : 2.0
+            let shrink = max(base, 0.2 * remainingPrior * (1 - own))
+            let rate = debit / (exposure + shrink)
+            let lowRate = debit / (exposure + max(4 * base, shrink, 0.5 * remainingPrior))
             var expected = current.used
             var low = current.used
             for (slot, seconds) in spans {

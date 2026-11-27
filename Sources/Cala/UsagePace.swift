@@ -389,25 +389,15 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         guard !window.isResetting(now), observation?.inactive != true,
               staleReadingDate(state, window, now: now) == nil else { return nil }
         if window.used == 100 { return Line(text: tx("Quota used up", "Cuota agotada")) }
-        let learning = Line(text: tx("Calculating… a few minutes", "Calculando… unos minutos"))
-        guard let observation, let result = forecast(state, window, now: now) else { return learning }
+        let short = observation?.meter?.durationSeconds == 18_000
+        let result = observation == nil ? nil : forecast(state, window, now: now)
+        if let line = Self.coldLine(result, window: window, short: short) { return line }
+        guard let observation, let result else { return nil }
+        let none = Line(text: tx("No estimate yet", "Sin estimación por ahora"))
         switch result.readiness {
-        case .learning: return learning
-        case .exhausted: return learning
-        case .quick:
-            guard let expected = result.expectedUsed, expected.isFinite else { return learning }
-            let day = max(1, min(14, result.learningDays))
-            let detail = tx("Still learning your pattern (day \(day) of 14) · may change",
-                            "Aún aprendiendo tu patrón (día \(day) de 14) · puede variar")
-            if result.quickWarning {
-                return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"),
-                            warn: true, detail: detail)
-            }
-            let used = Self.displayedUsed(expected, window: window)
-            return Line(text: tx("Quick estimate · ~\(used)% used at reset", "Estimación rápida · ~\(used)% usado al reinicio"),
-                        detail: detail)
+        case .learning, .exhausted, .quick: return none
         case .normal, .provisional:
-            guard let expected = result.expectedUsed, expected.isFinite else { return learning }
+            guard let expected = result.expectedUsed, expected.isFinite else { return none }
             let used = Self.displayedUsed(expected, window: window)
             if result.readiness == .provisional {
                 return Line(text: tx("Early estimate · ~\(used)% used at reset", "Estimación inicial · ~\(used)% usado al reinicio"))
@@ -419,6 +409,44 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
                 return Line(text: tx("Likely to hit the limit \(phrase)", "Probablemente agotes la cuota \(phrase)"), warn: true)
             }
             return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"), warn: true)
+        }
+    }
+
+    /// Text for every state before the learned profile: no result yet, a hold, exhaustion or a quick estimate.
+    /// Returns nil for the learned readiness levels.
+    static func coldLine(_ result: ForecastResult?, window: UsageWindow, short: Bool) -> Line? {
+        guard let result else { return Line(text: tx("No estimate yet", "Sin estimación por ahora")) }
+        switch result.readiness {
+        case .exhausted: return Line(text: tx("Quota used up", "Cuota agotada"))
+        case .learning:
+            switch result.hold {
+            case .warmingUp: return Line(text: tx("Calculating… a few minutes", "Calculando… unos minutos"))
+            case .capLimited:
+                return short ? Line(text: tx("Limited by the weekly quota", "Limitado por la cuota semanal"))
+                    : Line(text: tx("Limited by the 5-hour quota", "Limitado por la cuota de 5 horas"))
+            case .none: return Line(text: tx("No estimate yet", "Sin estimación por ahora"))
+            }
+        case .quick:
+            guard let expected = result.expectedUsed, expected.isFinite else {
+                return Line(text: tx("No estimate yet", "Sin estimación por ahora"))
+            }
+            let day = result.learningDays
+            let detail = day >= 14 ? tx("Still refining · may change", "Aún afinando la estimación · puede variar")
+                : tx("Still learning your pattern (day \(max(1, day)) of 14) · may change",
+                     "Aún aprendiendo tu patrón (día \(max(1, day)) de 14) · puede variar")
+            if result.quickWarning {
+                return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"),
+                            warn: true, detail: detail)
+            }
+            let used = displayedUsed(expected, window: window)
+            // A quick number this high is not trustworthy without the near-certain warning.
+            if used >= 90 {
+                return Line(text: tx("High use · may run out before reset", "Uso alto · podría agotarse antes del reinicio"),
+                            detail: detail)
+            }
+            return Line(text: tx("Quick estimate · ~\(used)% used at reset", "Estimación rápida · ~\(used)% usado al reinicio"),
+                        detail: detail)
+        default: return nil
         }
     }
 
