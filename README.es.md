@@ -30,7 +30,7 @@ Gratis · Código visible · No requiere una cuenta de Cala · macOS 14 o más n
 
 **Opción + Tab** muestra hasta 20 ventanas, incluidas las minimizadas. Escribe para buscarlas. Fuera de la búsqueda, pulsa W para cerrar una, Q para salir de su app o M para minimizar o restaurar.
 
-**La bandeja de la derecha** tiene Wi‑Fi, Bluetooth, sonido, brillo, batería, disco, teclado, descargas, papelera y un reloj con tus próximos eventos y un botón para unirte a la videollamada.
+**La bandeja de la derecha** tiene Wi‑Fi, Bluetooth, sonido, brillo, batería, disco, teclado, descargas, papelera y un reloj con tus próximos eventos y un botón para unirte a la videollamada. Haz clic izquierdo en un icono de la bandeja para abrir su panel. Haz clic derecho o Control-clic en un elemento de la barra para **Mover a Más** u **Ocultar**, o en un elemento de Más (⌃) para **Mover a la barra** u **Ocultar**. Ambos menús incluyen **Configurar bandeja…**. Haz clic derecho en el botón Más o en el de unirte a la llamada para abrir el menú de la barra.
 
 **Tu correo, en la bandeja.** Un sobre con el conteo de no leídos de tus cuentas de Gmail, iCloud o Yahoo; lee, archiva o elimina sin abrir el navegador. Mira [Correo](#correo).
 
@@ -156,7 +156,7 @@ La entrada antigua (cuenta = tu correo, sin `v2:`) se queda, porque macOS no dej
 
 - **Configuración**: clic derecho en una zona vacía de la barra → *Configuración…*, o clic en el icono de Cala de la barra de menús (aparece si la barra está apagada o Zonas está activa), o vuelve a abrir Cala desde Aplicaciones.
 - **Módulos**: *Configuración → General → Qué hace Cala* muestra los interruptores, estados y accesos a Zonas, Barra de tareas, Selector de ventanas y Bandeja. Las páginas siguen disponibles con los módulos apagados y ofrecen la acción **Activar**. Abre **Integraciones** para configurar Correo, Calendario y Claude y Codex.
-- **Bandeja:** arrastra desde el asa dentro de un grupo o entre **En la barra**, **En Más** y **Ocultos**. Puedes soltar al inicio de un grupo o en uno vacío. Las filas de CPU y memoria, Disco, Correo y Claude y Codex abren un detalle con botón para volver al pulsar el chevrón o cualquier parte de la fila fuera del asa.
+- **Bandeja:** pulsa y arrastra un icono de la bandeja en la barra para reordenarlo. En Configuración, arrastra desde el asa dentro de un grupo o entre **En la barra**, **En Más** y **Ocultos**. Puedes soltar al inicio de un grupo o en uno vacío. Las filas de CPU y memoria, Disco, Correo y Claude y Codex abren un detalle con botón para volver al pulsar el chevrón o cualquier parte de la fila fuera del asa.
 - **Abrir al iniciar sesión**: se elige en la bienvenida o en *Configuración → General*. Aparece en *Ajustes del Sistema → General → Ítems de inicio*.
 - **Idioma**: español o inglés; por defecto, el de tu Mac. Se cambia en *Configuración → General → Idioma*.
 - **Barra de tareas**: en *Configuración → Barra de tareas* se ajustan la ocultación del Dock y de la barra de menús, el tamaño de los iconos, la transparencia, las vistas previas y la alineación por pantalla. El tema compartido está en *General → Tema de Cala*.

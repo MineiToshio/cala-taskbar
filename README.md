@@ -30,7 +30,7 @@ Free · Source available · No Cala account required · macOS 14 or later · App
 
 **Option + Tab** shows up to 20 windows, including minimized ones. Type to search them. Outside search, press W to close one, Q to quit its app, or M to minimize or restore it.
 
-**The tray on the right** has Wi‑Fi, Bluetooth, sound, brightness, battery, disk, keyboard, Downloads, Trash, and a clock with your upcoming events and a button to join the video call.
+**The tray on the right** has Wi‑Fi, Bluetooth, sound, brightness, battery, disk, keyboard, Downloads, Trash, and a clock with your upcoming events and a button to join the video call. Left-click a tray icon to open its panel. Right-click or Control-click an item in the bar for **Move to More** or **Hide**, or an item in More (⌃) for **Move to bar** or **Hide**. Both menus include **Tray settings…**. Right-click the More or join-call button for the bar menu.
 
 **Your mail, in the tray.** An envelope with the unread count of your Gmail, iCloud or Yahoo accounts; read, archive or delete without opening a browser. See [Mail](#mail).
 
@@ -156,7 +156,7 @@ The old entry (account = your email, without `v2:`) is left in place, because ma
 
 - **Settings**: right-click an empty part of the bar → *Settings…*, or click the Cala icon in the menu bar (shown when the bar is off or Zones is on), or open Cala again from Applications.
 - **Modules**: *Settings → General → What Cala does* shows switches, status and direct links for Zones, Taskbar, Window switcher and Tray. The same pages stay available when modules are off and offer an **Enable** action. Open **Integrations** for Mail, Calendar and Claude & Codex.
-- **Tray:** drag a handle within or between **In the bar**, **In More** and **Hidden** to set order and placement. Drop at the top of a group or into an empty one. The rows for CPU and memory, Disk, Mail and Claude & Codex open a detail with a back button when you click their chevron or anywhere outside the handle.
+- **Tray:** press and drag a tray icon in the bar to reorder it. In Settings, drag a handle within or between **In the bar**, **In More** and **Hidden** to set order and placement. Drop at the top of a group or into an empty one. The rows for CPU and memory, Disk, Mail and Claude & Codex open a detail with a back button when you click their chevron or anywhere outside the handle.
 - **Open at login**: chosen in the welcome or in *Settings → General*. It shows up in *System Settings → General → Login Items*.
 - **Language**: English or Spanish, following your Mac by default. Change it in *Settings → General → Language*.
 - **Taskbar**: *Settings → Taskbar* holds Dock and menu bar hiding, icon size, transparency, previews and alignment per display. To change the shared theme, open *General → Cala theme*.

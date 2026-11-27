@@ -139,11 +139,15 @@ Files in `Sources/Cala/Zones/`. The first group is pure (Foundation and CoreGrap
 ## Menus and dynamic items
 Menus are `NSMenu` popped up above the bar (`position y = barTop + menu height + 4`). `BlockItem` is an `NSMenuItem` subclass that runs a closure. "New…" items are found by reading the app's AX menu bar (File menu = item index 2) and pressing the matching item with `AXPress`. `main.swift` calls `NSRunningApplication.terminate()` directly for eligible **Salir de…** entries. Cala's **Cerrar ventanas** uses `TaskbarModel.ownWindows()` to close titled app windows that are visible or minimized.
 
+Right-click and Control-click on configurable tray items open a placement menu. More tiles route the same gesture through `FlyoutController` to `BarController.showTrayMenu`. Tray controls outside the item catalog, including More and the join-call button, use the general bar menu.
+
 ## Badges
 `DockBadges.read()` walks the Dock's AX tree and reads `AXStatusLabel` for each item, keyed by item title and by `path:<bundle path>`. Refreshed every 2 s on a background queue, with an in-flight guard so slow reads cannot accumulate.
 
 ## Drag to reorder
 A left press on an app icon is stored (`pressed`) and its click is deferred to mouse-up. After 5 px of horizontal movement the drag starts: `TaskbarModel.dragID/dragScreen/dragX` drive a "ghost" icon drawn by `BarView` at the mouse position (scaled, with shadow), while the real slot is invisible. When the mouse crosses another icon, `TaskbarModel.move` moves the dragged id to the target position in `config.order`; icon positions animate with `.animation` on the item ids. On release the ghost eases into the slot (0.15 s) and is removed. `TaskbarModel.rebuild` sorts items by `order`.
+
+Tray icons in the bar also defer the primary click to mouse-up. `TrayBarDrag` computes a preview order from the slot frames captured at drag start. On mouse-up, `finishTrayDrag` saves the changed order to `config.trayOrder`, preserving the order of items outside the drag.
 
 ## Peek
 `PreviewController.peek`: after ~40 ms of hovering a card it records the front app/window (and the peeked app's focused window), then raises the real window (`WindowService.raise`). Leaving schedules a restore after 150 ms (cancelled by another peek): raise the peeked app's previous window, bring the previous app forward with the AXFrontmost-based `bringFront` helper (the same one show desktop uses), then raise its saved AX window. A thumbnail click or explicit bar activation calls `commitPeek` so nothing is restored. Skipped for minimized windows and windows not in `CGWindowList` on-screen (other Spaces).

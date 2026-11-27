@@ -22,8 +22,8 @@ File: `~/Library/Application Support/Cala/config.json`. Created on first run and
 | `hideMenuBar` | bool | `false` | Auto-hide the macOS menu bar everywhere while Cala runs |
 | `restoreMenuBarOnQuit` | bool | `true` | Give the menu bar back when Cala quits |
 | `menuBarBackupSaved`, `menuBarBackupOption`, `menuBarBackupHide`, `menuBarBackupFullscreen` | internal | `false`, unset, unset, unset | Saved menu bar auto-hide preferences and whether the backup was taken |
-| `trayLayout` | object | `{}` | Tray item id → `"bar"`, `"more"` (behind ^) or `"hidden"`; missing ids use their default |
-| `trayOrder` | array of ids | `[]` | Saved left-to-right order of known tray items. An omitted item is inserted after its default predecessor when present, and appended otherwise |
+| `trayLayout` | object | `{}` | Tray item id → `"bar"`, `"more"` (behind ^) or `"hidden"`. Also set from an item’s right-click menu in the bar or More. Missing ids use their default |
+| `trayOrder` | array of ids | `[]` | Saved left-to-right order of known tray items. Also set by dragging tray icons in the bar. An omitted item is inserted after its default predecessor when present, and appended otherwise |
 | `monitorEnabled` | bool | `true` | Legacy visibility fallback for CPU and memory when no explicit placement is saved |
 | `monitorBarMetric` | string | `"cpu"` | What the CPU and memory tray item shows while all is well: `"cpu"` or `"memory"` (a problem always wins) |
 | `mailLoadsRemoteImages` | bool | `true` | Load remote images in emails (the sender can tell the message was opened) |
