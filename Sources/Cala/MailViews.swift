@@ -226,6 +226,8 @@ struct MailPane: View {
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
             Divider()
+            MailNoticeList(notices: service.notices.filter { notice in visibleAccounts.contains { $0.id == notice.accountID } },
+                           dismiss: service.dismissNotice)
             if !messages.isEmpty || !problems.isEmpty {
                 ScrollView {
                     VStack(spacing: 0) {
@@ -240,9 +242,16 @@ struct MailPane: View {
                         MailMessageList(messages: messages, accountColor: { message in
                             guard colorsAccounts else { return nil }
                             return enabledAccounts.first { $0.id == message.accountID }.map { mailColor($0.colorIndex) }
+                        }, canArchive: service.canArchive, actions: { action, message in
+                            switch action {
+                            case .toggleRead: message.unread ? service.markRead(message) : service.markUnread(message)
+                            case .archive: service.archive(message)
+                            case .delete: service.trash(message)
+                            }
                         }) { message in
                             reading = message
-                            if message.unread { service.markRead(message) }
+                            // Shown as read now; the server hears about it after the body has loaded.
+                            service.open(message)
                         }
                     }
                 }
@@ -425,10 +434,14 @@ private struct MailSenderAvatar: View {
 }
 
 /// The inbox rows. Unread rows sit on a soft accent card, so dividers are drawn only between two read rows.
+private enum MailRowAction { case toggleRead, archive, delete }
+
 private struct MailMessageList: View {
     static let spacing: CGFloat = 2
     let messages: [MailMessage]
     let accountColor: (MailMessage) -> Color?
+    let canArchive: (MailMessage) -> Bool
+    let actions: (MailRowAction, MailMessage) -> Void
     let open: (MailMessage) -> Void
 
     static func height(_ count: Int) -> CGFloat {
@@ -443,6 +456,59 @@ private struct MailMessageList: View {
                                showsDivider: next.map { !$0.unread && !message.unread } ?? false) {
                     open(message)
                 }
+                .contextMenu {
+                    Button {
+                        actions(.toggleRead, message)
+                    } label: {
+                        Label(message.unread ? tx("Mark as read", "Marcar como leído") : tx("Mark as unread", "Marcar como no leído"),
+                              systemImage: message.unread ? "envelope.open" : "envelope.badge")
+                    }
+                    if canArchive(message) {
+                        Button { actions(.archive, message) } label: {
+                            Label(tx("Archive", "Archivar"), systemImage: "archivebox")
+                        }
+                    }
+                    Button(role: .destructive) { actions(.delete, message) } label: {
+                        Label(tx("Delete", "Eliminar"), systemImage: "trash")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Actions the server refused or could not confirm. Each stays until it is dismissed.
+private struct MailNoticeList: View {
+    let notices: [MailNotice]
+    let dismiss: (Int) -> Void
+
+    var body: some View {
+        if !notices.isEmpty {
+            VStack(spacing: 6) {
+                ForEach(notices) { notice in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(StatusColor.color(.attention))
+                            .padding(.top, 1)
+                            .accessibilityHidden(true)
+                        Text(notice.text)
+                            .font(.system(size: 11.5))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                        MailToolbarButton(title: tx("Dismiss", "Descartar"), symbol: "xmark", iconOnly: true) {
+                            dismiss(notice.id)
+                        }
+                        .frame(height: 20)
+                    }
+                    .padding(.leading, 10).padding(.trailing, 2).padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { _ in
+                NotificationCenter.default.post(name: .flyoutRefit, object: nil)
             }
         }
     }
@@ -632,7 +698,7 @@ private struct MailReader: View {
     let close: () -> Void
     @ObservedObject private var service = MailService.shared
     @ObservedObject private var store = ConfigStore.shared
-    @State private var state = LoadState.loading
+    @State private var state: LoadState
     @State private var attempt = 0
     /// Timing only: the operation id and the monotonic stamp of the moment the content reached the view.
     @State private var openTiming: (id: Int, delivered: UInt64) = (0, 0)
@@ -643,15 +709,23 @@ private struct MailReader: View {
         case failed(String)
     }
 
+    init(message: MailMessage, account: MailAccount, showAccount: Bool, height: CGFloat, close: @escaping () -> Void) {
+        self.message = message
+        self.account = account
+        self.showAccount = showAccount
+        self.height = height
+        self.close = close
+        // A body already in memory is drawn in the first frame.
+        _state = State(initialValue: MailService.shared.cachedContent(for: message).map { .loaded($0) } ?? .loading)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             toolbar
             Divider()
             messageHeader
-            if case let .operationFailed(problem) = service.status[message.accountID] {
-                Label(problem, systemImage: "exclamationmark.circle")
-                    .font(.system(size: 11)).flyoutSecondary().lineLimit(2).help(problem)
-            }
+            MailNoticeList(notices: service.notices.filter { $0.accountID == message.accountID },
+                           dismiss: service.dismissNotice)
             GeometryReader { _ in
                 messageBody
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -665,20 +739,28 @@ private struct MailReader: View {
         }
         .frame(height: height, alignment: .top)
         .task(id: attempt) {
-            state = .loading
             let timingID = MailTiming.nextID()
             let requested = MailTiming.now()
-            MailTiming.line("ui-request op=\(timingID) kind=open attempt=\(attempt)")
+            var shownFromCache = false
+            if attempt == 0, case .loaded = state {
+                shownFromCache = true
+                openTiming = (timingID, requested)
+                MailTiming.line("ui-request op=\(timingID) kind=open attempt=0 first_frame=cache")
+            } else {
+                state = .loading
+                MailTiming.line("ui-request op=\(timingID) kind=open attempt=\(attempt)")
+            }
             do {
+                // Also when the body was drawn from memory: this is what sends the deferred STORE \Seen.
                 let content = try await service.content(of: message, timingID: timingID, requestedAt: requested)
                 MailTiming.line("ui-content-delivered op=\(timingID) since_request_ms=\(MailTiming.ms(since: requested)) cancelled=\(Task.isCancelled)")
-                if !Task.isCancelled {
+                if !Task.isCancelled && !shownFromCache {
                     openTiming = (timingID, MailTiming.now())
                     state = .loaded(content)
                 }
             } catch {
                 MailTiming.line("ui-content-failed op=\(timingID) since_request_ms=\(MailTiming.ms(since: requested)) err=\(MailTiming.describe(error))")
-                if !Task.isCancelled { state = .failed(error.localizedDescription) }
+                if !Task.isCancelled && !shownFromCache { state = .failed(error.localizedDescription) }
             }
         }
     }
@@ -687,6 +769,10 @@ private struct MailReader: View {
         HStack(spacing: 4) {
             MailToolbarButton(title: tx("Back", "Volver"), symbol: "chevron.left", action: close)
             Spacer(minLength: 8)
+            MailToolbarButton(title: tx("Mark as unread", "Marcar como no leído"), symbol: "envelope.badge", iconOnly: true) {
+                service.markUnread(message)
+                close()
+            }
             if service.canArchive(message) {
                 MailToolbarButton(title: tx("Archive", "Archivar"), symbol: "archivebox") {
                     service.archive(message)
@@ -729,11 +815,25 @@ private struct MailReader: View {
     @ViewBuilder private var messageBody: some View {
         switch state {
         case .loading:
-            VStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text(tx("Loading message…", "Cargando mensaje…")).font(.system(size: 12))
+            // The preview the list already had, while the rest arrives.
+            let preview = message.snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+            VStack(alignment: .leading, spacing: 12) {
+                if !preview.isEmpty {
+                    Text(preview)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color(white: 0.25))
+                        .lineLimit(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(tx("Loading message…", "Cargando mensaje…")).font(.system(size: 12))
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: preview.isEmpty ? .center : .leading)
             }
-            .foregroundStyle(.secondary)
+            .padding(preview.isEmpty ? 0 : 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: preview.isEmpty ? .center : .topLeading)
             .environment(\.colorScheme, .light)
         case let .loaded(content):
             MailWebBody(content: content, loadsRemoteImages: store.config.mailLoadsRemoteImages,

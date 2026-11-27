@@ -1090,6 +1090,8 @@ struct MailIMAPFetch {
     let messageID: UInt64?
     let internalDate: Date?
     let messageSize: UInt64?
+    /// The BODYSTRUCTURE value's tokens, from its opening parenthesis (see MailBodyStructure.parse).
+    let structureTokens: [MailIMAPToken]?
     private let attributes: [String: MailIMAPToken]
 
     init?(_ tokens: [MailIMAPToken]) {
@@ -1097,6 +1099,7 @@ struct MailIMAPFetch {
               tokens[3] == .openList else { return nil }
         var attributes: [String: MailIMAPToken] = [:]
         var flags: Set<String> = []
+        var structure: [MailIMAPToken]?
         var index = 4
         while index + 1 < tokens.count, case let .atom(key) = tokens[index] {
             let name = key.uppercased()
@@ -1104,6 +1107,7 @@ struct MailIMAPFetch {
             let value = tokens[index]
             index += 1
             if value == .openList {
+                let listStart = index - 1
                 var depth = 1
                 while index < tokens.count, depth > 0 {
                     let element = tokens[index]
@@ -1112,12 +1116,14 @@ struct MailIMAPFetch {
                     if name == "FLAGS", depth == 1, let flag = element.string { flags.insert(flag.uppercased()) }
                     index += 1
                 }
+                if name == "BODYSTRUCTURE", depth == 0 { structure = Array(tokens[listStart..<index]) }
             } else {
                 attributes[Self.sectionKey(name)] = value
             }
         }
         self.attributes = attributes
         self.flags = flags
+        structureTokens = structure
         uid = attributes["UID"]?.string.flatMap(UInt32.init)
         threadID = attributes["X-GM-THRID"]?.string.flatMap(UInt64.init)
         messageID = attributes["X-GM-MSGID"]?.string.flatMap(UInt64.init)

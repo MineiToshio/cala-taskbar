@@ -31,10 +31,15 @@ enum MailTiming {
         guard let first = words.first?.uppercased() else { return "?" }
         let name = first == "UID" && words.count > 1 ? "UID " + words[1].uppercased() : first
         guard name.hasSuffix("FETCH") else { return name }
+        if command.contains("RFC822.SIZE") && command.contains("BODYSTRUCTURE") { return name + " RFC822.SIZE+BODYSTRUCTURE" }
+        if command.contains("BODYSTRUCTURE") { return name + " BODYSTRUCTURE" }
+        if command.contains(".MIME]") { return name + " PARTS" }
+        if command.hasSuffix("(UID FLAGS)") { return name + " FLAGS" }
         if command.contains("RFC822.SIZE") { return name + " RFC822.SIZE" }
         if command.contains("HEADER.FIELDS") { return name + " HEADER+TEXT" }
         if command.contains("BODY.PEEK[]") { return name + " BODY.PEEK[]" }
         if command.contains("BODY.PEEK[TEXT]") { return name + " BODY.PEEK[TEXT]" }
+        if command.contains("BODY.PEEK[") { return name + " PART-PREVIEW" }
         return name
     }
 
@@ -94,6 +99,13 @@ struct MailMessage: Identifiable, Equatable {
     let gmailThreadID: UInt64?
     let gmailMessageID: UInt64?
     var uidValidity: UInt32? = nil
+}
+
+/// A dismissible message about an action the server did not carry out (the list already shows the row again).
+struct MailNotice: Identifiable, Equatable {
+    let id: Int
+    let accountID: String
+    let text: String
 }
 
 /// Which accounts already have their password in the helper's own Keychain item (see MailCredentialStore). One
@@ -312,10 +324,13 @@ final class MailService: ObservableObject {
     /// True while sync waits for the person to read the Keychain explanation after an update. Nothing is fetched
     /// until then, so the flyout must say so instead of showing an empty inbox.
     @Published private(set) var awaitingKeychainNotice = false
+    /// Actions the server refused or could not confirm, newest last (see dismissNotice).
+    @Published private(set) var notices: [MailNotice] = []
 
     private enum Operation {
         case content(MailMessage)
         case markRead(MailMessage)
+        case markUnread(MailMessage)
         case markAllRead
         case archive(MailMessage)
         case trash(MailMessage)
@@ -324,9 +339,30 @@ final class MailService: ObservableObject {
             switch self {
             case .content: "open"
             case .markRead: "mark-read"
+            case .markUnread: "mark-unread"
             case .markAllRead: "mark-all-read"
             case .archive: "archive"
             case .trash: "trash"
+            }
+        }
+
+        var isContent: Bool { if case .content = self { return true }; return false }
+        /// Touches messages outside the snapshot: the inbox is read again before anything else is sent.
+        var isBulk: Bool { if case .markAllRead = self { return true }; return false }
+        /// Sending it twice leaves the server as sending it once, so a lost answer is answered by sending it again.
+        /// Never true for MOVE/COPY (a second copy).
+        var isRepeatable: Bool {
+            switch self {
+            case .content, .markRead, .markUnread, .markAllRead: true
+            case .archive, .trash: false
+            }
+        }
+
+        var message: MailMessage? {
+            switch self {
+            case let .content(message), let .markRead(message), let .markUnread(message), let .archive(message),
+                 let .trash(message): message
+            case .markAllRead: nil
             }
         }
 
@@ -334,6 +370,7 @@ final class MailService: ObservableObject {
             switch self {
             case let .content(message): return try await connection.content(of: message)
             case let .markRead(message): try await connection.markRead(message)
+            case let .markUnread(message): try await connection.markUnread(message)
             case .markAllRead: try await connection.markAllRead()
             case let .archive(message): try await connection.archive(message)
             case let .trash(message): try await connection.trash(message)
@@ -341,26 +378,33 @@ final class MailService: ObservableObject {
             return MailContent(html: nil, text: "")
         }
 
-        func apply(to snapshot: inout MailInboxSnapshot) {
+        /// What the person reads when the server refused it (the row is already back).
+        func refusal(_ error: MailFailure) -> String {
+            let what: String
             switch self {
-            case .content:
-                break
+            case .content: return error.localizedDescription
+            case .trash:
+                what = tx("Couldn’t move the message to the trash, so it’s back in the list.",
+                          "No se pudo mover el mensaje a la papelera, así que volvió a la lista.")
+            case .archive:
+                what = tx("Couldn’t archive the message, so it’s back in the list.",
+                          "No se pudo archivar el mensaje, así que volvió a la lista.")
+            case .markRead: what = tx("Couldn’t mark the message as read.", "No se pudo marcar el mensaje como leído.")
+            case .markUnread: what = tx("Couldn’t mark the message as unread.", "No se pudo marcar el mensaje como no leído.")
             case .markAllRead:
-                for index in snapshot.messages.indices { snapshot.messages[index].unread = false }
-                snapshot.unread = 0
-            case let .markRead(message):
-                guard message.uidValidity == snapshot.validity,
-                      let index = snapshot.messages.firstIndex(where: { $0.uid == message.uid }),
-                      snapshot.messages[index].unread else { return }
-                snapshot.messages[index].unread = false
-                snapshot.unread = max(0, snapshot.unread - 1)
-            case let .archive(message), let .trash(message):
-                guard message.uidValidity == snapshot.validity,
-                      let index = snapshot.messages.firstIndex(where: { $0.uid == message.uid }) else { return }
-                if snapshot.messages.remove(at: index).unread {
-                    snapshot.unread = max(0, snapshot.unread - 1)
-                }
+                what = tx("Couldn’t mark all messages as read.", "No se pudieron marcar todos los mensajes como leídos.")
             }
+            return what + " " + error.localizedDescription
+        }
+
+        /// The connection dropped after a move was sent: the server may or may not have done it.
+        var unconfirmed: String {
+            if case .archive = self {
+                return tx("The connection dropped before the server confirmed the archive. Check the inbox before trying again.",
+                          "Se cortó la conexión antes de que el servidor confirmara el archivado. Revisa Recibidos antes de volver a intentarlo.")
+            }
+            return tx("The connection dropped before the server confirmed the delete. Check the inbox before trying again.",
+                      "Se cortó la conexión antes de que el servidor confirmara la eliminación. Revisa Recibidos antes de volver a intentarlo.")
         }
     }
 
@@ -369,17 +413,33 @@ final class MailService: ObservableObject {
         let operation: Operation
         let contentResult: CheckedContinuation<MailContent, Error>?
         var timing: MailTiming.Op
+        /// The overlay entry that shows this action in the list before the server answers.
+        var effect: Int?
+        var attempts = 0
     }
 
     private final class AccountRun {
         var worker: Task<Void, Never>?
         var retryDelay: Task<Void, Never>?
         var connection: MailIMAP?
-        var pending: [PendingOperation] = []
-        var operationFailure: MailAccountStatus?
+        /// Content first, then the person's actions in the order they were made.
+        var pending: [PendingOperation] = [] {
+            didSet {
+                let content = pending.filter(\.operation.isContent).count
+                signal.update(content: content, actions: pending.count - content)
+            }
+        }
+        let signal = MailQueueSignal()
         var inFlight: UUID?
-        /// Timing only: what last interrupted the connection's wait (see wake).
-        var wakeCause: String?
+        /// What interrupted the connection's wait since it last looked (see wake): "operation", "refresh".
+        var wakeCauses: Set<String> = []
+        /// Messages prefetch already looked at and left out (too big, unknown structure): not asked about again.
+        var prefetchSkipped: Set<String> = []
+    }
+
+    private struct DeferredRead {
+        let message: MailMessage
+        let effect: Int
     }
 
     private(set) var accountsLoadFailed = false
@@ -387,6 +447,19 @@ final class MailService: ObservableObject {
     private var runs: [String: AccountRun] = [:]
     private var snapshots: [String: MailInboxSnapshot] = [:]
     private var unreadByAccount: [String: Int] = [:]
+    /// Pending actions drawn over each account's snapshot (see MailOverlay).
+    private var overlays: [String: MailOverlay] = [:]
+    /// Number of the latest sync started per account (MailOverlay's reconciliation clock).
+    private var syncStarted: [String: Int] = [:]
+    /// Rows read before, per account, so syncs only download what is new.
+    private var known: [String: MailKnownMessages] = [:]
+    /// Opened unread messages whose STORE \Seen waits for the body (see open).
+    private var deferredReads: [String: DeferredRead] = [:]
+    private var nextEffect = 0
+    private var nextNotice = 0
+    private let bodyCache: MailBodyCache?
+    /// Disk writes and purges of the body cache, in order, off the main thread.
+    private let cacheQueue = DispatchQueue(label: "Cala.MailBodyCache", qos: .utility)
     private var pendingSignIns: [String: MailIMAP] = [:]
     private var wakeObserver: NSObjectProtocol?
     private var observesWake = false
@@ -414,7 +487,7 @@ final class MailService: ObservableObject {
         self.init(accountsURL: AppPaths.supportDirectory.appendingPathComponent("mail-accounts.json"),
                   makeConnection: { MailIMAP(provider: $0) }, readCredential: { try store.read($0) },
                   writeCredential: { try store.write($0, $1) }, readCurrentCredential: { try store.readOwn($0) },
-                  keychainGate: store.gate)
+                  keychainGate: store.gate, bodyCache: MailBodyCache(directory: MailBodyCache.defaultDirectory()))
         observesWake = true
     }
 
@@ -429,6 +502,7 @@ final class MailService: ObservableObject {
         readCredential = { _ in nil }
         writeCredential = { _, _ in throw MailFailure.accountsFile }
         readCurrentCredential = { _ in nil }
+        bodyCache = nil
         accounts = [snapshotAccount]
         status = [snapshotAccount.id: .paused]
     }
@@ -436,8 +510,10 @@ final class MailService: ObservableObject {
     init(accountsURL: URL, makeConnection: @escaping (MailProvider) -> MailIMAP,
          readCredential: @escaping @Sendable (String) throws -> String?,
          writeCredential: @escaping (String?, String) throws -> Void,
-         readCurrentCredential: ((String) throws -> String?)? = nil, keychainGate: MailKeychainGate? = nil) {
+         readCurrentCredential: ((String) throws -> String?)? = nil, keychainGate: MailKeychainGate? = nil,
+         bodyCache: MailBodyCache? = nil) {
         self.keychainGate = keychainGate
+        self.bodyCache = bodyCache
         self.accountsURL = accountsURL
         self.makeConnection = makeConnection
         self.readCredential = readCredential
@@ -471,6 +547,7 @@ final class MailService: ObservableObject {
     func start() {
         guard !running else { return }
         running = true
+        // TODO prewarm: call MailWebBody.prewarm() here once that symbol lands (another agent owns MailWebBody.swift).
         let run = UUID()
         runID = run
         if observesWake {
@@ -569,6 +646,8 @@ final class MailService: ObservableObject {
         running = false
         for id in Array(runs.keys) { endRun(id) }
         snapshots.removeAll()
+        overlays.removeAll()
+        deferredReads.removeAll()
         for account in accounts { status[account.id] = .paused }
         publishInbox()
     }
@@ -626,7 +705,10 @@ final class MailService: ObservableObject {
         try changeCredential(for: id, to: password, accounts: updated)
         accounts = updated
         endRun(id)
-        if providerChanged { snapshots[id] = nil }
+        if providerChanged {
+            snapshots[id] = nil
+            forgetCachedBodies(of: id)
+        }
         status[id] = .paused
         publishInbox()
         if running, updated.contains(where: { $0.id == id && $0.enabled }) { launch(id) }
@@ -650,6 +732,7 @@ final class MailService: ObservableObject {
             pendingSignIns.removeValue(forKey: id)?.close()
             endRun(id)
             snapshots[id] = nil
+            forgetCachedBodies(of: id)
             status[id] = .paused
             publishInbox()
         } else if !previous.enabled && running {
@@ -672,7 +755,31 @@ final class MailService: ObservableObject {
         accounts = updated
         status[id] = nil
         snapshots[id] = nil
+        forgetCachedBodies(of: id)
         publishInbox()
+    }
+
+    /// Account removed, disabled or moved to another provider: its cached bodies and known rows go.
+    private func forgetCachedBodies(of id: String) {
+        known[id] = nil
+        guard let bodyCache else { return }
+        cacheQueue.async { bodyCache.purge(account: id) }
+    }
+
+    func dismissNotice(_ id: Int) {
+        notices.removeAll { $0.id == id }
+    }
+
+    private func notify(_ accountID: String, _ text: String) {
+        nextNotice += 1
+        notices.append(MailNotice(id: nextNotice, accountID: accountID, text: text))
+        if notices.count > 3 { notices.removeFirst(notices.count - 3) }
+    }
+
+    /// The body of a message already in memory, so the reader can show it in the first frame.
+    func cachedContent(for message: MailMessage) -> MailContent? {
+        guard let bodyCache, let key = MailBodyKey(currentValidity(for: message)) else { return nil }
+        return bodyCache.memoryContent(for: key)
     }
 
     func body(of message: MailMessage) async throws -> String {
@@ -685,39 +792,100 @@ final class MailService: ObservableObject {
         guard accounts.contains(where: { $0.id == id && $0.enabled }), running else {
             throw MailFailure.unavailable
         }
+        let message = currentValidity(for: message)
+        let key = bodyCache == nil ? nil : MailBodyKey(message)
+        if let bodyCache, let key {
+            let lookup = MailTiming.now()
+            var hit = bodyCache.memoryContent(for: key).map { (content: $0, source: MailBodyCache.Source.memory) }
+            if hit == nil { hit = await Task.detached(priority: .userInitiated) { bodyCache.content(for: key) }.value }
+            if let hit {
+                MailTiming.line("cache-hit op=\(timingID) acct=\(logName(id)) source=\(hit.source.rawValue) lookup_ms=\(MailTiming.ms(since: lookup)) since_request_ms=\(MailTiming.ms(since: requestedAt))")
+                flushDeferredRead(message.id)
+                return hit.content
+            }
+            MailTiming.line("cache-miss op=\(timingID) acct=\(logName(id)) source=network lookup_ms=\(MailTiming.ms(since: lookup))")
+        }
+        guard accounts.contains(where: { $0.id == id && $0.enabled }), running else { throw MailFailure.unavailable }
         if runs[id] == nil { launch(id) }
         guard let run = runs[id] else { throw MailFailure.unavailable }
 
         let operationID = UUID()
-        let message = currentValidity(for: message)
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            return try await withCheckedThrowingContinuation { continuation in
-                var timing = MailTiming.Op(id: timingID, kind: "open", tapped: requestedAt)
-                timing.enqueued = MailTiming.now()
-                MailTiming.line("enqueue op=\(timingID) kind=open acct=\(logName(id)) since_request_ms=\(MailTiming.ms(from: requestedAt, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil)")
-                run.pending.append(PendingOperation(id: operationID, operation: .content(message), contentResult: continuation,
-                                                    timing: timing))
-                wake(run, cause: "operation")
+        do {
+            let content = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await withCheckedThrowingContinuation { continuation in
+                    var timing = MailTiming.Op(id: timingID, kind: "open", tapped: requestedAt)
+                    timing.enqueued = MailTiming.now()
+                    MailTiming.line("enqueue op=\(timingID) kind=open acct=\(logName(id)) since_request_ms=\(MailTiming.ms(from: requestedAt, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil)")
+                    insert(PendingOperation(id: operationID, operation: .content(message), contentResult: continuation,
+                                            timing: timing), into: run)
+                    wake(run, cause: "operation")
+                }
+            } onCancel: {
+                Task { @MainActor in
+                    guard let index = run.pending.firstIndex(where: { $0.id == operationID }) else { return }
+                    run.pending.remove(at: index).contentResult?.resume(throwing: CancellationError())
+                }
             }
-        } onCancel: {
-            Task { @MainActor in
-                guard let index = run.pending.firstIndex(where: { $0.id == operationID }) else { return }
-                run.pending.remove(at: index).contentResult?.resume(throwing: CancellationError())
+            if let bodyCache, let key, accounts.contains(where: { $0.id == id && $0.enabled }) {
+                bodyCache.rememberInMemory(content, for: key)
+                cacheQueue.async { bodyCache.store(content, for: key) }
+                MailTiming.line("cache-store op=\(timingID) acct=\(logName(id)) bytes=\(MailBodyCache.size(of: content))")
             }
+            flushDeferredRead(message.id)
+            return content
+        } catch {
+            flushDeferredRead(message.id)
+            throw error
         }
+    }
+
+    /// The reader opened `message`: it shows as read at once, and the STORE \Seen is sent after the body arrives (or
+    /// after two seconds), so it never sits in front of the body fetch.
+    func open(_ message: MailMessage) {
+        guard message.unread else { return }
+        let message = currentValidity(for: message)
+        let id = message.accountID
+        guard running, accounts.contains(where: { $0.id == id && $0.enabled }), deferredReads[message.id] == nil else { return }
+        let effect = addEffect(.read(messageID: message.id), for: id, kind: "mark-read-on-open")
+        deferredReads[message.id] = DeferredRead(message: message, effect: effect)
+        publishInbox()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            self?.flushDeferredRead(message.id)
+        }
+    }
+
+    private func flushDeferredRead(_ messageID: String) {
+        guard let read = deferredReads.removeValue(forKey: messageID) else { return }
+        enqueue(.markRead(read.message), for: read.message.accountID, effect: .read(messageID: messageID), existing: read.effect)
+    }
+
+    /// Drops a not-yet-sent read for a message that is going away or becoming unread.
+    private func dropDeferredRead(_ messageID: String) {
+        guard let read = deferredReads.removeValue(forKey: messageID) else { return }
+        overlays[read.message.accountID]?.remove(read.effect)
     }
 
     func markRead(_ message: MailMessage) {
         let tapped = MailTiming.now()
-        enqueue(.markRead(currentValidity(for: message)), for: message.accountID, tapped: tapped)
+        if deferredReads[message.id] != nil { flushDeferredRead(message.id); return }
+        enqueue(.markRead(currentValidity(for: message)), for: message.accountID, tapped: tapped,
+                effect: .read(messageID: message.id))
+    }
+
+    func markUnread(_ message: MailMessage) {
+        let tapped = MailTiming.now()
+        dropDeferredRead(message.id)
+        enqueue(.markUnread(currentValidity(for: message)), for: message.accountID, tapped: tapped,
+                effect: .unread(messageID: message.id))
     }
 
     func markAllRead(accountID: String?) {
         let tapped = MailTiming.now()
         let id = accountID.map(Self.normalize)
         for account in accounts where account.enabled && (id == nil || account.id == id) {
-            enqueue(.markAllRead, for: account.id, tapped: tapped)
+            enqueue(.markAllRead, for: account.id, tapped: tapped, effect: .readAll)
         }
     }
 
@@ -729,13 +897,18 @@ final class MailService: ObservableObject {
     func archive(_ message: MailMessage) {
         let tapped = MailTiming.now()
         guard canArchive(message) else { return }
-        enqueue(.archive(currentValidity(for: message)), for: message.accountID, tapped: tapped)
+        dropDeferredRead(message.id)
+        enqueue(.archive(currentValidity(for: message)), for: message.accountID, tapped: tapped,
+                effect: .hide(messageID: message.id))
     }
 
     func trash(_ message: MailMessage) {
         let tapped = MailTiming.now()
-        enqueue(.trash(currentValidity(for: message)), for: message.accountID, tapped: tapped)
+        dropDeferredRead(message.id)
+        enqueue(.trash(currentValidity(for: message)), for: message.accountID, tapped: tapped,
+                effect: .hide(messageID: message.id))
     }
+
 
     func webURL(for message: MailMessage) -> URL {
         let provider = accounts.first { $0.id == message.accountID }?.provider ?? .gmail
@@ -760,23 +933,71 @@ final class MailService: ObservableObject {
         return message
     }
 
-    private func enqueue(_ operation: Operation, for id: String, tapped: UInt64 = MailTiming.now()) {
-        guard running, accounts.contains(where: { $0.id == id && $0.enabled }) else { return }
+    private func addEffect(_ effect: MailOverlay.Effect, for id: String, kind: String) -> Int {
+        nextEffect += 1
+        overlays[id, default: MailOverlay()].add(effect, id: nextEffect)
+        MailTiming.line("optimistic-apply effect=\(nextEffect) kind=\(kind) acct=\(logName(id))")
+        return nextEffect
+    }
+
+    /// `effect`: what the list shows right away. `existing`: an overlay entry already showing it (see open).
+    private func enqueue(_ operation: Operation, for id: String, tapped: UInt64 = MailTiming.now(),
+                         effect: MailOverlay.Effect? = nil, existing: Int? = nil) {
+        func discardExisting() {
+            if let existing, overlays[id]?.remove(existing) != nil { publishInbox() }
+        }
+        guard running, accounts.contains(where: { $0.id == id && $0.enabled }) else { discardExisting(); return }
         if runs[id] == nil { launch(id) }
-        guard let run = runs[id] else { return }
+        guard let run = runs[id] else { discardExisting(); return }
         if case let .markRead(message) = operation, run.pending.contains(where: {
             if case let .markRead(queued) = $0.operation { return queued.id == message.id }
             return false
-        }) { return }
+        }) { discardExisting(); return }
+        // A read and an unread of the same message that was not sent yet cancel out: only the newest is sent.
+        if let message = operation.message, case .markRead = operation {
+            dropQueued(in: run, id: id) { if case let .markUnread(queued) = $0 { return queued.id == message.id }; return false }
+        } else if let message = operation.message, case .markUnread = operation {
+            dropQueued(in: run, id: id) { if case let .markRead(queued) = $0 { return queued.id == message.id }; return false }
+        }
         var timing = MailTiming.Op(id: MailTiming.nextID(), kind: operation.kind, tapped: tapped)
         timing.enqueued = MailTiming.now()
-        MailTiming.line("enqueue op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) since_tap_ms=\(MailTiming.ms(from: tapped, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil)")
-        run.pending.append(PendingOperation(id: UUID(), operation: operation, contentResult: nil, timing: timing))
+        var pending = PendingOperation(id: UUID(), operation: operation, contentResult: nil, timing: timing)
+        if let existing {
+            pending.effect = existing
+        } else if let effect {
+            pending.effect = addEffect(effect, for: id, kind: operation.kind)
+        }
+        MailTiming.line("enqueue op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) since_tap_ms=\(MailTiming.ms(from: tapped, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil) effect=\(pending.effect.map(String.init) ?? "-")")
+        insert(pending, into: run)
+        if pending.effect != nil {
+            let publishStart = MailTiming.now()
+            publishInbox()
+            MailTiming.line("optimistic-shown op=\(timing.id) kind=\(timing.kind) publish_ms=\(MailTiming.ms(since: publishStart)) since_tap_ms=\(MailTiming.ms(since: tapped))")
+        }
         wake(run, cause: "operation")
     }
 
+    private func dropQueued(in run: AccountRun, id: String, where matches: (Operation) -> Bool) {
+        run.pending.removeAll { pending in
+            guard pending.id != run.inFlight, pending.contentResult == nil, matches(pending.operation) else { return false }
+            if let effect = pending.effect { overlays[id]?.remove(effect) }
+            MailTiming.line("dequeue op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=superseded")
+            return true
+        }
+    }
+
+    /// Content requests go ahead of every action that is not already on the wire; actions keep their order.
+    private func insert(_ pending: PendingOperation, into run: AccountRun) {
+        if pending.operation.isContent,
+           let index = run.pending.firstIndex(where: { !$0.operation.isContent && $0.id != run.inFlight }) {
+            run.pending.insert(pending, at: index)
+        } else {
+            run.pending.append(pending)
+        }
+    }
+
     private func wake(_ run: AccountRun, cause: String) {
-        run.wakeCause = cause
+        run.wakeCauses.insert(cause)
         run.connection?.requestRefresh()
         run.retryDelay?.cancel()
     }
@@ -792,16 +1013,22 @@ final class MailService: ObservableObject {
     }
 
     private func endRun(_ id: String) {
+        for (messageID, read) in deferredReads where read.message.accountID == id { deferredReads[messageID] = nil }
+        overlays[id] = nil
+        notices.removeAll { $0.accountID == id }
         guard let run = runs.removeValue(forKey: id) else { return }
         run.worker?.cancel()
         run.retryDelay?.cancel()
         run.connection?.close()
-        failOperations(in: run, with: .unavailable)
+        failOperations(in: run, id: id, with: .unavailable)
+        overlays[id] = nil
     }
 
     private func monitor(_ id: String, run: AccountRun) async {
         var backoff = 2
         var connectAttempt = 0
+        /// The first reconnect after a dead link (or a dropped connection that had been working) happens at once.
+        var quickRetryUsed = false
         defer {
             run.worker = nil
             if runs[id] === run { runs[id] = nil }
@@ -814,35 +1041,63 @@ final class MailService: ObservableObject {
             connectAttempt += 1
             if connectAttempt > 1 { MailTiming.line("reconnect acct=\(logName(id)) attempt=\(connectAttempt)") }
             var syncedAt: ContinuousClock.Instant?
-            var syncReason = "connect"
+            var signedIn = false
             do {
                 try await withTaskCancellationHandler {
                     defer { connection.close() }
                     try await signIn(id, name: logName(id), on: connection)
+                    signedIn = true
+                    var syncReason = "connect"
+                    var lastSync: ContinuousClock.Instant?
                     while runs[id] === run && !Task.isCancelled {
+                        let revision = connection.changeRevision
                         let hadOperations = !run.pending.isEmpty
-                        try await performOperations(for: id, run: run, on: connection)
-                        if hadOperations { syncReason = syncReason == "connect" ? "connect+after-operations" : "after-operations" }
-                        connection.timingContext = "acct=\(logName(id)) sync=\(MailTiming.nextID())"
-                        connection.timingReason = syncReason
-                        let snapshot = try await connection.synchronize(accountID: id)
+                        let barrier = try await performOperations(for: id, run: run, on: connection)
                         guard runs[id] === run, !Task.isCancelled else { return }
-                        let previous = snapshots[id]
-                        snapshots[id] = snapshot
-                        status[id] = run.operationFailure ?? .connected
-                        if syncedAt == nil || previous?.messages.count != snapshot.messages.count || previous?.unread != snapshot.unread {
-                            log("mail: \(logName(id)) synced messages=\(snapshot.messages.count) unread=\(snapshot.unread)")
+                        if barrier {
+                            syncReason = "after-bulk-operation"
+                        } else if connection.changeRevision != revision && syncReason.isEmpty {
+                            syncReason = "server-change"
+                        } else if hadOperations && syncReason.isEmpty {
+                            MailTiming.line("sync-skip acct=\(logName(id)) reason=no-server-change-after-operations")
                         }
-                        if syncedAt == nil { syncedAt = .now }
-                        publishInbox()
-                        if run.pending.isEmpty {
-                            connection.timingContext = "acct=\(logName(id)) idle"
-                            try await connection.waitForInboxChange()
-                            let outcome = connection.wakeOutcome
-                            syncReason = outcome == "interrupt" ? (run.wakeCause ?? "interrupt") : outcome
-                            run.wakeCause = nil
-                        } else {
-                            syncReason = "queued-operations"
+                        // More actions arrived while these ran: send them before reading the inbox again.
+                        if !barrier && !run.pending.isEmpty { continue }
+                        if !syncReason.isEmpty {
+                            guard let snapshot = try await synchronize(id, run: run, on: connection, reason: syncReason,
+                                                                       yieldOnlyToContent: barrier) else { continue }
+                            syncReason = ""
+                            lastSync = .now
+                            status[id] = .connected
+                            if syncedAt == nil {
+                                syncedAt = .now
+                                quickRetryUsed = false
+                                log("mail: \(logName(id)) synced messages=\(snapshot.messages.count) unread=\(snapshot.unread)")
+                            }
+                        }
+                        guard run.pending.isEmpty else { continue }
+                        let beforePrefetch = connection.changeRevision
+                        try await prefetch(id, run: run, on: connection)
+                        guard runs[id] === run, !Task.isCancelled else { return }
+                        if connection.changeRevision != beforePrefetch { syncReason = "server-change" }
+                        guard run.pending.isEmpty, syncReason.isEmpty else { continue }
+                        connection.timingContext = "acct=\(logName(id)) idle"
+                        try await connection.waitForInboxChange()
+                        let outcome = connection.wakeOutcome
+                        let causes = run.wakeCauses
+                        run.wakeCauses.removeAll()
+                        let periodic = lastSync.map { $0.duration(to: .now) >= .seconds(MailLink.periodicSync) } ?? true
+                        switch outcome {
+                        case "idle-renew":
+                            if periodic { syncReason = "periodic" }
+                        case "link-check":
+                            MailTiming.line("link-check acct=\(logName(id)) alive=true")
+                        case "interrupt":
+                            // A refresh (panel open, wake from sleep) reads the inbox; an action alone does not.
+                            if causes.contains("refresh") { syncReason = "refresh" }
+                            else if causes.isEmpty { syncReason = "interrupt" }
+                        default:
+                            syncReason = outcome.isEmpty ? "wake" : outcome
                         }
                     }
                 } onCancel: {
@@ -856,7 +1111,8 @@ final class MailService: ObservableObject {
                 let failure = MailFailure.from(error)
                 MailTiming.line("connection-lost acct=\(logName(id)) failure=\(failure.logCode) timed_out=\({ if case MailIMAPError.timedOut = error { return true }; return false }()) context=\(connection.timingContext)")
                 if failure == .keychainNeedsNotice {
-                    failOperations(in: run, with: .unavailable)
+                    failOperations(in: run, id: id, with: .unavailable)
+                    publishInbox()
                     explainKeychainAgain(for: id)
                     return
                 }
@@ -864,11 +1120,22 @@ final class MailService: ObservableObject {
                     log("mail: \(logName(id)) sync failed \(failure.logCode) retry=\(!failure.requiresUserAction)")
                 }
                 status[id] = failure.status
-                failOperations(in: run, with: failure, afterDisconnect: !failure.requiresUserAction)
+                let linkFailure: Bool
+                switch error as? MailIMAPError {
+                case .linkDead?, .disconnected?, .timedOut?: linkFailure = true
+                default: linkFailure = false
+                }
+                let quick = signedIn && linkFailure && !quickRetryUsed && !failure.requiresUserAction
+                failOperations(in: run, id: id, with: failure, afterDisconnect: !failure.requiresUserAction, keepContent: quick)
                 publishInbox()
                 if failure.requiresUserAction { return }
 
                 if let syncedAt, syncedAt.duration(to: .now) >= .seconds(60) { backoff = 2 }
+                if quick {
+                    quickRetryUsed = true
+                    MailTiming.line("reconnect-immediate acct=\(logName(id)) failure=\(failure.logCode) queued=\(run.pending.count)")
+                    continue
+                }
                 let wait = backoff
                 MailTiming.line("retry-wait acct=\(logName(id)) seconds=\(wait)")
                 let retry = Task { _ = try? await Task.sleep(for: .seconds(wait)) }
@@ -878,6 +1145,82 @@ final class MailService: ObservableObject {
                 backoff = min(300, backoff * 2)
             }
         }
+    }
+
+    /// Reads the inbox and applies it. nil: it stepped aside for something the person is waiting for (an open, or any
+    /// action unless `yieldOnlyToContent`), having applied nothing; the caller runs that and syncs again.
+    private func synchronize(_ id: String, run: AccountRun, on connection: MailIMAP, reason: String,
+                             yieldOnlyToContent: Bool) async throws -> MailInboxSnapshot? {
+        connection.timingContext = "acct=\(logName(id)) sync=\(MailTiming.nextID())"
+        connection.timingReason = reason
+        let sequence = (syncStarted[id] ?? 0) + 1
+        syncStarted[id] = sequence
+        let signal = run.signal
+        guard let snapshot = try await connection.synchronize(
+            accountID: id, known: known[id],
+            shouldYield: { yieldOnlyToContent ? signal.contentWaiting : signal.anyWaiting }
+        ) else {
+            MailTiming.line("sync-preempted acct=\(logName(id)) sync_seq=\(sequence) reason=\(reason) queued=\(run.pending.count)")
+            return nil
+        }
+        guard runs[id] === run, !Task.isCancelled else { return nil }
+        let previous = snapshots[id]
+        if let previous, previous.validity != snapshot.validity {
+            // A new UIDVALIDITY epoch: old UIDs name other messages now. Pending actions on them fail as stale.
+            MailTiming.line("validity-change acct=\(logName(id))")
+            for (messageID, read) in deferredReads where read.message.accountID == id && read.message.uidValidity != snapshot.validity {
+                dropDeferredRead(messageID)
+            }
+            if let bodyCache {
+                let validity = snapshot.validity
+                cacheQueue.async { bodyCache.purge(account: id, keepingValidity: validity) }
+            }
+        }
+        if known[id]?.validity == snapshot.validity {
+            known[id]?.merge(snapshot.messages)
+        } else {
+            known[id] = MailKnownMessages(validity: snapshot.validity, messages: snapshot.messages)
+        }
+        snapshots[id] = snapshot
+        overlays[id]?.prune(appliedSync: sequence)
+        if previous?.messages.count != snapshot.messages.count || previous?.unread != snapshot.unread {
+            log("mail: \(logName(id)) synced messages=\(snapshot.messages.count) unread=\(snapshot.unread)")
+        }
+        publishInbox()
+        return snapshot
+    }
+
+    /// After a sync, with nothing queued: bodies of the top visible rows not cached yet, unread first, within
+    /// MailPrefetchPlanner's limits; skipped on constrained or expensive networks, stopped by any queued work.
+    private func prefetch(_ id: String, run: AccountRun, on connection: MailIMAP) async throws {
+        guard connection.tuning.prefetch, let bodyCache, run.pending.isEmpty else { return }
+        if connection.isConstrainedPath {
+            MailTiming.line("prefetch-skip acct=\(logName(id)) reason=constrained-network")
+            return
+        }
+        let skipped = run.prefetchSkipped
+        let rows = messages.filter { $0.accountID == id && !skipped.contains($0.id) }
+        let candidates = await Task.detached(priority: .utility) {
+            MailPrefetchPlanner.candidates(visible: rows, isCached: { MailBodyKey($0).map(bodyCache.contains) ?? true })
+        }.value
+        guard !candidates.isEmpty, runs[id] === run, run.pending.isEmpty else { return }
+        let started = MailTiming.now()
+        MailTiming.line("prefetch-start acct=\(logName(id)) candidates=\(candidates.count)")
+        connection.timingContext = "acct=\(logName(id)) prefetch"
+        let signal = run.signal
+        let result = try await connection.prefetch(candidates, shouldStop: { signal.anyWaiting })
+        let fetched = Set(result.contents.map(\.0.id))
+        if result.stop == "done" || result.stop == "none" {
+            run.prefetchSkipped.formUnion(candidates.map(\.id).filter { !fetched.contains($0) })
+        }
+        var bytes = 0
+        for (message, content) in result.contents {
+            guard let key = MailBodyKey(message) else { continue }
+            bytes += MailBodyCache.size(of: content)
+            bodyCache.rememberInMemory(content, for: key)
+            cacheQueue.async { bodyCache.store(content, for: key) }
+        }
+        MailTiming.line("prefetch-done acct=\(logName(id)) fetched=\(result.contents.count) of=\(candidates.count) content_bytes=\(bytes) ms=\(MailTiming.ms(since: started)) stop=\(result.stop)")
     }
 
     /// Account position only: the debug log never names the address.
@@ -905,12 +1248,20 @@ final class MailService: ObservableObject {
         MailTiming.line("signin-end acct=\(name) ok keychain_ms=\(keychainMS) imap_ms=\(MailTiming.ms(since: began) - keychainMS) total_ms=\(MailTiming.ms(since: began))")
     }
 
-    private func performOperations(for id: String, run: AccountRun, on connection: MailIMAP) async throws {
-        while runs[id] === run, let pending = run.pending.first {
+    /// Sends the queue in order. Returns true right after a bulk operation (mark all read) succeeded: the caller reads the
+    /// inbox before sending anything else.
+    private func performOperations(for id: String, run: AccountRun, on connection: MailIMAP) async throws -> Bool {
+        while runs[id] === run, var pending = run.pending.first {
+            pending.attempts += 1
+            run.pending[0].attempts = pending.attempts
             run.inFlight = pending.id
+            if let effect = pending.effect, let entry = overlays[id]?.entries.first(where: { $0.id == effect }) {
+                overlays[id]?.set(.inFlight, for: effect)
+                if entry.state == .held { publishInbox() }
+            }
             let timing = pending.timing
             let performStart = MailTiming.now()
-            MailTiming.line("start op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) queue_wait_ms=\(MailTiming.ms(from: timing.enqueued, to: performStart)) since_tap_ms=\(MailTiming.ms(from: timing.tapped, to: performStart))")
+            MailTiming.line("start op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) queue_wait_ms=\(MailTiming.ms(from: timing.enqueued, to: performStart)) since_tap_ms=\(MailTiming.ms(from: timing.tapped, to: performStart)) attempt=\(pending.attempts)")
             connection.timingContext = "acct=\(logName(id)) op=\(timing.id)"
             let result: Result<MailContent, MailFailure>
             do {
@@ -927,22 +1278,24 @@ final class MailService: ObservableObject {
                 result = .failure(.messageTooLarge)
             } catch {
                 MailTiming.line("end op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) err=\(MailTiming.describe(error)) perform_ms=\(MailTiming.ms(since: performStart)) since_tap_ms=\(MailTiming.ms(since: timing.tapped))")
+                // The answer is lost with the connection. Settle the list now, before the connection closes.
+                if runs[id] === run, !Task.isCancelled { lostAnswer(pending, id: id) }
                 throw error
             }
             let performed: String
             if case .success = result { performed = "ok" } else { performed = "failed" }
             MailTiming.line("end op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) result=\(performed) perform_ms=\(MailTiming.ms(since: performStart)) since_tap_ms=\(MailTiming.ms(since: timing.tapped))")
-            guard runs[id] === run, !Task.isCancelled else { return }
+            guard runs[id] === run, !Task.isCancelled else { return false }
             run.inFlight = nil
             guard let index = run.pending.firstIndex(where: { $0.id == pending.id }) else { continue }
 
             run.pending.remove(at: index)
             switch result {
             case let .success(content):
-                if pending.contentResult == nil { run.operationFailure = nil }
-                if var snapshot = snapshots[id] {
-                    pending.operation.apply(to: &snapshot)
-                    snapshots[id] = snapshot
+                if let effect = pending.effect {
+                    let sequence = syncStarted[id] ?? 0
+                    overlays[id]?.confirm(effect, latestStartedSync: sequence)
+                    MailTiming.line("optimistic-confirm op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) effect=\(effect) after_sync=\(sequence)")
                 }
                 if pending.contentResult != nil {
                     MailTiming.line("content-resume op=\(timing.id) acct=\(logName(id)) since_request_ms=\(MailTiming.ms(since: timing.tapped))")
@@ -950,30 +1303,54 @@ final class MailService: ObservableObject {
                 pending.contentResult?.resume(returning: content)
             case let .failure(error):
                 if pending.contentResult == nil {
-                    run.operationFailure = .operationFailed(error.localizedDescription)
-                    status[id] = run.operationFailure
+                    if let effect = pending.effect, overlays[id]?.remove(effect) != nil {
+                        MailTiming.line("optimistic-revert op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) reason=\(error.logCode)")
+                    }
+                    notify(id, pending.operation.refusal(error))
                 }
                 pending.contentResult?.resume(throwing: error)
             }
             let publishStart = MailTiming.now()
             publishInbox()
             if pending.contentResult == nil {
-                // For archive / trash / mark read this is when the row (or unread dot) leaves the published inbox.
+                // The server's answer for archive / trash / mark read; the list already showed the change at tap time.
                 MailTiming.line("row-gone op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) result=\(performed) publish_ms=\(MailTiming.ms(since: publishStart)) total_tap_ms=\(MailTiming.ms(since: timing.tapped))")
             }
+            if case .success = result, pending.operation.isBulk { return true }
         }
+        return false
     }
 
-    private func failOperations(in run: AccountRun, with error: MailFailure, afterDisconnect: Bool = false) {
+    /// The connection failed while `pending` was on the wire. A repeatable action stops showing until it is sent again
+    /// after reconnecting; a move is never resent (it could copy twice): its row comes back with a notice.
+    private func lostAnswer(_ pending: PendingOperation, id: String) {
+        guard pending.contentResult == nil, let effect = pending.effect else { return }
+        if pending.operation.isRepeatable {
+            overlays[id]?.set(.held, for: effect)
+            MailTiming.line("optimistic-hold op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=connection-lost")
+        } else {
+            overlays[id]?.remove(effect)
+            MailTiming.line("optimistic-revert op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=connection-lost")
+            notify(id, pending.operation.unconfirmed)
+        }
+        publishInbox()
+    }
+
+    /// `afterDisconnect`: actions not sent yet, and repeatable ones, survive the reconnect; a move that was on the wire
+    /// does not (lostAnswer already put its row back). `keepContent`: the reconnect is immediate, so opens wait for it
+    /// (each is tried at most twice) instead of failing.
+    private func failOperations(in run: AccountRun, id: String, with error: MailFailure, afterDisconnect: Bool = false,
+                                keepContent: Bool = false) {
         defer { run.inFlight = nil }
         run.pending.removeAll { pending in
-            // Repeating +Seen with the original UIDVALIDITY is safe after a lost acknowledgement.
-            if afterDisconnect && pending.contentResult == nil {
-                if case .markRead = pending.operation { return false }
-                if run.inFlight != pending.id { return false }
-                run.operationFailure = .operationFailed(tx("The connection was interrupted. Check the inbox before retrying the action.",
-                                                           "Se interrumpió la conexión. Revisa Recibidos antes de repetir la acción."))
+            if afterDisconnect {
+                if pending.contentResult == nil {
+                    if pending.operation.isRepeatable || run.inFlight != pending.id { return false }
+                } else if keepContent && pending.attempts < 2 {
+                    return false
+                }
             }
+            if let effect = pending.effect { overlays[id]?.remove(effect) }
             pending.contentResult?.resume(throwing: error)
             return true
         }
@@ -984,8 +1361,10 @@ final class MailService: ObservableObject {
         var counts: [String: Int] = [:]
         for account in accounts where account.enabled {
             guard let snapshot = snapshots[account.id] else { continue }
-            combined.append(contentsOf: snapshot.messages)
-            counts[account.id] = snapshot.unread
+            let shown = overlays[account.id]?.apply(to: snapshot)
+                ?? MailOverlay.Result(messages: snapshot.messages, unread: snapshot.unread)
+            combined.append(contentsOf: shown.messages)
+            counts[account.id] = shown.unread
         }
         combined.sort {
             if $0.date != $1.date { return $0.date > $1.date }
