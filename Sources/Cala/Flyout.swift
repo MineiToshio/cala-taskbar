@@ -91,6 +91,7 @@ struct LinkRow: View {
 struct FlyoutView: View {
     @ObservedObject var fm: FlyoutModel
     @ObservedObject var model: TaskbarModel
+    let onTrayFrames: ([String: CGRect]) -> Void
 
     var body: some View {
         let readingMail = fm.kind == trayMail && fm.mailMessage != nil
@@ -130,6 +131,8 @@ struct FlyoutView: View {
         .flyoutControls()
         .themedPanel()
         .fixedSize()
+        .coordinateSpace(name: "flyout")
+        .onPreferenceChange(FramesKey.self, perform: onTrayFrames)
         .onGeometryChange(for: CGSize.self, of: { $0.size }) { _ in
             if fm.kind == trayMail {
                 NotificationCenter.default.post(name: .flyoutRefit, object: nil)
@@ -304,11 +307,13 @@ enum CWWiFiClientShim {
 final class FlyoutPanel: NSPanel {
     var goBack: (() -> Bool)?
     var dismiss: (() -> Void)?
+    var trayContextMenu: ((NSEvent) -> Bool)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
     override func sendEvent(_ event: NSEvent) {
+        if event.isSecondaryPress, trayContextMenu?(event) == true { return }
         if event.type == .keyDown, event.keyCode == 53 {
             if goBack?() == true { return }
             // Esc closes the panel, unless a text field is being edited (there it only cancels the edit).
@@ -326,6 +331,7 @@ final class FlyoutController {
     private var centerX: CGFloat = 0
     private var screenFrame = NSRect.zero
     private var fittedMailReader = false
+    private var trayFrames: [String: CGRect] = [:]
     private var pointerAfterMailReader: NSPoint?
     private var globalMonitor: Any?
     private var localMonitor: Any?
@@ -333,7 +339,7 @@ final class FlyoutController {
     private var kindObserver: AnyCancellable?
     private var isRunning = true
 
-    init(model: TaskbarModel) {
+    init(model: TaskbarModel, onTrayContextMenu: @escaping (String, NSPoint) -> Void) {
         let flyoutPanel = FlyoutPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel = flyoutPanel
         flyoutPanel.goBack = { [weak fm] in
@@ -342,11 +348,16 @@ final class FlyoutController {
             return true
         }
         flyoutPanel.dismiss = { [weak self] in self?.hide() }
+        flyoutPanel.trayContextMenu = { [weak self] event in
+            guard let self, let id = self.trayItem(at: event.locationInWindow) else { return false }
+            onTrayContextMenu(id, self.panel.convertPoint(toScreen: event.locationInWindow))
+            return true
+        }
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
         panel.level = .statusBar; panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        host = NSHostingView(rootView: FlyoutView(fm: fm, model: model))
+        host = NSHostingView(rootView: FlyoutView(fm: fm, model: model, onTrayFrames: { [weak self] in self?.trayFrames = $0 }))
         panel.contentView = host
         for name in [Notification.Name.flyoutRefit] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -404,6 +415,15 @@ final class FlyoutController {
 
     var isVisible: Bool { panel.isVisible }
     var kind: String { fm.kind }
+
+    private func trayItem(at windowPoint: NSPoint) -> String? {
+        guard panel.isVisible, kind == trayMore, let host else { return nil }
+        let point = host.convert(windowPoint, from: nil)
+        let fromTop = NSPoint(x: point.x - host.bounds.minX,
+                              y: host.isFlipped ? point.y - host.bounds.minY : host.bounds.maxY - point.y)
+        return trayFrames.first { $0.value.contains(fromTop) }?.key
+    }
+
     func contains(_ p: NSPoint) -> Bool {
         guard panel.isVisible else { return false }
         if p == pointerAfterMailReader { return true }
@@ -455,6 +475,7 @@ final class FlyoutController {
         pointerAfterMailReader = nil
         fm.kind = ""
         fm.mailMessage = nil
+        trayFrames = [:]
         removeMonitors()
         panel.orderOut(nil)
     }

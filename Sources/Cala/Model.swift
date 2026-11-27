@@ -30,6 +30,7 @@ final class TaskbarModel: ObservableObject {
     @Published var dragID: String?
     @Published var dragScreen = ""
     @Published var dragX: CGFloat = 0
+    @Published var trayDragOrder: [String]?
     /// Items whose app is opening (see LaunchFeedback): their icon pulses until a window appears.
     @Published var launching: Set<String> = []
     @Published var batt: (pct: Int, charging: Bool, isCharging: Bool)?

@@ -1,3 +1,8 @@
+import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
+
 func expect(_ name: String, _ actual: [String], _ expected: [String]) {
     guard actual == expected else { fatalError("FAIL \(name): \(actual) != \(expected)") }
     print("PASS \(name)")
@@ -74,3 +79,53 @@ expectMove("Within a group, the insertion index accounts for removing the dragge
            item: "wifi", to: .bar, at: 2,
            order: ["future-first", "volume", "wifi", "future-middle", "disk", "keyboard", "future-last"],
            layout: savedLayout)
+
+expect("Bar menu offers More and Hide", TrayPlace.bar.menuDestinations.map(\.rawValue), ["more", "hidden"])
+expect("More menu offers bar and Hide", TrayPlace.more.menuDestinations.map(\.rawValue), ["bar", "hidden"])
+expect("Hidden items have no placement menu", TrayPlace.hidden.menuDestinations.map(\.rawValue), [])
+
+let frames = [
+    "wifi": CGRect(x: 100, y: 0, width: 30, height: 48),
+    "usage": CGRect(x: 130, y: 0, width: 64, height: 48),
+    "disk": CGRect(x: 194, y: 0, width: 26, height: 48),
+    "more-button": CGRect(x: 70, y: 0, width: 30, height: 48),
+    "app": CGRect(x: 0, y: 0, width: 46, height: 48),
+]
+let barOrder = ["wifi", "usage", "unavailable", "disk"]
+guard let drag = TrayBarDrag(id: "usage", order: barOrder, frames: frames),
+      TrayBarDrag(id: "unavailable", order: barOrder, frames: frames) == nil,
+      TrayBarDrag(id: "more-button", order: barOrder, frames: frames) == nil else {
+    fatalError("FAIL only visible, configurable bar items can start a tray drag")
+}
+expect("Dragging starts from the visible bar order", drag.order(at: 162), ["wifi", "usage", "disk"])
+expect("A wide tray icon slides left after crossing its neighbor", drag.order(at: 146), ["usage", "wifi", "disk"])
+expect("A wide tray icon slides right after crossing its neighbor", drag.order(at: 176), ["wifi", "disk", "usage"])
+expect("Reversing the drag restores the original order", drag.order(at: 162), ["wifi", "usage", "disk"])
+expect("Moving over the app or More area only changes order within the bar tray",
+       drag.order(at: 10), ["usage", "wifi", "disk"])
+guard drag.restingCenter(in: drag.order(at: 146)) == 132,
+      drag.restingCenter(in: drag.order(at: 176)) == 188 else {
+    fatalError("FAIL the lifted icon should settle in the new slot with mixed cell widths")
+}
+print("PASS Lifted icon settles in its new slot with mixed cell widths")
+
+let complete = ["more-a", "wifi", "hidden", "usage", "unavailable", "more-b", "disk"]
+expect("Saving a drag preserves More, Hidden, unavailable and unknown slots",
+       savingTrayBarOrder(complete + ["future"], configuredOrder: complete,
+                          currentBarOrder: ["wifi", "usage", "disk"], dragOrder: drag.order(at: 176)),
+       ["more-a", "wifi", "hidden", "disk", "unavailable", "more-b", "usage", "future"])
+expect("Saving the first drag materializes the inferred tray order before reordering",
+       savingTrayBarOrder([], configuredOrder: complete,
+                          currentBarOrder: ["wifi", "usage", "disk"], dragOrder: drag.order(at: 176)),
+       ["more-a", "wifi", "hidden", "disk", "unavailable", "more-b", "usage"])
+
+let beforeDiskDisappears = ["wifi", "disk", "volume"]
+let diskDrag = TrayBarDrag(id: "wifi", order: beforeDiskDisappears, frames: [
+    "wifi": CGRect(x: 100, y: 0, width: 30, height: 48),
+    "disk": CGRect(x: 130, y: 0, width: 30, height: 48),
+    "volume": CGRect(x: 160, y: 0, width: 30, height: 48),
+])!
+expect("Disk keeps its saved middle slot when Wi-Fi is dragged to the end and Disk disappears",
+       savingTrayBarOrder(beforeDiskDisappears, configuredOrder: beforeDiskDisappears,
+                          currentBarOrder: ["wifi", "volume"], dragOrder: diskDrag.order(at: 180)),
+       ["volume", "disk", "wifi"])

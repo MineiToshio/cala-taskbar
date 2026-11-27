@@ -9,9 +9,9 @@ struct FramesKey: PreferenceKey {
 }
 
 extension View {
-    func reportFrame(_ id: String) -> some View {
+    func reportFrame(_ id: String, in space: String = "bar") -> some View {
         background(GeometryReader { g in
-            Color.clear.preference(key: FramesKey.self, value: [id: g.frame(in: .named("bar"))])
+            Color.clear.preference(key: FramesKey.self, value: [id: g.frame(in: .named(space))])
         })
     }
 }
@@ -79,6 +79,16 @@ struct BarView: View {
                     .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
                     .frame(height: store.barHeight)
                     .position(x: model.dragX, y: store.barHeight / 2)
+            } else if model.trayVisible, model.dragScreen == screenKey,
+                      let id = model.dragID, store.config.barTrayIDs.contains(id) {
+                TrayView(model: model, screenKey: screenKey, liftedID: id)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .scaleEffect(1.12)
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                    .frame(height: store.barHeight)
+                    .position(x: model.dragX, y: store.barHeight / 2)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
         }
         .coordinateSpace(name: "bar")
@@ -147,8 +157,8 @@ struct IconButton: View {
             Image(nsImage: item.icon)
                 .resizable().interpolation(.high)
                 .frame(width: size, height: size)
-                .modifier(LaunchPulse(active: launching))
                 .modifier(AttentionBounce(active: attention && !reduceMotion))
+                .modifier(LaunchPulse(active: launching))
                 .frame(maxHeight: .infinity)
             if running && windowless {
                 Circle().fill(Color.secondary.opacity(0.7)).frame(width: 4, height: 4).padding(.bottom, 3)
@@ -168,24 +178,22 @@ struct IconButton: View {
 }
 
 /// The app asks for attention (the native Dock would bounce it): the icon hops while the request lasts.
-/// Always applied (driven by `active`) so turning it on or off never changes the icon's view identity.
 struct AttentionBounce: ViewModifier {
     let active: Bool
-    @State private var up = false
 
-    func body(content: Content) -> some View {
-        content
-            .offset(y: up ? -5 : 0)
-            .onAppear { if active { start() } }
-            .onChange(of: active) { _, on in on ? start() : stop() }
-    }
-
-    private func start() {
-        withAnimation(.easeOut(duration: 0.24).repeatForever(autoreverses: true)) { up = true }
-    }
-
-    private func stop() {
-        withAnimation(.easeIn(duration: 0.15)) { up = false }
+    @ViewBuilder func body(content: Content) -> some View {
+        if active {
+            content.keyframeAnimator(initialValue: CGFloat.zero, repeating: true) { icon, y in
+                icon.offset(y: y)
+            } keyframes: { _ in
+                CubicKeyframe(-5, duration: 0.24)
+                CubicKeyframe(0, duration: 0.24)
+            }
+            .transition(.identity)
+        } else {
+            // Removing the animator also discards its current offset, even when stopped mid-hop.
+            content.transition(.identity)
+        }
     }
 }
 
@@ -303,6 +311,7 @@ struct ClockView: View {
 struct TrayView: View {
     @ObservedObject var model: TaskbarModel
     var screenKey = ""
+    var liftedID: String? = nil
     @ObservedObject private var store = ConfigStore.shared
     @ObservedObject private var monitor = SystemMonitor.shared
     @ObservedObject private var advisor = RestartAdvisor.shared
@@ -318,10 +327,37 @@ struct TrayView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            if store.config.moreTrayIDs.contains(where: { $0 == trayMail ? !mail.accounts.isEmpty : model.trayAvailable($0) }) { cell(nil, id: trayMore, text: nil, custom: AnyView(TrayGlyph(id: trayMore, model: model))) }
-            ForEach(store.config.barTrayIDs, id: \.self) { id in item(id) }
+        if let liftedID {
+            item(liftedID)
+        } else {
+            let barIDs = store.config.barTrayIDs
+            let preview = model.dragScreen == screenKey ? model.trayDragOrder : nil
+            let ids = mergingTrayOrder(barIDs, with: (preview ?? []).filter(Set(barIDs).contains))
+            HStack(spacing: 0) {
+                if store.config.moreTrayIDs.contains(where: available) {
+                    cell(nil, id: trayMore, text: nil, custom: AnyView(TrayGlyph(id: trayMore, model: model)))
+                        .reportFrame(trayMore)
+                }
+                ForEach(ids.filter(available), id: \.self) { id in
+                    item(id)
+                        .reportFrame(id)
+                        .opacity(isLifted(id) ? 0 : 1)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: ids)
         }
+    }
+
+    private func available(_ id: String) -> Bool {
+        id == trayMail ? !mail.accounts.isEmpty : model.trayAvailable(id)
+    }
+
+    private func isLifted(_ id: String) -> Bool {
+        model.dragID == id && model.dragScreen == screenKey
+    }
+
+    private func hovering(_ id: String) -> Bool {
+        liftedID == id || ((model.trayDragOrder == nil || model.dragScreen != screenKey) && model.trayHover == id)
     }
 
     @ViewBuilder func item(_ id: String) -> some View {
@@ -331,7 +367,7 @@ struct TrayView: View {
         case trayBright:
             if model.hasBright { cell(nil, id: trayBright, text: nil, custom: AnyView(TrayGlyph(id: id, model: model))) }
         case trayUsage:
-            UsageTrayView(model: model)
+            UsageTrayView(model: model, hovering: hovering(id))
         case traySystem:
             let snapshot = monitor.snapshot()
             let metric = monitor.shownMetric
@@ -380,7 +416,7 @@ struct TrayView: View {
         .foregroundStyle(.primary.opacity(0.85))
         .padding(.horizontal, 8)
         .frame(maxHeight: .infinity)
-        .background(TrayHighlight(hovering: model.trayHover == id))
+        .background(TrayHighlight(hovering: hovering(id)))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityTitle ?? (id == trayMore ? tx("More", "Más") : (TrayItems.info(id)?.title ?? "")))
         .accessibilityAddTraits(.isButton)
@@ -389,7 +425,6 @@ struct TrayView: View {
                 app.trayClick(id, bar: bar)
             }
         }
-        .reportFrame(id)
     }
 }
 
@@ -399,6 +434,7 @@ let trayUsage = "__t_usage_combined"
 struct UsageTrayView: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var model: TaskbarModel
+    let hovering: Bool
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let states = model.usage.filter(\.available)
@@ -416,13 +452,12 @@ struct UsageTrayView: View {
                 }
                 .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 9).frame(maxHeight: .infinity)
-                .background(TrayHighlight(hovering: model.trayHover == trayUsage))
+                .background(TrayHighlight(hovering: hovering))
                 .contentShape(Rectangle())
                 .help(tx("Claude and Codex · remaining plan usage", "Claude y Codex · uso restante del plan"))
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(states.map { $0.provider.title + " " + ($0.remaining(context.date).map { tx("\($0)% left", "\($0)% restante") } ?? tx("unavailable", "no disponible")) }.joined(separator: ", "))
                 .accessibilityAddTraits(.isButton)
-                .reportFrame(trayUsage)
             }
         }
     }

@@ -86,6 +86,7 @@ struct MailOverflowPane: View {
         .onHover { hover = $0 ? info.id : (hover == info.id ? nil : hover) }
         .help(title)
         .accessibilityLabel(title)
+        .reportFrame(info.id, in: "flyout")
     }
 }
 

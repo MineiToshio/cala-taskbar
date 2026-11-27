@@ -56,8 +56,8 @@ extension Config {
     /// Saved order first (known ids only), then anything new in its default position.
     var orderedTrayIDs: [String] {
         let known = Set(TrayItems.all.map(\.id))
-        var out = trayOrder.filter { known.contains($0) }
-        var seen = Set(out)
+        var seen = Set<String>()
+        var out = trayOrder.filter { known.contains($0) && seen.insert($0).inserted }
         for item in TrayItems.all where !seen.contains(item.id) {
             // Insert after the item that precedes it by default, so a new item does not jump to the end.
             if let i = TrayItems.all.firstIndex(where: { $0.id == item.id }), i > 0,

@@ -2,6 +2,16 @@ import AppKit
 import SwiftUI
 import Combine
 
+extension NSEvent {
+    var isSecondaryPress: Bool {
+        type == .rightMouseDown || (type == .leftMouseDown && modifierFlags.contains(.control))
+    }
+
+    var screenLocation: NSPoint {
+        window?.convertPoint(toScreen: locationInWindow) ?? NSEvent.mouseLocation
+    }
+}
+
 private func enableBackgroundCursor() {
     typealias MainConnection = @convention(c) () -> Int32
     typealias SetProperty = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32
@@ -255,17 +265,8 @@ final class BarController {
             guard let self, let bar = self.bars.first(where: { $0.panel === e.window }) else { return e }
             // Pressing the bar means it is in use: it gets the normal hide delay, not the quick one.
             bar.edge.engaged = true
-            // Left press on an app icon: wait for mouse-up so it can become a drag.
-            if e.type == .leftMouseDown, let hi = self.hitInfo(NSEvent.mouseLocation),
-               let id = hi.id, self.model.items.contains(where: { $0.id == id }) {
-                self.dragCleanup?.cancel()
-                self.model.dragID = nil
-                self.pressed = (id, hi.bar, NSEvent.mouseLocation.x, e)
-                self.grab = NSEvent.mouseLocation.x - self.iconCenterX(hi.bar, id, fallback: NSEvent.mouseLocation.x)
-                self.dragging = false
-                return nil
-            }
-            self.handleClick(e)
+            if e.type == .leftMouseDown, !e.isSecondaryPress, self.beginIconPress(e) { return nil }
+            self.handleClick(e, at: e.screenLocation)
             return nil
         }
         addMonitor(.otherMouseDown) { [weak self] e in
@@ -282,17 +283,27 @@ final class BarController {
         }
         addMonitor(.leftMouseDragged) { [weak self] e in
             guard let self, let p = self.pressed else { return e }
-            let m = NSEvent.mouseLocation
-            if !self.dragging && abs(m.x - p.x) > 5 {
-                self.dragging = true; self.preview.hide()
+            let m = e.screenLocation
+            if p.isBeyondClickThreshold(at: m) { self.pressed?.exceededClickThreshold = true }
+            if !self.dragging && abs(m.x - p.start.x) > IconPress.threshold {
+                self.dragging = true
+                self.preview.hide()
+                if p.isTray {
+                    self.closeFlyout()
+                    let order = self.store.config.barTrayIDs.filter(self.trayItemAvailable)
+                    self.trayDrag = TrayBarDrag(id: p.id, order: order, frames: p.bar.frames)
+                }
                 self.model.dragScreen = p.bar.screen.key; self.model.dragID = p.id
             }
-            if self.dragging {
-                let lo = p.bar.panel.frame.minX
-                self.model.dragX = min(max(m.x - self.grab - lo, 20), p.bar.panel.frame.width - 20)
-            }
-            if self.dragging, let hi = self.hitInfo(m), hi.bar === p.bar, let t = hi.id,
-               t != p.id, self.model.items.contains(where: { $0.id == t }) {
+            guard self.dragging else { return nil }
+            let x = m.x - self.grab - p.bar.panel.frame.minX
+            self.model.dragX = min(max(x, 20), p.bar.panel.frame.width - 20)
+            if p.isTray {
+                if let order = self.trayDrag?.order(at: x), order != self.model.trayDragOrder {
+                    self.model.trayDragOrder = order
+                }
+            } else if let hi = self.hitInfo(m), hi.bar === p.bar, let t = hi.id, t != p.id,
+                      self.model.items.contains(where: { $0.id == t }) {
                 self.model.move(p.id, to: t)
             }
             return nil
@@ -302,8 +313,9 @@ final class BarController {
             self.pressed = nil
             if self.dragging {
                 self.dragging = false
-                if let r = p.bar.frames[p.id] {
-                    withAnimation(.easeOut(duration: 0.15)) { self.model.dragX = r.midX }
+                let center = p.isTray ? self.finishTrayDrag(bar: p.bar) : nil
+                if let x = center ?? p.bar.frames[p.id]?.midX {
+                    withAnimation(.easeOut(duration: 0.15)) { self.model.dragX = x }
                 }
                 let work = DispatchWorkItem { [weak self] in
                     guard let self, self.isRunning else { return }
@@ -311,7 +323,14 @@ final class BarController {
                 }
                 self.dragCleanup = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.17, execute: work)
-            } else { self.handleClick(p.event) }
+            } else {
+                let m = e.screenLocation
+                if !p.exceededClickThreshold, !p.isBeyondClickThreshold(at: m),
+                   let hit = self.hitInfo(m), hit.bar === p.bar, hit.id == p.id,
+                   !p.isTray || (self.store.config.place(p.id) == .bar && self.trayItemAvailable(p.id)) {
+                    self.handleClick(p.event, at: m)
+                }
+            }
             return nil
         }
 
@@ -329,6 +348,8 @@ final class BarController {
         dragCleanup?.cancel()
         pressed = nil; dragging = false
         model.dragID = nil
+        trayDrag = nil
+        model.trayDragOrder = nil
         hoverBar = nil; overlayBar = nil
         closeBars()
         preview.hide(); closeFlyout()
@@ -365,7 +386,7 @@ final class BarController {
         for b in bars where !b.hidden && barFrame(b, hidden: false).contains(m) {
             let lx = m.x - b.panel.frame.minX
             let hit = b.frames.first { id, frame in
-                (model.trayVisible || !id.hasPrefix("__t_")) && frame.minX <= lx && lx <= frame.maxX
+                (model.trayVisible || !id.hasPrefix("__t_")) && !frame.isEmpty && frame.minX <= lx && lx <= frame.maxX
             }
             return (b, hit?.key)
         }
@@ -392,9 +413,61 @@ final class BarController {
         b.panel.frame.minX + (b.frames[id]?.minX ?? 0)
     }
 
-    var pressed: (id: String, bar: Bar, x: CGFloat, event: NSEvent)?
-    var dragging = false
-    var grab: CGFloat = 0
+    private struct IconPress {
+        static let threshold: CGFloat = 5
+        let id: String
+        let bar: Bar
+        let start: NSPoint
+        let event: NSEvent
+        let isTray: Bool
+        var exceededClickThreshold = false
+
+        func isBeyondClickThreshold(at point: NSPoint) -> Bool {
+            hypot(point.x - start.x, point.y - start.y) > Self.threshold
+        }
+    }
+
+    private var pressed: IconPress?
+    private var dragging = false
+    private var grab: CGFloat = 0
+    private var trayDrag: TrayBarDrag?
+
+    // Wait for mouse-up on draggable icons so an ordinary press still clicks.
+    private func beginIconPress(_ event: NSEvent) -> Bool {
+        let mouse = event.screenLocation
+        guard let hit = hitInfo(mouse), let id = hit.id else { return false }
+        let isTray = store.config.barTrayIDs.contains(id)
+        guard isTray || model.items.contains(where: { $0.id == id }) else { return false }
+        dragCleanup?.cancel()
+        model.dragID = nil
+        pressed = IconPress(id: id, bar: hit.bar, start: mouse, event: event, isTray: isTray)
+        grab = mouse.x - iconCenterX(hit.bar, id, fallback: mouse.x)
+        dragging = false
+        return true
+    }
+
+    private func trayItemAvailable(_ id: String) -> Bool {
+        if id == trayMail { return MainActor.assumeIsolated { !MailService.shared.accounts.isEmpty } }
+        return model.trayAvailable(id)
+    }
+
+    private func finishTrayDrag(bar: Bar) -> CGFloat? {
+        defer {
+            trayDrag = nil
+            model.trayDragOrder = nil
+        }
+        guard model.trayVisible, let drag = trayDrag, let order = model.trayDragOrder else { return nil }
+        var config = store.config
+        let currentOrder = config.barTrayIDs.filter { bar.frames[$0]?.isEmpty == false && trayItemAvailable($0) }
+        guard currentOrder.contains(drag.id) else { return nil }
+        let savedOrder = savingTrayBarOrder(config.trayOrder, configuredOrder: config.orderedTrayIDs,
+                                           currentBarOrder: currentOrder, dragOrder: order)
+        if savedOrder != config.trayOrder {
+            config.trayOrder = savedOrder
+            store.config = config
+        }
+        return Set(currentOrder) == Set(order) ? drag.restingCenter(in: order) : nil
+    }
 
     func tick() {
         guard isRunning else { return }
@@ -521,20 +594,23 @@ final class BarController {
         if Date().timeIntervalSince(lastReserve) > 0.6 { lastReserve = Date(); reserveSpace() }
     }
 
-    func handleClick(_ e: NSEvent) {
-        let m = NSEvent.mouseLocation
-        guard let hi = hitInfo(m) else { return }
+    private func handleClick(_ e: NSEvent, at point: NSPoint) {
+        guard let hi = hitInfo(point) else { return }
         let id = hi.id, bar = hi.bar
-        if e.type != .rightMouseDown, id == startID || id == deskID || model.items.contains(where: { $0.id == id }) {
+        if !e.isSecondaryPress, id == startID || id == deskID || model.items.contains(where: { $0.id == id }) {
             preview.commitPeek()
         }
         preview.hide()
-        if !(id?.hasPrefix("__t_") ?? false) { closeFlyout() }
+        if let id, id.hasPrefix("__t_") {
+            if e.isSecondaryPress { showTrayMenu(id, bar: bar) }
+            else { trayClick(id, bar: bar) }
+            return
+        }
+        closeFlyout()
         let item = model.items.first { $0.id == id }
-        if let id, id.hasPrefix("__t_") { trayClick(id, bar: bar); return }
-        if e.type == .rightMouseDown {
+        if e.isSecondaryPress {
             let menu = item.map(itemMenu) ?? settingsMenu()
-            popUp(menu, x: id.map { iconLeftX(bar, $0) } ?? m.x, bar: bar)
+            popUp(menu, x: id.map { iconLeftX(bar, $0) } ?? point.x, bar: bar)
         } else if id == updateID {
             UpdateWindowController.shared.show()
         } else if id == deskID {
@@ -633,9 +709,49 @@ final class BarController {
         }
     }
 
-    func popUp(_ menu: NSMenu, x: CGFloat, bar: Bar) {
-        let top = barFrame(bar, hidden: false).maxY + menu.size.height + 4
+    func popUp(_ menu: NSMenu, x: CGFloat, bar: Bar, y: CGFloat? = nil) {
+        let top = y ?? (barFrame(bar, hidden: false).maxY + menu.size.height + 4)
         menu.popUp(positioning: nil, at: NSPoint(x: x, y: top), in: nil)
+    }
+
+    func showTrayMenu(_ id: String, bar: Bar, at point: NSPoint? = nil) {
+        guard isRunning, bars.contains(where: { $0 === bar }) else { return }
+        closeFlyout()
+        let menu = TrayItems.info(id) == nil ? settingsMenu() : trayMenu(id)
+        popUp(menu, x: point?.x ?? iconLeftX(bar, id), bar: bar, y: point?.y)
+    }
+
+    private func trayMenu(_ id: String) -> NSMenu {
+        let menu = NSMenu()
+        for place in store.config.place(id).menuDestinations {
+            let title: String
+            switch place {
+            case .bar: title = tx("Move to bar", "Mover a la barra")
+            case .more: title = tx("Move to More", "Mover a Más")
+            case .hidden: title = tx("Hide", "Ocultar")
+            }
+            menu.addItem(BlockItem(title) { [weak self] in self?.moveTrayItem(id, to: place) })
+        }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        menu.addItem(BlockItem(tx("Tray settings…", "Configurar bandeja…")) {
+            SettingsWindowController.shared.show(pane: .tray)
+        })
+        return menu
+    }
+
+    private func moveTrayItem(_ id: String, to place: TrayPlace) {
+        var config = store.config
+        guard isRunning, config.place(id).menuDestinations.contains(place) else { return }
+        let ids = config.orderedTrayIDs
+        let groups = TrayPlace.allCases.map { group in
+            TrayItemGroup(place: group, items: ids.filter { config.place($0) == group })
+        }
+        guard let destination = groups.first(where: { $0.place == place }),
+              let updated = movingTrayItem(id, to: place, at: destination.items.count, in: groups,
+                                           savedLayout: config.trayLayout, savedOrder: config.trayOrder) else { return }
+        config.trayLayout = updated.layout
+        config.trayOrder = updated.order
+        store.config = config
     }
 
     func itemMenu(_ item: AppItem) -> NSMenu {

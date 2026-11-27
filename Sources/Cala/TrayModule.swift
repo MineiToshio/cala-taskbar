@@ -123,7 +123,10 @@ final class TrayModule: CalaModule {
             if let url = CalendarLogic.joinCandidate(CalendarService.shared.events, now: Date())?.joinURL { NSWorkspace.shared.open(url) }
             return
         }
-        let flyout = self.flyout ?? FlyoutController(model: controller.model)
+        let flyout = self.flyout ?? FlyoutController(model: controller.model) { [weak controller] id, point in
+            guard let controller, let bar = controller.flyoutBar else { return }
+            controller.showTrayMenu(id, bar: bar, at: point)
+        }
         self.flyout = flyout
         if flyout.isVisible && flyout.kind == id { controller.closeFlyout(); return }
         controller.model.refreshTray()

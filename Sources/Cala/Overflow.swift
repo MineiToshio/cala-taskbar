@@ -125,6 +125,7 @@ struct MorePane: View {
                             }
                             .buttonStyle(.plain)
                             .onHover { hover = $0 ? id : (hover == id ? nil : hover) }
+                            .reportFrame(id, in: "flyout")
                         }
                     }
                 }
