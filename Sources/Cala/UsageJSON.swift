@@ -166,10 +166,12 @@ enum UsageJSON {
         /// Codex writes the creating account and ChatGPT user there; its `token_count` events carry no identity. The
         /// user is compared with the active login's ChatGPT user id (not the token subject, a different namespace), so
         /// a workspace account shared by several users is trusted only for the same user. A user the active login
-        /// cannot confirm leaves the file unlabeled, never trusted.
+        /// cannot confirm leaves the file unlabeled, never trusted. With no readable active login (an `auth.json`
+        /// being rewritten on token refresh) nothing can be compared, so nothing is foreign either: the importer does
+        /// not scan without a login, and offline replay keeps such files unlabeled.
         static func creatorIdentity(account: String?, user: String?, active: QuotaAccount?) -> Identity {
             if account == nil && user == nil { return .unlabeled }
-            guard let active else { return .foreign }
+            guard let active else { return .unlabeled }
             if let account, account != active.account { return .foreign }
             if let user, let known = active.creatorUser, user != known { return .foreign }
             guard account != nil, user == nil || active.creatorUser != nil else { return .unlabeled }

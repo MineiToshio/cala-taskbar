@@ -465,6 +465,9 @@ final class UsageCodexBackfill {
     }
 
     /// Reads the creator that Codex's opening `session_meta` record names; it applies to every row of the file.
+    ///
+    /// File identity covers the whole file: a session resumed under another login would keep its creator and be
+    /// misattributed. That is acceptable with one Codex account per macOS user, the case this importer serves.
     private func creator(_ bytes: UnsafeRawBufferPointer) {
         guard Self.contains(bytes, Self.metaMarker), let base = bytes.baseAddress,
               let object = UsageJSON.object(Data(bytes: base, count: bytes.count)),
@@ -727,11 +730,15 @@ final class UsageCodexImportPlanner {
     private var scanned = Set<QuotaImportKey>()
     private var deferred: (key: QuotaImportKey, candidates: [UsageCodexBackfill.Candidate])?
 
-    func step(for key: QuotaImportKey) -> Step {
+    /// What to do for `key` now. Without a readable active login (`account` nil, e.g. while `auth.json` is rewritten
+    /// on token refresh) no scan starts and nothing is marked scanned: rollouts stamped with their creator cannot be
+    /// told apart from another account's, so the import waits for the next reading that has a login.
+    func step(for key: QuotaImportKey, account: QuotaAccount?) -> Step {
         if let deferred {
             if deferred.key == key { return .reattribute(deferred.candidates) }
             self.deferred = nil
         }
+        guard account != nil else { return .idle }
         return scanned.contains(key) ? .idle : .scan
     }
 

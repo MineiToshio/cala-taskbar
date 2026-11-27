@@ -992,7 +992,7 @@ final class UsageService: ObservableObject {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         let key = QuotaImportKey(profile: login.profile, timeZoneID: calendar.timeZone.identifier)
-        let step = importPlanner.step(for: key)
+        let step = importPlanner.step(for: key, account: quotaAccounts[.codex])
         if case .reattribute(let candidates) = step {
             reattributeDeferred(candidates, key: key, login: login, run: run)
             return
@@ -1049,7 +1049,7 @@ final class UsageService: ObservableObject {
                                             updated: { [weak self] in self?.quotaFeed.send(.importUpdated) })
             if finished && decision.mixed {
                 let timeline = decision.timeline
-                log("usage forecast: unlabeled Codex history shows more than one account (\(timeline.earlyStarts) early cycle starts, \(timeline.returns) returns to an earlier cycle); "
+                log("usage forecast: unlabeled Codex history shows more than one account (\(timeline.earlyStarts) early cycle starts, \(timeline.returns) returns to an earlier cycle, \(timeline.restarts) fresh restarts not counted); "
                     + (decision.awaitsLiveReading ? "nothing is kept until a live reading arrives" : "only the live cycle is kept"))
             }
             if finished {

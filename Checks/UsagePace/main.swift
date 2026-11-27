@@ -187,7 +187,9 @@ expect("A session_meta creator naming the active account and user is trusted",
        && creator("account-a", nil, activeCodex) == .matching)
 expect("A session_meta creator naming another account or user is foreign; none is unlabeled",
        creator("account-b", "user-a", creatorCodex) == .foreign && creator("account-a", "user-b", creatorCodex) == .foreign
-       && creator("account-a", "user-a", nil) == .foreign && creator(nil, nil, creatorCodex) == .unlabeled)
+       && creator(nil, nil, creatorCodex) == .unlabeled)
+expect("Without a readable active login a creator is never foreign",
+       creator("account-a", "user-a", nil) == .unlabeled && creator("account-b", nil, nil) == .unlabeled)
 expect("A creator user the active login cannot confirm stays unlabeled",
        creator("account-a", "user-a", activeCodex) == .unlabeled && creator(nil, "user-a", creatorCodex) == .unlabeled)
 expect("A row and its file combine fail-closed",

@@ -114,6 +114,21 @@ private func checkSessionMetaIdentity() throws {
     let unknownUser = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(),
                                               account: QuotaAccount(account: "acct-1", subject: "token-subject")))
     check(unknownUser.candidates.allSatisfy { !$0.identified }, "an unconfirmed creator user is never trusted")
+    // No readable login (auth.json mid-rewrite): creator-stamped files are not taken for another account, nothing is
+    // dropped, and the planner does not scan or mark the import scanned, so it retries once the login is readable.
+    let noLogin = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(), account: nil))
+    check(!noLogin.replayCandidates.contains(where: \.identified)
+          && Set(noLogin.replayCandidates.map(\.reading.date)) == Set([10, 20, 30, 50, 60, 200].map { date(Double($0)) }),
+          "without a login, creator-stamped rows stay unlabeled and only rows that name another account themselves drop")
+    let planner = UsageCodexImportPlanner()
+    let waits: Bool
+    if case .idle = planner.step(for: key, account: nil) { waits = true } else { waits = false }
+    let retries: Bool
+    if case .scan = planner.step(for: key, account: active) { retries = true } else { retries = false }
+    check(waits && retries, "with no login no scan starts and no import completes; a later reading with the login scans")
+    let later = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(), account: active))
+    check(later.candidates.filter(\.identified).map(\.reading.date).sorted() == identified,
+          "the later pass with the login keeps the identified rows")
     let otherUser = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(),
                                             account: QuotaAccount(account: "acct-1", subject: nil, creatorUser: "user-9")))
     check(otherUser.candidates.allSatisfy { !$0.identified } && !otherUser.candidates.contains { $0.reading.date == date(10) },
@@ -437,9 +452,10 @@ private func checkImportRetries() throws {
         var reattributions = 0
         var imports: [UsageCodexBackfill.Attribution] = []
     }
+    let login = QuotaAccount(account: "acct-1", subject: nil)
     /// One live reading: the planner picks the work; `anchors` are the fresh live readings the history has.
     func reading(_ planner: UsageCodexImportPlanner, _ run: inout Run, anchors: [QuotaObservation]) {
-        switch planner.step(for: key) {
+        switch planner.step(for: key, account: login) {
         case .scan:
             run.scans += 1
             let pass = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(), account: nil, limits: limits))
@@ -488,6 +504,6 @@ private func checkImportRetries() throws {
     check(second.scans == 1 && second.reattributions == 2 && second.imports.count == 1,
           "many later live readings never trigger another scan or attribution")
     // Another profile or time zone is another import.
-    check({ if case .scan = waiting.step(for: QuotaImportKey(profile: profile, timeZoneID: "Europe/Madrid")) { return true } else { return false } }(),
+    check({ if case .scan = waiting.step(for: QuotaImportKey(profile: profile, timeZoneID: "Europe/Madrid"), account: login) { return true } else { return false } }(),
           "an import of another key still scans")
 }
