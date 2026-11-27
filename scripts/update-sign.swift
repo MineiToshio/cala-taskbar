@@ -11,6 +11,8 @@ private let rounds: UInt32 = 600_000
 private let feedLimit = 64 * 1024
 private typealias PrivateKey = Curve25519.Signing.PrivateKey
 
+private let wrongPassphraseMessage = "Unable to decrypt update key. Check the passphrase and key file."
+
 private struct Failure: LocalizedError {
     let errorDescription: String?
     init(_ message: String) { errorDescription = message }
@@ -50,7 +52,7 @@ private struct EncryptedKey: Codable {
         do {
             raw = try AES.GCM.open(box, using: derive(passphrase, salt: salt), authenticating: aad)
         } catch {
-            throw Failure("Unable to decrypt update key. Check the passphrase and key file.")
+            throw Failure(wrongPassphraseMessage)
         }
         let key = try PrivateKey(rawRepresentation: raw)
         guard key.publicKey.rawRepresentation == publicKey else { throw Failure("Update key does not match its public key") }
@@ -160,8 +162,8 @@ private func generate(_ out: URL) throws {
         guard chmod(config.path, 0o700) == 0 else { throw Failure("Could not set update key directory permissions") }
     }
 
-    let passphrase = try readPassphrase("Passphrase: ")
-    guard try readPassphrase("Repeat passphrase: ") == passphrase else { throw Failure("Passphrases do not match") }
+    let passphrase = try readPassphrase("Nueva frase para la clave de firma de Cala / New Cala signing-key passphrase: ")
+    guard try readPassphrase("Repite la frase / Repeat passphrase: ") == passphrase else { throw Failure("Passphrases do not match") }
     let encrypted = try EncryptedKey(key: PrivateKey(), passphrase: passphrase)
     try exclusiveWrite(JSONEncoder().encode(encrypted), to: out)
     print("Public key: \(encrypted.publicKey.base64EncodedString())")
@@ -180,7 +182,16 @@ private func loadKey(_ url: URL) throws -> PrivateKey {
     }
     #endif
     let encrypted = try JSONDecoder().decode(EncryptedKey.self, from: data)
-    return try encrypted.unlock(readPassphrase("Passphrase: "))
+    let prompt = "Frase de la clave de firma de Cala (\(url.lastPathComponent)) — NO es la contraseña del Mac / Cala signing-key passphrase, not your Mac password: "
+    let attempts = 3
+    for attempt in 1...attempts {
+        do {
+            return try encrypted.unlock(readPassphrase(prompt))
+        } catch let failure as Failure where failure.errorDescription == wrongPassphraseMessage && attempt < attempts {
+            FileHandle.standardError.write(Data("Frase incorrecta, intenta de nuevo (\(attempt)/\(attempts)) / Wrong passphrase, try again\n".utf8))
+        }
+    }
+    throw Failure(wrongPassphraseMessage)
 }
 
 private func sign(_ manifest: Data, with key: PrivateKey) throws -> Data {
