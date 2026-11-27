@@ -1,5 +1,12 @@
 import Foundation
 
+// The fixtures exercise usage state without starting the app or its module registry.
+func log(_ message: String) {}
+final class ModuleCancellation: @unchecked Sendable {
+    var isCancelled: Bool { fatalError("Unexpected service startup") }
+    func cancel() { fatalError("Unexpected service startup") }
+}
+
 let now = Date(timeIntervalSince1970: 1_750_000_000)
 let hour: TimeInterval = 3600
 let day = 24 * hour
@@ -127,6 +134,129 @@ var inactive = quota("five_hour", used: 50, duration: 5 * hour, elapsed: 5 * hou
 expect("A reset at the current time has no pace line", pace(inactive) == nil)
 inactive.resetsAt = nil
 expect("A missing reset has no pace line", pace(inactive) == nil)
+
+let activeCodex = QuotaAccount(account: "account-a", subject: "subject-a")
+let rolloutJSON = """
+{"timestamp":1750000000,"type":"event_msg","payload":{"type":"token_count","rate_limits":{
+"account_id":"account-b","user_id":"subject-b","primary":{"used_percent":95,"window_minutes":10080,"resets_at":1750100000}}}}
+"""
+if let event = UsageJSON.codexRollout(Data(rolloutJSON.utf8)) {
+    expect("A 5%-remaining rollout from another account is ineligible for the display balance",
+           !UsageService.canAcceptRollout(account: event.account, subject: event.subject, activeAccount: activeCodex))
+} else {
+    expect("The conflicting rollout fixture parses", false)
+}
+expect("Only matching explicit identity or a fully unlabeled rollout can reach acceptance",
+       UsageService.canAcceptRollout(account: "account-a", subject: "subject-a", activeAccount: activeCodex)
+       && UsageService.canAcceptRollout(account: nil, subject: nil, activeAccount: activeCodex)
+       && !UsageService.canAcceptRollout(account: "account-a", subject: "subject-b", activeAccount: activeCodex)
+       && !UsageService.canAcceptRollout(account: nil, subject: "subject-b", activeAccount: activeCodex))
+
+func codexReading(_ slot: String, used: Double = 20, reset: Date, at date: Date = now, model: String? = nil,
+                  minutes: Int = 10080) -> UsageReading {
+    var window: [String: Any] = ["used_percent": used, "window_minutes": minutes, "resets_at": reset.timeIntervalSince1970]
+    if let model { window["model_id"] = model }
+    return UsageJSON.codex([slot: window, "plan_type": "pro"], at: date, format: "local")
+}
+
+let weeklyReset = now.addingTimeInterval(day)
+func alertBase(_ reading: UsageReading) -> String? {
+    UsageWindowObservation.capture(reading, provider: .codex).values.first?.alertBase(provider: .codex)
+}
+let primary = codexReading("primary", reset: weeklyReset)
+let secondary = codexReading("secondary", used: 70, reset: weeklyReset)
+let sharedWeekly = alertBase(primary)
+expect("A Codex weekly meter keeps its alert identity after moving from primary to secondary",
+       sharedWeekly != nil && sharedWeekly == alertBase(secondary))
+expect("Alert identity distinguishes meter scope, duration and cycle",
+       sharedWeekly != alertBase(codexReading("primary", reset: weeklyReset, model: "o3"))
+       && sharedWeekly != alertBase(codexReading("primary", reset: weeklyReset, minutes: 300))
+       && sharedWeekly != alertBase(codexReading("primary", reset: weeklyReset.addingTimeInterval(60))))
+let countdown = UsageJSON.codex(["secondary_window": ["used_percent": 70, "limit_window_seconds": week,
+                                                       "reset_after_seconds": day + 1]], at: now, format: "http")
+expect("Countdown jitter within the same reset minute preserves the alert identity", sharedWeekly == alertBase(countdown))
+
+let series = QuotaSeries(provider: .codex, profile: QuotaProfileID(rawValue: "test"), plan: "pro",
+                         meter: QuotaMeter(scope: .shared, durationSeconds: Int(week)), timeZoneID: "UTC")
+let cycle = QuotaCycle(reset: weeklyReset, segmentStart: now)
+let reading20 = QuotaObservation(series: series, date: now, used: 20, reset: weeklyReset, source: .api)
+let reading70 = QuotaObservation(series: series, date: now, used: 70, reset: weeklyReset, source: .api)
+let oldForecast = UsagePace.CachedForecast(
+    result: ForecastResult(expectedUsed: 100, exhaustProbability: 1, eta: now.addingTimeInterval(900),
+                           readiness: .likely, hitWeeks: 4, effectiveWeeks: 4), calculatedAt: now
+)
+var entry = UsagePace.Entry(key: UsagePace.ForecastKey(observation: reading20, cycle: cycle))
+let inFlight = entry.key
+entry.cache(oldForecast, for: inFlight)
+entry.update(reading20)
+expect("Replaying the same observation retains its forecast", entry.cached != nil)
+entry.update(reading70)
+expect("A 20% to 70% reading invalidates the cached forecast immediately", entry.cached == nil && entry.key != inFlight)
+entry.cache(oldForecast, for: inFlight)
+expect("An in-flight ETA for the 20% reading cannot publish against the 70% reading", entry.cached == nil)
+let refreshed70 = QuotaObservation(series: series, date: now.addingTimeInterval(60), used: 70, reset: weeklyReset, source: .api)
+let previousKey = entry.key
+entry.update(refreshed70)
+expect("New observation time invalidates even an unchanged counter", entry.key != previousKey)
+let newReset = weeklyReset.addingTimeInterval(60)
+let resetReading = QuotaObservation(series: series, date: refreshed70.date, used: 70, reset: newReset, source: .api)
+let resetCycle = QuotaCycle(reset: newReset, segmentStart: resetReading.date)
+var resetEntry = UsagePace.Entry(key: UsagePace.ForecastKey(observation: resetReading, cycle: resetCycle))
+resetEntry.cache(oldForecast, for: entry.key)
+expect("A reset change rejects a result from the previous cycle", resetEntry.cached == nil)
+
+var exhaustedOpus = opus
+let opusObservedAt = now.addingTimeInterval(-4 * hour)
+exhaustedOpus["percent"] = 100
+exhaustedOpus["observed_at"] = opusObservedAt.timeIntervalSince1970
+let api = UsageJSON.claude(["limits": [exhaustedOpus]], at: now.addingTimeInterval(-hour))
+let local = UsageJSON.claude(["five_hour": ["used_percentage": 10, "resets_at": now.addingTimeInterval(hour).timeIntervalSince1970]],
+                            at: now, local: true)
+var claude = UsageState(provider: .claude)
+claude.acceptReading(api, original: nil)
+let merged = UsageService.mergingClaudeLocal(local, previous: api)
+claude.acceptReading(merged, original: local)
+let cache = UsageService.Cache(directories: [:], readings: ["claude": merged], cooldowns: [:], failures: [:],
+                               observations: ["claude": claude.windowObservations])
+let reopened = try JSONDecoder().decode(UsageService.Cache.self, from: JSONEncoder().encode(cache))
+var relaunched = UsageState(provider: .claude, reading: reopened.readings["claude"],
+                            windowObservations: reopened.observations?["claude"] ?? [:])
+guard let retainedOpus = relaunched.orderedWindows.last else { fatalError("Missing retained quota") }
+expect("Relaunch preserves the retained quota's observation and suppresses the stale exhausted line",
+       retainedOpus.used == 100 && UsagePace.shared.staleReadingDate(relaunched, retainedOpus, now: now) == opusObservedAt
+       && UsagePace.shared.line(relaunched, retainedOpus, now: now) == nil)
+expect("The shared status-line meter stays fresh alongside the retained quota",
+       relaunched.orderedWindows.first.map { UsagePace.shared.staleReadingDate(relaunched, $0, now: now) == nil } == true)
+relaunched.windowObservations = [:]
+expect("A pre-upgrade cache uses the last API date for a retained Claude scoped quota",
+       UsagePace.shared.staleReadingDate(relaunched, retainedOpus, now: now) == api.apiDate
+       && UsagePace.shared.line(relaunched, retainedOpus, now: now) == nil)
+
+appLanguageOverride = "es"
+let importedInSpanish = codexReading("primary", reset: weeklyReset)
+appLanguageOverride = "en"
+guard let fallbackWindow = importedInSpanish.windows.first else { fatalError("Missing imported quota") }
+expect("Quota parsing stores the same title key in both languages",
+       fallbackWindow.title == primary.windows.first?.title && fallbackWindow.localizedTitle == "Weekly")
+appLanguageOverride = "es"
+expect("Quota presentation applies the current language to an existing reading",
+       fallbackWindow.localizedTitle == "Semanal" && retainedOpus.localizedTitle == "Semanal · Opus")
+appLanguageOverride = nil
+
+let legacyURL = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("usage-history.json")
+let recentDate = now.addingTimeInterval(-hour).timeIntervalSince1970
+let oldDate = now.addingTimeInterval(-13 * hour).timeIntervalSince1970
+let legacyRows = ["codex|primary": [[oldDate, 5], [recentDate, 10]], "codex|secondary": [[oldDate, 1]]]
+try JSONEncoder().encode(legacyRows).write(to: legacyURL)
+var legacy = UsageLegacyHistory(url: legacyURL, now: now)
+var codex = UsageState(provider: .codex)
+codex.acceptReading(primary, original: nil)
+legacy.ingest(codex, now: now)
+legacy.ingest(codex, now: now)
+legacy.save(now: now, force: true)
+let rollbackRows = try JSONDecoder().decode([String: [[Double]]].self, from: Data(contentsOf: legacyURL))
+expect("Rollback history keeps recent rows and new readings in the original format, with a 12-hour expiry",
+       rollbackRows == ["codex|primary": [[recentDate, 10], [now.timeIntervalSince1970, 20]]])
 
 print("\(passed) PASS, \(failed) FAIL")
 exit(failed == 0 ? 0 : 1)

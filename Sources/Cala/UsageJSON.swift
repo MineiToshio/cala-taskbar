@@ -65,10 +65,10 @@ enum UsageJSON {
                 switch kind {
                 case "session":
                     id = kind
-                    title = tx("5-hour session", "Sesión de 5 horas")
+                    title = "5-hour session"
                 case "weekly_all":
                     id = kind
-                    title = tx("Weekly · all models", "Semanal · todos los modelos")
+                    title = "Weekly · all models"
                 case "weekly_scoped":
                     let model = (limit["scope"] as? [String: Any])?["model"] as? [String: Any]
                     let name = scopeValue(model?["display_name"])
@@ -79,7 +79,7 @@ enum UsageJSON {
                     } else {
                         id = UsageWindow.unidentifiedClaudeScope
                     }
-                    title = tx("Weekly · ", "Semanal · ") + (name ?? tx("model", "modelo"))
+                    title = "Weekly · " + (name ?? "model")
                 default: continue
                 }
                 quota.windows.append(capture(limit, id: id, duration: kind == "session" ? 300 : 10080,
@@ -87,7 +87,8 @@ enum UsageJSON {
                 if let w = window(id, title, limit["percent"], limit["resets_at"]), seen.insert(id).inserted { windows.append(w) }
             }
         } else {
-            for (key, title) in [("five_hour", tx("5-hour session", "Sesión de 5 horas")), ("seven_day", tx("Weekly · all models", "Semanal · todos los modelos")), ("seven_day_opus", tx("Weekly · ", "Semanal · ") + "Opus"), ("seven_day_sonnet", tx("Weekly · ", "Semanal · ") + "Sonnet")] {
+            for (key, title) in [("five_hour", "5-hour session"), ("seven_day", "Weekly · all models"),
+                                 ("seven_day_opus", "Weekly · Opus"), ("seven_day_sonnet", "Weekly · Sonnet")] {
                 guard let d = obj[key] as? [String: Any] else { continue }
                 let used = d[local ? "used_percentage" : "utilization"]
                 if !d.isEmpty {
@@ -129,7 +130,7 @@ enum UsageJSON {
                                          used: used, reset: capturedReset, received: date, calculated: calculated))
             guard let duration, duration > 0 else { continue }
             let minutes = format == "http" ? duration / 60 : duration
-            let title = minutes == 300 ? tx("5-hour session", "Sesión de 5 horas") : (minutes == 10080 ? tx("Weekly", "Semanal") : String(format: "%g h", minutes / 60))
+            let title = minutes == 300 ? "5-hour session" : (minutes == 10080 ? "Weekly" : String(format: "%g h", minutes / 60))
             if let w = window(key, title, used, reset, durationMinutes: minutes) { windows.append(w) }
         }
         return UsageReading(windows: windows, plan: obj[format == "rpc" ? "planType" : "plan_type"] as? String,
@@ -147,5 +148,34 @@ enum UsageJSON {
         return (codex(limits, at: time, format: "local"),
                 scopeValue(limits["account_id"] ?? payload["account_id"]),
                 scopeValue(limits["user_id"] ?? limits["subject"] ?? payload["user_id"]))
+    }
+}
+
+extension UsageWindow {
+    // Older display caches contain titles in the language active when they were written.
+    var titleKey: String {
+        switch title {
+        case "Sesión de 5 horas": return "5-hour session"
+        case "Semanal": return "Weekly"
+        case "Semanal · todos los modelos": return "Weekly · all models"
+        case "Semanal · modelo": return "Weekly · model"
+        default:
+            let prefix = "Semanal · "
+            if title.hasPrefix(prefix) { return "Weekly · " + title.dropFirst(prefix.count) }
+            return title
+        }
+    }
+
+    var localizedTitle: String {
+        let key = titleKey
+        switch key {
+        case "5-hour session": return tx(key, "Sesión de 5 horas")
+        case "Weekly": return tx(key, "Semanal")
+        case "Weekly · all models": return tx(key, "Semanal · todos los modelos")
+        case "Weekly · model": return tx(key, "Semanal · modelo")
+        default:
+            let prefix = "Weekly · "
+            return key.hasPrefix(prefix) ? tx(prefix, "Semanal · ") + key.dropFirst(prefix.count) : key
+        }
     }
 }

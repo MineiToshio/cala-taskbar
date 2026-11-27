@@ -622,7 +622,7 @@ struct UsagePane: View {
         .onAppear { UsageService.shared.refresh() }
     }
     private func age(_ date: Date?, now: Date) -> String {
-        guard let date else { return tx("Not updated yet", "Aún sin actualizar") }
+        guard let date, date != .distantPast else { return tx("Not updated yet", "Aún sin actualizar") }
         let seconds = max(0, Int(now.timeIntervalSince(date)))
         if seconds < 5 { return tx("Updated just now", "Actualizado ahora mismo") }
         if seconds < 60 { return tx("Updated \(seconds) s ago", "Actualizado hace \(seconds) s") }
@@ -660,7 +660,7 @@ struct UsagePane: View {
                 let staleDate = UsagePace.shared.staleReadingDate(state, window, now: now)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline) {
-                        Text(window.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text(window.localizedTitle).font(.system(size: 12, weight: .medium)).lineLimit(1)
                         Spacer(minLength: 4)
                         HStack(alignment: .firstTextBaseline, spacing: 3) {
                             Text("\(remaining)%").font(.system(size: 23, weight: .semibold))
