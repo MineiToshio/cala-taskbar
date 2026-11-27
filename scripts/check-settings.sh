@@ -34,7 +34,7 @@ other_ui = {
 internal = {
     "ModuleRegistry.swift": "modulesChosen",
     "TrayLayout.swift": "diskEnabled monitorEnabled",
-    "DockControl.swift": "dockBackupSaved dockOverridePending dockBackupAutohide dockBackupDelay",
+    "DockControl.swift": "dockBackupSaved dockOverridePending dockBackupAutohide dockBackupDelay dockBackupNoBouncingSaved dockBackupNoBouncing",
     "MenuBarControl.swift": "menuBarBackupSaved menuBarBackupOption menuBarBackupHide menuBarBackupFullscreen menuBarIconBackupV2",
 }
 
@@ -60,8 +60,8 @@ hidden = keys_in(internal)
 all_keys = direct | external | hidden
 coding_block = (root / "Config.swift").read_text().split("enum CodingKeys", 1)[1].split("}", 1)[0]
 serialized = set(re.findall(r"\b\w+\b", coding_block.split("{", 1)[1])) - {"case"}
-if (len(direct), len(external), len(hidden), len(all_keys)) != (44, 3, 12, 59):
-    fail("expected 44 Settings controls, 3 controls elsewhere, and 12 internal keys")
+if (len(direct), len(external), len(hidden), len(all_keys)) != (44, 3, 14, 61):
+    fail("expected 44 Settings controls, 3 controls elsewhere, and 14 internal keys")
 if all_keys != serialized:
     fail(f"CodingKeys differ from audited keys: {sorted(all_keys ^ serialized)}")
 
@@ -78,7 +78,7 @@ for file in settings:
         if re.search(rf"\bconfig\.{key}\b", source):
             fail(f"{file} directly references {key}, which belongs outside Settings")
 
-print("PASS settings audit: 59/59 keys (44 Settings, 3 other UI, 12 internal)")
+print("PASS settings audit: 61/61 keys (44 Settings, 3 other UI, 14 internal)")
 PY
 
 out=$(mktemp -d)

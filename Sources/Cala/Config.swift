@@ -70,6 +70,10 @@ struct Config: Codable, Equatable {
     var dockOverridePending: Bool?
     var dockBackupAutohide: Bool?
     var dockBackupDelay: Double?
+    /// Whether the user's original Dock `no-bouncing` was recorded (absent in backups from before Cala wrote it).
+    var dockBackupNoBouncingSaved = false
+    /// The user's original `no-bouncing`; nil means the key was absent.
+    var dockBackupNoBouncing: Bool?
     var usageEnabled = true
     var usageClaudeEnabled = true
     var usageCodexEnabled = true
@@ -106,7 +110,7 @@ struct Config: Codable, Equatable {
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, monitorBarMetric, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
-        case dockOverridePending
+        case dockOverridePending, dockBackupNoBouncingSaved, dockBackupNoBouncing
         case crashReports, relaunchOnCrash, updateChecks, updateAutoInstall, restartAdvice, menuBarHiddenIcons, menuBarIconBackupV2, hideMenuBar, restoreMenuBarOnQuit, menuBarBackupSaved, menuBarBackupOption, menuBarBackupHide, menuBarBackupFullscreen
         case usageEnabled, usageClaudeEnabled, usageCodexEnabled, usageClaudeConfigDir, usageCodexHome, usageClaudeStatusLine
         case usageAlertsEnabled, usageAlertThreshold
@@ -171,6 +175,8 @@ extension Config {
         menuBarBackupFullscreen = field(Bool.self, .menuBarBackupFullscreen)
         dockBackupAutohide = field(Bool.self, .dockBackupAutohide)
         dockBackupDelay = field(Double.self, .dockBackupDelay)
+        dockBackupNoBouncingSaved = field(Bool.self, .dockBackupNoBouncingSaved) ?? dockBackupNoBouncingSaved
+        dockBackupNoBouncing = field(Bool.self, .dockBackupNoBouncing)
         usageEnabled = field(Bool.self, .usageEnabled) ?? usageEnabled
         usageClaudeEnabled = field(Bool.self, .usageClaudeEnabled) ?? usageClaudeEnabled
         usageCodexEnabled = field(Bool.self, .usageCodexEnabled) ?? usageCodexEnabled
@@ -256,12 +262,15 @@ final class ConfigStore: ObservableObject {
         }
     }
 
-    private func save() {
-        guard canSave else { return }
+    /// Writes config.json. False when saving is disabled or the write failed: callers about to change system
+    /// settings (DockControl) check it so a backup is never lost.
+    @discardableResult
+    func save() -> Bool {
+        guard canSave else { return false }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        do { try enc.encode(config).write(to: url, options: .atomic) }
-        catch { log("config: save failed: \(error)") }
+        do { try enc.encode(config).write(to: url, options: .atomic); return true }
+        catch { log("config: save failed: \(error)"); return false }
     }
 
     /// Uninstall: stop writing config.json (its folder is about to be removed).

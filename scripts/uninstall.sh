@@ -14,12 +14,20 @@ pkill -9 -x Cala 2>/dev/null
 # Dock and menu bar: put back what Cala saved before hiding them (its config.json keeps the originals).
 CONFIG="$SUPPORT/Cala/config.json"
 get() { /usr/bin/plutil -extract "$1" raw -o - "$CONFIG" 2>/dev/null; }
+restart_dock=0
+# no-bouncing (so the hidden Dock never opened for an app asking for attention): back only if Cala's value is still there.
+if [[ -f "$CONFIG" && "$(get dockBackupNoBouncingSaved)" == "true" && "$(defaults read com.apple.dock no-bouncing 2>/dev/null)" == "1" ]]; then
+  if [[ -n "$(get dockBackupNoBouncing)" ]]; then defaults write com.apple.dock no-bouncing -bool "$(get dockBackupNoBouncing)"; else defaults delete com.apple.dock no-bouncing 2>/dev/null; fi
+  restart_dock=1
+fi
 if [[ -f "$CONFIG" && "$(get hideNativeDock)" == "true" ]]; then
   if [[ -n "$(get dockBackupAutohide)" ]]; then defaults write com.apple.dock autohide -bool "$(get dockBackupAutohide)"; else defaults delete com.apple.dock autohide 2>/dev/null; fi
   if [[ -n "$(get dockBackupDelay)" ]]; then defaults write com.apple.dock autohide-delay -float "$(get dockBackupDelay)"; else defaults delete com.apple.dock autohide-delay 2>/dev/null; fi
-  killall Dock 2>/dev/null
+  restart_dock=1
   echo "Dock restaurado"
 fi
+# The Dock only picks these up (and bouncing only comes back) after a restart: once, after every write.
+(( restart_dock )) && killall Dock 2>/dev/null
 if [[ -f "$CONFIG" && "$(get hideMenuBar)" == "true" ]]; then
   echo "Cala tenía oculta la barra de menús: vuelve a mostrarla en Ajustes del Sistema → Centro de control → Ocultar automáticamente la barra de menús."
 fi

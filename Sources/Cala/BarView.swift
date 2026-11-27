@@ -24,6 +24,7 @@ struct BarView: View {
     @ObservedObject var model: TaskbarModel
     @ObservedObject var store: ConfigStore
     @ObservedObject private var updates = UpdateService.shared
+    @ObservedObject private var attention = AppAttention.shared
     var screenKey = ""
     var onFrames: ([String: CGRect]) -> Void
 
@@ -40,7 +41,8 @@ struct BarView: View {
                            active: item.pid != nil && item.pid == model.frontPID,
                            badge: model.badge(for: item),
                            windowless: item.pid.map { model.windowless.contains($0) } ?? false,
-                           launching: model.launching.contains(item.id))
+                           launching: model.launching.contains(item.id),
+                           attention: item.pid.map { attention.pids.contains($0) } ?? false)
                     // VoiceOver: the bar's clicks are handled by an event monitor, so give each icon its own action.
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(item.name)
@@ -114,16 +116,24 @@ struct IconButton: View {
     var badge: String? = nil
     var windowless = false
     var launching = false
+    var attention = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let running = item.pid != nil
         ZStack(alignment: .bottom) {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.primary.opacity(active ? 0.14 : (hovering ? 0.08 : 0)))
+            if attention && reduceMotion {
+                // Reduce Motion: a steady accent ring instead of the bounce.
+                RoundedRectangle(cornerRadius: 6).fill(accent.opacity(0.16))
+                RoundedRectangle(cornerRadius: 6).strokeBorder(accent, lineWidth: 1.5)
+            }
             Image(nsImage: item.icon)
                 .resizable().interpolation(.high)
                 .frame(width: size, height: size)
                 .modifier(LaunchPulse(active: launching))
+                .modifier(AttentionBounce(active: attention && !reduceMotion))
                 .frame(maxHeight: .infinity)
             if running && windowless {
                 Circle().fill(Color.secondary.opacity(0.7)).frame(width: 4, height: 4).padding(.bottom, 3)
@@ -139,6 +149,28 @@ struct IconButton: View {
         }
         .frame(width: size + 16)
         .padding(.vertical, 3)
+    }
+}
+
+/// The app asks for attention (the native Dock would bounce it): the icon hops while the request lasts.
+/// Always applied (driven by `active`) so turning it on or off never changes the icon's view identity.
+struct AttentionBounce: ViewModifier {
+    let active: Bool
+    @State private var up = false
+
+    func body(content: Content) -> some View {
+        content
+            .offset(y: up ? -5 : 0)
+            .onAppear { if active { start() } }
+            .onChange(of: active) { _, on in on ? start() : stop() }
+    }
+
+    private func start() {
+        withAnimation(.easeOut(duration: 0.24).repeatForever(autoreverses: true)) { up = true }
+    }
+
+    private func stop() {
+        withAnimation(.easeIn(duration: 0.15)) { up = false }
     }
 }
 

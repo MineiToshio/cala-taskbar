@@ -25,7 +25,10 @@ final class Bar {
     let panel: BarPanel
     var frames: [String: CGRect] = [:]
     var hidden = false
-    var lastInside = Date()
+    /// systemUptime of the last moment the pointer was on (or revealing) this bar.
+    var lastInside = ProcessInfo.processInfo.systemUptime
+    /// Reveal / quick-hide state for the bottom edge (EdgeIntent).
+    var edge = EdgeIntent.State()
 
     init(screen: NSScreen, primary: Bool, model: TaskbarModel, store: ConfigStore) {
         self.screen = screen
@@ -91,6 +94,12 @@ final class BarController {
     private var configObserver: AnyCancellable?
     private var screenObserver: NSObjectProtocol?
     private var monitors: [Any] = []
+    /// Mouse-moved monitors feeding EdgeIntent's push detection; only installed while auto-hide is on.
+    private var moveMonitors: [Any] = []
+    /// NSEvent.timestamp (systemUptime) of the last mouse press anywhere: a click at the edge never reveals.
+    private var lastPressAt: TimeInterval?
+    private var lastTick = ProcessInfo.processInfo.systemUptime
+    static let edgeConfig = EdgeIntent.Config()
     private var timer: Timer?
     private var screenUpdate: DispatchWorkItem?
     private var dragCleanup: DispatchWorkItem?
@@ -103,6 +112,8 @@ final class BarController {
     private var windowsInFlight = false
     private var badgesInFlight = false
     private var failedResizeIDs = Set<CGWindowID>()
+    /// Attention glow at the bottom edge while the bar is auto-hidden (see AttentionEdgeCue).
+    private lazy var attentionEdge = AttentionEdgeCue { [weak self] in self?.attentionEdgeTargets() ?? [] }
 
     init(store: ConfigStore, tray: TrayModule?) {
         self.store = store
@@ -131,8 +142,12 @@ final class BarController {
         configObserver = store.$config.receive(on: DispatchQueue.main).sink { [weak self] _ in
             guard let self, self.isRunning else { return }
             self.layoutAll(animated: false)
+            self.syncMoveMonitors()
         }
         installMonitors()
+        syncMoveMonitors()
+        AppAttention.shared.start()
+        attentionEdge.start()
         timer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in self?.tick() }
     }
 
@@ -142,8 +157,13 @@ final class BarController {
         run.cancel()
         timer?.invalidate()
         timer = nil
+        AppAttention.shared.stop()
+        attentionEdge.stop()
         monitors.forEach(NSEvent.removeMonitor)
         monitors.removeAll()
+        moveMonitors.forEach(NSEvent.removeMonitor)
+        moveMonitors.removeAll()
+        lastPressAt = nil
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         screenObserver = nil
         configObserver?.cancel()
@@ -176,9 +196,61 @@ final class BarController {
         if let token = NSEvent.addLocalMonitorForEvents(matching: mask, handler: handler) { monitors.append(token) }
     }
 
+    /// Global monitors see events sent to other apps; their tokens live in `monitors` with the local ones.
+    private func addGlobalMonitor(_ mask: NSEvent.EventTypeMask, handler: @escaping (NSEvent) -> Void) {
+        if let token = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: handler) { monitors.append(token) }
+    }
+
+    /// Stamped on arrival with systemUptime, the clock EdgeIntent's anchors use, rather than trusting e.timestamp.
+    private func notePress(_ e: NSEvent) { lastPressAt = ProcessInfo.processInfo.systemUptime }
+
+    /// Push detection needs every mouse move, not just the 30 ms polls; only while auto-hide is on.
+    private func syncMoveMonitors() {
+        let want = isRunning && store.config.autoHide
+        if want == !moveMonitors.isEmpty { return }
+        if !want {
+            moveMonitors.forEach(NSEvent.removeMonitor)
+            moveMonitors.removeAll()
+            return
+        }
+        // Auto-hide just turned on (or the bar started): every bar gets the full delay from now, not an instant hide.
+        let now = ProcessInfo.processInfo.systemUptime
+        for b in bars { b.lastInside = now }
+        if let token = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] e in self?.noteMove(e) }) {
+            moveMonitors.append(token)
+        }
+        if let token = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] e in self?.noteMove(e); return e }) {
+            moveMonitors.append(token)
+        }
+    }
+
+    /// O(bars). NSEvent.deltaY for mouse moves is the raw CGEvent kCGMouseEventDeltaY, passed through unflipped
+    /// (checked: a CGEvent with kCGMouseEventDeltaY = 5 gives NSEvent.deltaY == 5 while its location is flipped).
+    /// CG uses global display coordinates with the origin at the top-left and y growing downward, so a positive
+    /// deltaY is a move DOWN. It is the device delta, so it keeps reporting while the cursor is clamped at the edge.
+    private func noteMove(_ e: NSEvent) {
+        guard isRunning, store.config.autoHide else { return }
+        let m = NSEvent.mouseLocation
+        let buttons = NSEvent.pressedMouseButtons
+        let now = ProcessInfo.processInfo.systemUptime // one clock with the polls (see notePress)
+        for (i, b) in bars.enumerated() where b.hidden {
+            let f = b.screen.frame
+            guard m.x >= f.minX, m.x < f.maxX else { continue }
+            let screen = EdgeIntent.Rect(f)
+            let others = bars.enumerated().filter { $0.offset != i }.map { EdgeIntent.Rect($0.element.screen.frame) }
+            EdgeIntent.noteMove(&b.edge, .init(t: now, x: Double(m.x), y: Double(m.y), dx: Double(e.deltaX), dyDown: Double(e.deltaY)),
+                                screen: screen, hardEdge: EdgeIntent.isHardBottom(screen: screen, others: others, x: Double(m.x)),
+                                buttons: buttons, Self.edgeConfig)
+        }
+    }
+
     private func installMonitors() {
+        addGlobalMonitor([.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] e in self?.notePress(e) }
         addMonitor([.leftMouseDown, .rightMouseDown]) { [weak self] e in
-            guard let self, self.bars.contains(where: { $0.panel === e.window }) else { return e }
+            self?.notePress(e)
+            guard let self, let bar = self.bars.first(where: { $0.panel === e.window }) else { return e }
+            // Pressing the bar means it is in use: it gets the normal hide delay, not the quick one.
+            bar.edge.engaged = true
             // Left press on an app icon: wait for mouse-up so it can become a drag.
             if e.type == .leftMouseDown, let hi = self.hitInfo(NSEvent.mouseLocation),
                let id = hi.id, self.model.items.contains(where: { $0.id == id }) {
@@ -193,6 +265,7 @@ final class BarController {
             return nil
         }
         addMonitor(.otherMouseDown) { [weak self] e in
+            self?.notePress(e)
             guard let self, e.buttonNumber == 2 else { return e }
             let m = NSEvent.mouseLocation
             if let panel = self.preview.panel, e.window === panel { self.preview.middleClick(m); return nil }
@@ -328,24 +401,46 @@ final class BarController {
         if flyout?.isVisible == true { flyout?.refit() }
 
         if store.config.autoHide {
-            for b in bars {
-                let f = b.screen.frame
+            let now = ProcessInfo.processInfo.systemUptime
+            let dt = min(max(now - lastTick, 0), 0.1)
+            let cfg = Self.edgeConfig
+            let buttons = NSEvent.pressedMouseButtons
+            let rects = bars.map { EdgeIntent.Rect($0.screen.frame) }
+            for (i, b) in bars.enumerated() {
+                let f = rects[i]
                 let overBar = !b.hidden && barFrame(b, hidden: false).contains(m)
-                let atEdge = f.contains(m) && m.y <= f.minY + 2
                 // One rule for every tray panel: while one is open on this bar the bar stays, wherever the pointer is.
                 // Refreshing lastInside also gives the usual 0.5 s delay from the moment the panel closes.
+                // Reordering an icon on this bar also keeps it out, so it cannot slide away mid-drag.
                 let pinned = PanelPolicy.keepsBarVisible(panelOpen: flyout?.isVisible == true, panelBarIsThisBar: flyoutBar === b)
-                let near = atEdge || overBar || (overPreview && overlayBar === b)
-                if near || pinned {
-                    b.lastInside = Date()
-                    if b.hidden { b.hidden = false; layoutBar(b, animated: true) }
+                    || (dragging && pressed?.bar === b)
+                if overBar { EdgeIntent.noteInside(&b.edge, dt: dt, cfg) }
+                if pinned { b.edge.engaged = true }
+                // Touching the edge alone no longer reveals: the pointer has to rest there or push down (EdgeIntent).
+                // Drags never reveal: the bar has no drop target.
+                var others = rects
+                others.remove(at: i)
+                let wants = b.hidden && EdgeIntent.reveal(&b.edge, .init(
+                    now: now, x: Double(m.x), y: Double(m.y), screen: f,
+                    hardEdge: EdgeIntent.isHardBottom(screen: f, others: others, x: Double(m.x)),
+                    buttons: buttons, dragSession: false, dropTargets: false, lastPressAt: lastPressAt), cfg)
+                let near = overBar || (overPreview && overlayBar === b)
+                if near || pinned || wants {
+                    b.lastInside = now
+                    if b.hidden {
+                        b.hidden = false
+                        EdgeIntent.didShow(&b.edge, now: now)
+                        layoutBar(b, animated: true)
+                    }
                 } else if PanelPolicy.barShouldHide(autoHide: true, barHidden: b.hidden, pointerNearBar: near, panelPinsBar: pinned,
-                                                    secondsSinceInside: Date().timeIntervalSince(b.lastInside), delay: 0.5) {
+                                                    secondsSinceInside: now - b.lastInside, delay: EdgeIntent.hideDelay(b.edge, cfg)) {
                     b.hidden = true
+                    EdgeIntent.didHide(&b.edge)
                     if overlayBar === b { preview.hide() }
                     layoutBar(b, animated: true)
                 }
             }
+            lastTick = now
         }
 
         let hi = hitInfo(m)
@@ -618,4 +713,21 @@ final class BarController {
         return menu
     }
 
+}
+
+extension EdgeIntent.Rect {
+    init(_ r: CGRect) { self.init(minX: Double(r.minX), minY: Double(r.minY), maxX: Double(r.maxX), maxY: Double(r.maxY)) }
+}
+
+extension BarController {
+    /// One glow per hidden bar and app wanting attention, under where its icon sits. Nothing while the bar shows:
+    /// the icon itself carries the cue then.
+    func attentionEdgeTargets() -> [AttentionEdgeCue.Target] {
+        guard isRunning, store.config.autoHide else { return [] }
+        let pids = AppAttention.shared.pids
+        let items = model.items.filter { $0.pid.map(pids.contains) ?? false }
+        return bars.filter(\.hidden).flatMap { b in
+            items.map { AttentionEdgeCue.Target(screen: b.screen.frame, x: iconCenterX(b, $0.id, fallback: b.screen.frame.midX)) }
+        }
+    }
 }
