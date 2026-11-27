@@ -442,6 +442,24 @@ func suite() throws {
     _ = diskFull.run()
     check(!fm.fileExists(atPath: diskSupport.appendingPathComponent("update-rollback").path), "orphan rollback sentinel")
 
+    // The helper of our own finished update holds the install lock until its receipt is accepted.
+    let helperLock = open(diskFull.dir.appendingPathComponent(".cala-update.lock").path, O_RDONLY)
+    check(helperLock >= 0 && flock(helperLock, LOCK_EX | LOCK_NB) == 0, "hold the install lock like the helper")
+    do { _ = try UpdateJournal.sharedBlocks(target: diskFull.target); check(false, "another account's lock was not reported busy") }
+    catch InstallResult.busy { check(true, "locked install still reports busy to another account") }
+    check(try UpdateJournal.sharedBlocks(target: diskFull.target, ownTransaction: true).contains("1.1.0+2"),
+          "own transaction's lock is not another account")
+    let ownJournal = UpdateJournal(from: "1.0.0+99999", to: "1.1.0+2",
+                                   previous: diskFull.dir.appendingPathComponent(".cala-update.own/previous/Cala.app").path,
+                                   transaction: UUID())
+    check(ownJournal.producedRunning("1.1.0+2", target: diskFull.target), "journal matches the running build")
+    check(!ownJournal.producedRunning("1.0.0+99999", target: diskFull.target), "journal ignores a different running build")
+    check(!ownJournal.producedRunning("1.1.0+2", target: diskFull.dir.appendingPathComponent("Other/Cala.app")),
+          "journal ignores another bundle")
+    flock(helperLock, LOCK_UN)
+    close(helperLock)
+    check(try UpdateJournal.sharedBlocks(target: diskFull.target).contains("1.1.0+2"), "released lock reads normally")
+
     try crashCase()
 
     let before = try Fixture()

@@ -653,15 +653,27 @@ struct UpdateJournal: Codable, Equatable {
         return Set(names.filter { $0.hasPrefix(blockPrefix) }.map { String($0.dropFirst(blockPrefix.count)) })
     }
 
-    static func sharedBlocks(target: URL) throws -> Set<String> {
+    /// `ownTransaction`: the exclusive holder is the helper finishing the install this process
+    /// came from (it keeps the lock until the health receipt is accepted). Waiting for it is not
+    /// "another account", and a rollback by that helper replaces this process anyway, so the
+    /// block list is read without the lock. Installing still re-checks it under the lock.
+    static func sharedBlocks(target: URL, ownTransaction: Bool = false) throws -> Set<String> {
         let path = target.deletingLastPathComponent().appendingPathComponent(".cala-update.lock")
         let fd = open(path.path, readFlags)
         if fd < 0 && errno == ENOENT { return [] } // No installer has prepared a transaction yet.
         let lock = try descriptor(fd)
         return try withExtendedLifetime(lock) {
-            guard flock(fd, LOCK_SH | LOCK_NB) == 0 else { throw InstallResult.busy }
+            guard flock(fd, LOCK_SH | LOCK_NB) == 0 else {
+                if ownTransaction { return try sharedBlocksUnderLock(target: target) }
+                throw InstallResult.busy
+            }
             return try sharedBlocksUnderLock(target: target)
         }
+    }
+
+    /// True when this journal is the transaction that produced the running build.
+    func producedRunning(_ running: String, target other: URL) -> Bool {
+        to == running && self.target.path == other.path
     }
 
     var marker: String { "update-up-" + (transaction?.uuidString ?? to) }

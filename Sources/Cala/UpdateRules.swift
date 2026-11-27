@@ -39,6 +39,11 @@ enum UpdateRules {
         return .available(m)
     }
 
+    /// An automatic rollback notice stays visible until the next check completes. Cached or
+    /// re-evaluated offers keep it; a finished check replaces it with its real result. The
+    /// blocked build stays in the blocked set either way, so it is never offered again.
+    static func keepsRollbackNotice(completedCheck: Bool) -> Bool { !completedCheck }
+
     static func isBlocked(_ candidate: AppVersion, by blocked: Set<String>) -> Bool {
         blocked.contains { value in
             let parts = value.split(separator: "+", omittingEmptySubsequences: false)

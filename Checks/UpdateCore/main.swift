@@ -210,5 +210,19 @@ let config = UpdateFeed.configuration(version: "1.2.3", background: true)
 check(!config.httpShouldSetCookies && config.httpCookieStorage == nil && !config.allowsConstrainedNetworkAccess &&
       config.httpAdditionalHeaders?["User-Agent"] as? String == "Cala/1.2.3", "background network policy")
 check(UpdateFeed.configuration(version: "1", background: false).allowsConstrainedNetworkAccess, "foreground network policy")
+// A rollback notice survives cached re-evaluations, but a completed check replaces it. The failed build stays blocked.
+check(UpdateRules.keepsRollbackNotice(completedCheck: false), "rollback notice kept until a check completes")
+check(!UpdateRules.keepsRollbackNotice(completedCheck: true), "completed check replaces the rollback notice")
+do {
+    let failed = UpdateManifest(schema: 1, bundleId: "local.cala", version: "1.1.0", build: 2, minimumSystemVersion: "14",
+                                publishedAt: now, dmg: .init(url: URL(string: "https://github.com/MineiToshio/cala-taskbar/releases/download/v1.1.0/Cala.dmg")!,
+                                                             size: 10, sha256: String(repeating: "a", count: 64)),
+                                app: .init(unpackedSize: 20, keychainHelperSHA256: String(repeating: "b", count: 64)),
+                                notes: ["en": "x"], notesURL: nil)
+    let running = AppVersion(version: "1.0.0", build: "99999")!
+    let os = ProcessInfo.processInfo.operatingSystemVersion
+    check(UpdateRules.evaluate(failed, running: running, bundleId: "local.cala", os: os, highestSeen: nil, skipped: nil,
+                               blocked: ["1.1.0+2"], testURLs: false) == .upToDate, "blocked build stays up to date after the rollback is replaced")
+}
 print("PASS \(count) update core checks")
 

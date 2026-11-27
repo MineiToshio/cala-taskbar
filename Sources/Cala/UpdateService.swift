@@ -186,7 +186,7 @@ final class UpdateService: ObservableObject {
             }
             let cached = saved.envelope.flatMap { try? UpdateSignature.verify(feed: $0, publicKeys: site.keys).manifest }
             if cached == nil { saved.envelope = nil }
-            let shared = try? UpdateJournal.sharedBlocks(target: site.target)
+            let shared = Self.readShared(site)
             let loaded = saved
             DispatchQueue.main.async {
                 guard self.store != nil else { return }
@@ -280,11 +280,11 @@ final class UpdateService: ObservableObject {
         guard site.isEnabled, installPath != .unsupported, activity == nil else { return }
         // A second account can roll back after we cached or displayed this offer.
         if (offer != nil || sharedBlocks == nil), Date() >= nextBlockRefresh {
-            nextBlockRefresh = Date().addingTimeInterval(15)
+            nextBlockRefresh = Date().addingTimeInterval(sharedBlocks == nil ? 2 : 15)
             let envelope = saved.envelope
             let retryCached = sharedBlocks == nil
             work.async {
-                let blocks = try? UpdateJournal.sharedBlocks(target: site.target)
+                let blocks = Self.readShared(site)
                 let cached = retryCached && blocks != nil ? envelope.flatMap { try? UpdateSignature.verify(feed: $0, publicKeys: site.keys).manifest } : nil
                 DispatchQueue.main.async {
                     guard self.store != nil, self.activity == nil, !self.pendingRestart,
@@ -354,7 +354,7 @@ final class UpdateService: ObservableObject {
                     let manifest = try? UpdateSignature.verify(feed: payload, publicKeys: site.keys).manifest
                     return (payload, manifest)
                 }
-                let shared = try? UpdateJournal.sharedBlocks(target: site.target)
+                let shared = Self.readShared(site)
                 DispatchQueue.main.async {
                     self?.sharedBlocks = shared
                     self?.finishCheck(verified)
@@ -391,11 +391,12 @@ final class UpdateService: ObservableObject {
             saved.failures = 0
             if let candidate = Build(manifest).parsed, let highest = saved.highestSeen?.parsed, candidate < highest {
                 // A replay doesn't replace a newer signed offer already on this Mac.
-                if let offer { apply(site.evaluate(offer, saved: saved, sharedBlocks: sharedBlocks), manifest: offer, checked: now) }
-                else { apply(evaluation, manifest: manifest, checked: now) }
+                if let offer {
+                    apply(site.evaluate(offer, saved: saved, sharedBlocks: sharedBlocks), manifest: offer, checked: now, completedCheck: true)
+                } else { apply(evaluation, manifest: manifest, checked: now, completedCheck: true) }
             } else {
                 saved.envelope = envelope
-                apply(evaluation, manifest: manifest, checked: now)
+                apply(evaluation, manifest: manifest, checked: now, completedCheck: true)
             }
         case .success, .failure(.response(.tooLarge)):
             available = nil
@@ -450,13 +451,16 @@ final class UpdateService: ObservableObject {
         }
     }
 
-    private func apply(_ evaluation: UpdateEvaluation, manifest: UpdateManifest, checked: Date, remember: Bool = true) {
+    // completedCheck: a fresh feed check just finished. Only that replaces the rollback notice.
+    private func apply(_ evaluation: UpdateEvaluation, manifest: UpdateManifest, checked: Date, remember: Bool = true,
+                       completedCheck: Bool = false) {
         let result: UpdateState
         var newOffer: UpdateManifest?
         var newIndicator: UpdateManifest?
         switch evaluation {
         case .upToDate:
-            if let previous = saved.lastResult, case .rolledBack = previous { result = previous }
+            if let previous = saved.lastResult, case .rolledBack = previous,
+               UpdateRules.keepsRollbackNotice(completedCheck: completedCheck) { result = previous }
             else { result = .upToDate(checked) }
         case .available(let manifest):
             newOffer = manifest
@@ -497,7 +501,7 @@ final class UpdateService: ObservableObject {
                 DispatchQueue.main.async { self.failInstall(.failed) }
                 return
             }
-            guard let shared = try? UpdateJournal.sharedBlocks(target: site.target) else {
+            guard let shared = Self.readShared(site) else {
                 DispatchQueue.main.async { self.failInstall(.busy) }
                 return
             }
@@ -581,8 +585,11 @@ final class UpdateService: ObservableObject {
                         if let data = failure.resume { self.resume = (build, data) }
                         if let response = failure.error as? UpdateTransfer.FeedError,
                                   case .response(.tooLarge) = response {
+                            log("update: install verification failed (size)")
                             self.failInstall(.verificationFailed)
-                        } else if failure.error is InstallResult {
+                        } else if let result = failure.error as? InstallResult {
+                            if case .verificationFailed(let detail) = result { log("update: install verification failed (\(detail))") }
+                            else { log("update: download rejected (\(result))") }
                             self.failInstall(.verificationFailed)
                         } else if Self.isDiskFull(failure.error) {
                             self.failInstall(.diskFull(Int64(manifest.dmg.size)))
@@ -790,6 +797,14 @@ final class UpdateService: ObservableObject {
     private static func load() -> Saved {
         guard let data = UserDefaults.standard.data(forKey: key) else { return Saved() }
         return (try? JSONDecoder().decode(Saved.self, from: data)) ?? Saved()
+    }
+
+    // nil means another account holds the install lock. The helper of our own just-finished
+    // update also holds it until its health receipt is accepted, which is not "another account".
+    private static func readShared(_ site: Site) -> Set<String>? {
+        let own = (try? UpdateJournal.read(in: AppPaths.supportDirectory))?
+            .producedRunning(site.running.identity, target: site.target) ?? false
+        return try? UpdateJournal.sharedBlocks(target: site.target, ownTransaction: own)
     }
 
     private static func readBlocked() -> Set<String> {
