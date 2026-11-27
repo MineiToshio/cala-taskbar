@@ -120,27 +120,52 @@ enum UsageQuotaCapture {
 }
 
 /// Bounded two-pass reader for the resolved active Codex sessions directory.
+///
+/// Every rollout is streamed whole, but a cheap byte pre-filter parses only lines that can be quota events.
+/// Completeness is tracked per file, so an unreadable, oversized-event or budget-cut file only withholds its own
+/// unlabeled rows and never the rest of the archive.
 final class UsageCodexBackfill {
     struct Limits {
-        var files = 512
-        var bytes = 128 * 1_024 * 1_024
-        var fileTailBytes = 2 * 1_024 * 1_024
+        var files = 4_096
+        var bytes = 16 * 1_024 * 1_024 * 1_024
         var maxLineBytes = 256 * 1_024
-        var observations = 100_000
+        var observations = 200_000
+        /// Wall-clock budget of the first (publish early) pass.
         var elapsed: TimeInterval = 5
+        /// Wall-clock budget of the second, idle-time pass that finishes the archive.
+        var finalElapsed: TimeInterval = 60
         var slice: TimeInterval = 0.05
+        /// Idle time between slices, so a long archive never monopolizes a core.
+        var pause: TimeInterval = 0.01
+        var chunkBytes = 512 * 1_024
     }
 
     struct Candidate {
+        enum Provenance {
+            /// The event names the active account.
+            case identified
+            /// Unlabeled, and no foreign identity exists anywhere in the scanned archive (a one-account home).
+            case unlabeledSingleAccount
+            /// Unlabeled in an archive that does contain foreign identities: needs a clean scan and a live match.
+            case unlabeledStrict
+        }
+
         let reading: UsageReading
-        let identified: Bool
+        let provenance: Provenance
+        var identified: Bool { provenance == .identified }
         fileprivate let file: Int
     }
 
-    private struct Activity {
+    private struct FileScan {
+        var day: Int
         var first = Date.distantFuture
         var last = Date.distantPast
         var foreign = false
+        /// Read to the end without a read error.
+        var finished = false
+        /// An event may be hidden: a budget cut it, or an oversized line looks like a quota event.
+        var hidden = false
+        var complete: Bool { finished && !hidden }
 
         mutating func observe(_ date: Date) {
             first = min(first, date)
@@ -152,16 +177,29 @@ final class UsageCodexBackfill {
         let candidates: [Candidate]
         // Offline replay has no active account and never writes to production history.
         let replayCandidates: [Candidate]
+        /// Some file was read incompletely, or the archive was not exhausted by the final pass.
         let truncated: Bool
         let moreFiles: Bool
+        let files: Int
+        let incompleteFiles: Int
+        let incompleteDays: Int
+        /// Compressed rollouts (`.jsonl.zst`) are not readable and add no rows.
+        let compressedFiles: Int
+        let foreignSeen: Bool
+        let bytesRead: Int
+        /// Lines that passed the byte pre-filter and were JSON-parsed.
+        let parsedLines: Int
     }
 
     private struct FileCursor {
         let handle: FileHandle
         var remaining: Int
-        var skipping: Bool
+        var skipping = false
         var line = Data()
     }
+
+    private static let eventMarker: StaticString = "\"token_count\""
+    private static let limitsMarker: StaticString = "rate_limits"
 
     private let queue = DispatchQueue(label: "local.cala.usage.backfill", qos: .utility)
     private let root: URL
@@ -175,7 +213,8 @@ final class UsageCodexBackfill {
     private var exhaustedDays = Set<Int>()
     private var nextDay = 0
     private var cursor: FileCursor?
-    private var activity: [Activity] = []
+    private var files: [FileScan] = []
+    private var compressed = 0
     private var readings: [Candidate] = []
     private var meterCount = 0
     private var completedPasses = 0
@@ -183,7 +222,8 @@ final class UsageCodexBackfill {
     private var passStart = 0.0
     private var passFiles = 0
     private var passBytes = 0
-    private var truncated = false
+    private var totalBytes = 0
+    private var parsedLines = 0
 
     init(sessionsRoot: URL, now: Date, calendar: Calendar, account: QuotaAccount?, limits: Limits = Limits(),
          cancelled: @escaping () -> Bool = { false }) {
@@ -216,17 +256,22 @@ final class UsageCodexBackfill {
 
     private func scanSlice(_ finish: @escaping (Pass) -> Void) {
         let end = ProcessInfo.processInfo.systemUptime + limits.slice
+        let budget = completedPasses == 0 ? limits.elapsed : limits.finalElapsed
         while ProcessInfo.processInfo.systemUptime < end {
             if cancelled() { close(); days.removeAll(); readings.removeAll(); active = false; return }
             let overBudget = passBytes >= limits.bytes || meterCount >= limits.observations
-                || ProcessInfo.processInfo.systemUptime - passStart >= limits.elapsed
+                || ProcessInfo.processInfo.systemUptime - passStart >= budget
             let more = exhaustedDays.count < paths.count || cursor != nil
             if overBudget || (cursor == nil && (passFiles >= limits.files || !more)) {
-                truncated = truncated || (more && (completedPasses == 1 || meterCount >= limits.observations))
                 active = false
                 completedPasses += 1
-                let pass = Pass(candidates: eligibleReadings(complete: !more && !truncated),
-                                replayCandidates: readings, truncated: truncated, moreFiles: more)
+                let incomplete = files.filter { !$0.complete }
+                let pass = Pass(candidates: eligibleReadings(more: more), replayCandidates: readings,
+                                truncated: !incomplete.isEmpty || (more && completedPasses == 2),
+                                moreFiles: more, files: files.count, incompleteFiles: incomplete.count,
+                                incompleteDays: Set(incomplete.map(\.day)).count, compressedFiles: compressed,
+                                foreignSeen: files.contains(where: \.foreign), bytesRead: totalBytes,
+                                parsedLines: parsedLines)
                 if completedPasses == 2 || !more { close(); days.removeAll(); readings.removeAll() }
                 finish(pass)
                 return
@@ -234,7 +279,7 @@ final class UsageCodexBackfill {
             if cursor != nil { readChunk() }
             else { searchDay() }
         }
-        queue.async { self.scanSlice(finish) }
+        queue.asyncAfter(deadline: .now() + limits.pause) { self.scanSlice(finish) }
     }
 
     private func searchDay() {
@@ -251,92 +296,152 @@ final class UsageCodexBackfill {
         let day = nextDay
         nextDay = (nextDay + 1) % paths.count
         if let enumerator = days[day], let file = enumerator.nextObject() as? URL {
-            guard file.lastPathComponent.hasPrefix("rollout-"), file.pathExtension == "jsonl",
-                  let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
-                  values.isRegularFile == true, values.isSymbolicLink != true else { return }
+            let name = file.lastPathComponent
+            guard name.hasPrefix("rollout-") else { return }
+            if file.pathExtension == "zst" { compressed += 1; return }
+            guard file.pathExtension == "jsonl" else { return }
             passFiles += 1
-            open(file)
+            guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true, values.isSymbolicLink != true else {
+                files.append(FileScan(day: day))
+                return
+            }
+            open(file, day: day)
         } else {
             days[day] = nil
             exhaustedDays.insert(day)
         }
     }
 
-    private func open(_ url: URL) {
-        activity.append(Activity())
-        guard let handle = try? FileHandle(forReadingFrom: url) else { truncated = true; return }
+    private func open(_ url: URL, day: Int) {
+        files.append(FileScan(day: day))
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
         do {
             let size = try handle.seekToEnd()
-            let tail = UInt64(max(1, limits.fileTailBytes))
-            // Reserve one byte of the tail budget to determine whether the first line is complete.
-            let start = size > tail ? size - tail + 1 : 0
-            try handle.seek(toOffset: start > 0 ? start - 1 : start)
-            var skipping = false
-            if start > 0 {
-                let previous = try handle.read(upToCount: 1)
-                passBytes += previous?.count ?? 0
-                skipping = previous?.first != 10
-                truncated = true
-            }
-            cursor = FileCursor(handle: handle, remaining: Int(size - start), skipping: skipping)
-        } catch { truncated = true; try? handle.close() }
+            try handle.seek(toOffset: 0)
+            cursor = FileCursor(handle: handle, remaining: Int(min(size, UInt64(Int.max))))
+            if size == 0 { finishFile() }
+        } catch { try? handle.close() }
+    }
+
+    private func finishFile() {
+        // A non-newline-terminated tail is an unfinished record, not a hidden one.
+        files[files.count - 1].finished = true
+        close()
     }
 
     private func readChunk() {
         guard var file = cursor else { return }
-        let count = min(16_384, file.remaining, limits.bytes - passBytes)
+        let count = min(limits.chunkBytes, file.remaining, limits.bytes - passBytes)
         guard count > 0, let data = try? file.handle.read(upToCount: count), !data.isEmpty else {
-            if file.remaining > 0 { truncated = true }
+            // A read error or an externally truncated file leaves the file incomplete.
             close()
             return
         }
         file.remaining -= data.count
         passBytes += data.count
-        var start = data.startIndex
-        while start < data.endIndex && meterCount < limits.observations && !cancelled() {
-            let newline = data[start...].firstIndex(of: 10)
-            let end = newline ?? data.endIndex
-            if !file.skipping {
-                if file.line.count + end - start > limits.maxLineBytes {
-                    file.skipping = true
-                    truncated = true
-                    file.line.removeAll(keepingCapacity: true)
-                } else { file.line.append(contentsOf: data[start..<end]) }
-            }
-            guard newline != nil else { break }
-            if !file.skipping { append(file.line) }
-            file.line.removeAll(keepingCapacity: true)
-            file.skipping = false
-            start = end + 1
-        }
-        if meterCount >= limits.observations && start < data.endIndex { truncated = true }
+        totalBytes += data.count
+        consume(data, file: &file)
         cursor = file
-        if file.remaining == 0 { close() } // A non-newline-terminated tail is an incomplete record.
+        if meterCount >= limits.observations && file.remaining > 0 {
+            files[files.count - 1].hidden = true
+            close()
+        } else if file.remaining == 0 { finishFile() }
     }
 
-    private func append(_ line: Data) {
-        guard let object = UsageJSON.object(line) else { return }
-        let file = activity.count - 1
-        if let date = UsageJSON.date(object["timestamp"]) { activity[file].observe(date) }
+    /// Splits a chunk into lines with `memchr`, parsing only candidates that pass the substring pre-filter.
+    private func consume(_ data: Data, file: inout FileCursor) {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            var offset = 0
+            while offset < raw.count && meterCount < limits.observations && !cancelled() {
+                let start = base + offset
+                let newline = memchr(start, 10, raw.count - offset)
+                let length = newline.map { start.distance(to: UnsafeRawPointer($0)) } ?? raw.count - offset
+                let segment = UnsafeRawBufferPointer(start: start, count: length)
+                if file.skipping {
+                    // Remainder of an oversized line.
+                } else if file.line.isEmpty && newline != nil && length <= limits.maxLineBytes {
+                    consider(segment)
+                } else if file.line.count + length > limits.maxLineBytes {
+                    file.line.append(contentsOf: segment.prefix(max(0, limits.maxLineBytes - file.line.count)))
+                    // A genuine quota event is small. An oversized line is skipped, but one that opens like an
+                    // event could hide an identity or reading, so its file stops counting as complete.
+                    file.line.withUnsafeBytes(oversized)
+                    file.line.removeAll(keepingCapacity: true)
+                    file.skipping = newline == nil
+                } else {
+                    file.line.append(contentsOf: segment)
+                    if newline != nil {
+                        file.line.withUnsafeBytes(consider)
+                        file.line.removeAll(keepingCapacity: true)
+                    }
+                }
+                if newline != nil { file.skipping = false }
+                offset += length + 1
+            }
+            // A budget, cap or cancellation stop leaves unread lines behind.
+            if offset < raw.count { files[files.count - 1].hidden = true }
+        }
+    }
+
+    private static func contains(_ bytes: UnsafeRawBufferPointer, _ marker: StaticString) -> Bool {
+        guard let base = bytes.baseAddress, bytes.count >= marker.utf8CodeUnitCount else { return false }
+        return memmem(base, bytes.count, marker.utf8Start, marker.utf8CodeUnitCount) != nil
+    }
+
+    private func isCandidate(_ bytes: UnsafeRawBufferPointer) -> Bool {
+        Self.contains(bytes, Self.eventMarker) && Self.contains(bytes, Self.limitsMarker)
+    }
+
+    private func oversized(_ bytes: UnsafeRawBufferPointer) {
+        if isCandidate(bytes) { files[files.count - 1].hidden = true }
+    }
+
+    private func consider(_ bytes: UnsafeRawBufferPointer) {
+        guard isCandidate(bytes), let base = bytes.baseAddress else { return }
+        parsedLines += 1
+        guard let object = UsageJSON.object(Data(bytes: base, count: bytes.count)) else { return }
+        append(object)
+    }
+
+    private func append(_ object: [String: Any]) {
+        let file = files.count - 1
+        if let date = UsageJSON.date(object["timestamp"]) { files[file].observe(date) }
         let ids = UsageJSON.rolloutIDs(object)
         let identity = UsageJSON.CodexRollout.identity(accounts: ids.accounts, subjects: ids.subjects, active: account)
-        if identity == .foreign { activity[file].foreign = true; return }
+        if identity == .foreign { files[file].foreign = true; return }
         guard let event = UsageJSON.codexRollout(object, ids: ids),
               event.reading.date >= now.addingTimeInterval(-UsageQuotaHistory.retention),
               event.reading.date <= now.addingTimeInterval(5) else { return }
         guard let payload = event.reading.quota, !payload.windows.isEmpty else { return }
-        guard meterCount + payload.windows.count <= limits.observations else { truncated = true; return }
+        guard meterCount + payload.windows.count <= limits.observations else { files[file].hidden = true; meterCount = limits.observations; return }
         meterCount += payload.windows.count
         var reading = event.reading
         reading.windows.removeAll()
-        readings.append(Candidate(reading: reading, identified: identity == .matching, file: file))
+        readings.append(Candidate(reading: reading, provenance: identity == .matching ? .identified : .unlabeledStrict, file: file))
     }
 
-    private func eligibleReadings(complete: Bool) -> [Candidate] {
-        // A skipped prefix, oversized line or unfinished scan can hide both an identity and its span.
-        guard complete else { return readings.filter(\.identified) }
-        let foreign = activity.filter(\.foreign)
-        guard !foreign.contains(where: { $0.first > $0.last }) else { return readings.filter(\.identified) }
+    /// Decides which rows may leave the importer.
+    ///
+    /// - Labeled rows always pass.
+    /// - With no foreign identity in the scanned archive, every unlabeled row of a completely read file passes as
+    ///   `unlabeledSingleAccount`. Other files, complete or not, cannot be poisoned by an incomplete one.
+    /// - Once any foreign identity exists, only a fully exhausted, fully read scan can keep unlabeled rows, and only
+    ///   from files and times that no foreign session overlaps.
+    private func eligibleReadings(more: Bool) -> [Candidate] {
+        let foreign = files.filter(\.foreign)
+        if foreign.isEmpty {
+            return readings.compactMap { candidate in
+                guard candidate.identified || files[candidate.file].complete else { return nil }
+                return Candidate(reading: candidate.reading,
+                                 provenance: candidate.identified ? .identified : .unlabeledSingleAccount, file: candidate.file)
+            }
+        }
+        // A skipped file, oversized event or unfinished scan can hide both an identity and its span.
+        guard !more, files.allSatisfy(\.complete), !foreign.contains(where: { $0.first > $0.last }) else {
+            return readings.filter(\.identified)
+        }
         // Sweep the foreign spans once, including endpoints shared by concurrent sessions.
         let spans = foreign.sorted { $0.first < $1.first }
         var next = 0
@@ -347,7 +452,7 @@ final class UsageCodexBackfill {
                 foreignUntil = max(foreignUntil, spans[next].last)
                 next += 1
             }
-            return candidate.identified || (!activity[candidate.file].foreign && date > foreignUntil)
+            return candidate.identified || (!files[candidate.file].foreign && date > foreignUntil)
         }
     }
 
@@ -356,7 +461,11 @@ final class UsageCodexBackfill {
         cursor = nil
     }
 
-    /// Unlabeled history stays provisional and needs a same-meter, same-cycle match with a fresh API sample.
+    /// Unlabeled history always stays provisional (it can feed the early estimate but never an alert).
+    ///
+    /// In an archive that contains no foreign identity, unlabeled rows of the same cycle as a fresh API sample must
+    /// continue it (non-decreasing within rounding); every other cycle is accepted as the one account's history.
+    /// Once any foreign identity exists, unlabeled rows need a same-meter, same-cycle match with a fresh API sample.
     static func attributed(_ candidates: [Candidate], key: QuotaImportKey, anchors: [QuotaObservation],
                            switchedAt: Date?, now: Date) -> [QuotaObservation] {
         let fresh = anchors.filter { now.timeIntervalSince($0.date) <= ($0.series.meter.durationSeconds == 18_000 ? 600 : 1_800)
@@ -371,11 +480,11 @@ final class UsageCodexBackfill {
         }
         let labeled = candidates.filter(\.identified)
         let verifiedAnchors = UsageQuotaCapture.anchorIndex(fresh + labeled.flatMap { capture($0, anchors: [:]) })
-        let observations = candidates.flatMap { candidate in
+        let observations = candidates.filter { $0.provenance != .unlabeledSingleAccount }.flatMap { candidate in
             capture(candidate, anchors: verifiedAnchors)
         }
         let grouped = Dictionary(grouping: observations, by: \.series)
-        return grouped.flatMap { series, rows -> [QuotaObservation] in
+        var result = grouped.flatMap { series, rows -> [QuotaObservation] in
             let lived = fresh.first { $0.series == series && $0.date >= (switchedAt ?? .distantPast) }
             let archivalAnchor = lived.flatMap { live in
                 rows.filter { $0.date <= live.date && $0.date >= (switchedAt ?? .distantPast)
@@ -390,5 +499,28 @@ final class UsageCodexBackfill {
                 row.attribution == .verifiedArchive || compatible
             }
         }
+
+        let single = candidates.filter { $0.provenance == .unlabeledSingleAccount }.flatMap { candidate in
+            capture(candidate, anchors: verifiedAnchors)
+        }
+        let verified = Dictionary(grouping: observations.filter { $0.attribution == .verifiedArchive }, by: \.series)
+        for (series, rows) in Dictionary(grouping: single, by: \.series) {
+            let lived = fresh.first { $0.series == series && $0.date >= (switchedAt ?? .distantPast) && $0.resetKind == .explicit }
+            for (reset, cycle) in Dictionary(grouping: rows, by: \.reset) {
+                guard let lived, lived.reset == reset else { result.append(contentsOf: cycle); continue }
+                // The live reading and the labeled rows of the cycle join the unlabeled ones in one time-ordered series.
+                let points = (cycle + (verified[series] ?? []).filter { $0.reset == reset } + [lived])
+                    .filter { $0.resetKind == .explicit }
+                    .sorted { $0.date == $1.date ? $0.used < $1.used : $0.date < $1.date }
+                var high = 0.0
+                var continuous = true
+                for point in points {
+                    if point.used < high - 1 { continuous = false; break }
+                    high = max(high, point.used)
+                }
+                if continuous { result.append(contentsOf: cycle) }
+            }
+        }
+        return result
     }
 }

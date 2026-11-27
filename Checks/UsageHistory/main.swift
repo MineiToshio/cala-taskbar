@@ -390,29 +390,165 @@ do {
     calendar.timeZone = TimeZone(identifier: utc)!
     let reader = UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendar,
                                     account: .init(account: "account", subject: "person"),
-                                    limits: .init(files: 1, fileTailBytes: 4096, maxLineBytes: 1024))
+                                    limits: .init(files: 1, maxLineBytes: 1024))
     let first = scan(reader)
     let final = scan(reader)
-    check(first.candidates.isEmpty && first.moreFiles && first.truncated, "first-pass tail and per-line bounds")
-    check(final.candidates.count == 1 && final.candidates.filter(\.identified).count == 1,
+    check(first.candidates.count == 4 && first.candidates.allSatisfy { $0.provenance == .unlabeledSingleAccount }
+          && first.moreFiles && !first.truncated && first.incompleteFiles == 0,
+          "first pass reads its whole file (oversized plain lines are skipped, not truncation)")
+    check(final.candidates.count == 5 && final.candidates.filter(\.identified).count == 1
+          && final.incompleteFiles == 0 && final.files == 2,
           "round robin continues on older day and matches both account and user")
     let anchor = observation(date(17), 5)
     let current = date(17)
-    let bounded = UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [anchor], switchedAt: nil, now: current)
-    check(bounded.map(\.attribution) == [.verifiedArchive], "truncated scan cannot establish clean files for unlabeled rows")
-    let complete = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendar,
-                                          account: .init(account: "account", subject: "person")))
-    let attributed = UsageCodexBackfill.attributed(complete.candidates, key: key, anchors: [anchor], switchedAt: nil, now: current)
+    let attributed = UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [anchor], switchedAt: nil, now: current)
     check(attributed.count == 5 && attributed.filter { $0.attribution == .provisional }.count == 4,
           "same-cycle anchor admits provisional data including a missing plan")
-    check(UsageCodexBackfill.attributed(complete.candidates, key: key, anchors: [anchor],
+    check(UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [anchor],
                                       switchedAt: date(15), now: current).map(\.attribution) == [.verifiedArchive],
           "account switch limits unlabeled provenance")
-    check(UsageCodexBackfill.attributed(complete.candidates, key: key, anchors: [], switchedAt: nil, now: current).count == 1,
-          "unlabeled archive needs fresh evidence")
+    check(UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [], switchedAt: nil, now: current)
+            .filter { $0.attribution == .provisional }.count == 3,
+          "one-account archive keeps earlier cycles without a live anchor (rows without a plan need an anchor)")
+    check(UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [observation(date(17), 2)],
+                                      switchedAt: nil, now: current).map(\.attribution) == [.verifiedArchive],
+          "an unlabeled cycle that the live reading contradicts is dropped")
+    check(UsageCodexBackfill.attributed(final.candidates, key: key,
+                                      anchors: [observation(date(17), 5, reset: reset.addingTimeInterval(7 * 86_400))],
+                                      switchedAt: nil, now: current).filter { $0.attribution == .provisional }.count == 3,
+          "a live anchor of another cycle does not gate earlier cycles")
     let imported = store("archive-order")
     imported.replaceImport(attributed.filter { $0.attribution == .provisional }, for: key, complete: true, now: current)
     check(buckets(imported).reduce(0) { $0 + $1.deltaHundredths } == 250, "out-of-order events and duplicate debit")
+}
+
+func json(_ object: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: object) }
+
+func filler(_ lines: Int, size: Int = 1_000) throws -> Data {
+    var result = Data()
+    let text = String(repeating: "x", count: size)
+    for n in 0..<lines {
+        switch n % 4 {
+        case 0: appendLine(try json(["timestamp": date(1).timeIntervalSince1970, "type": "response_item", "payload": ["text": text]]), to: &result)
+        // The marker alone, or the limits alone, is not a quota event.
+        case 1: appendLine(try json(["type": "event_msg", "payload": ["type": "token_count", "info": text]]), to: &result)
+        case 2: appendLine(try json(["type": "turn_context", "rate_limits": text]), to: &result)
+        default: appendLine(try json(["type": "event_msg", "payload": ["type": "agent_message", "message": "token_count rate_limits"]]), to: &result)
+        }
+    }
+    return result
+}
+
+func calendarUTC() -> Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: utc)!
+    return calendar
+}
+
+do {
+    // A one-account home with a long file: the whole file is read, nothing is truncated, nothing needs a tail.
+    let sessions = root.appendingPathComponent("long-sessions")
+    let day = sessions.appendingPathComponent("2026/11/06")
+    try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+    var long = Data()
+    appendLine(try rollout(date(2), 2), to: &long)
+    long.append(try filler(6_000))
+    appendLine(try rollout(date(8), 3), to: &long)
+    long.append(try filler(2_000))
+    appendLine(try rollout(date(20), 9), to: &long)
+    check(long.count > 4_000_000, "fixture is longer than the former 2 MiB tail")
+    try long.write(to: day.appendingPathComponent("rollout-long.jsonl"))
+    let pass = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(),
+                                       account: .init(account: "account", subject: "person")))
+    check(pass.candidates.map(\.reading.date) == [date(2), date(8), date(20)]
+          && pass.candidates.allSatisfy { $0.provenance == .unlabeledSingleAccount },
+          "the start of a long file is imported")
+    check(!pass.truncated && !pass.moreFiles && pass.incompleteFiles == 0 && pass.bytesRead == long.count,
+          "a normal long archive is not truncated")
+    check(pass.parsedLines == 3, "pre-filter parses only token_count lines that carry rate_limits")
+    let attributed = UsageCodexBackfill.attributed(pass.candidates, key: key, anchors: [], switchedAt: nil, now: date(21))
+    check(attributed.count == 3 && attributed.allSatisfy { $0.attribution == .provisional },
+          "unlabeled one-account history needs no live anchor and never becomes verified")
+}
+
+do {
+    // One foreign identity anywhere keeps the strict rules.
+    let sessions = root.appendingPathComponent("foreign-sessions")
+    let early = sessions.appendingPathComponent("2026/11/05")
+    let late = sessions.appendingPathComponent("2026/11/06")
+    try FileManager.default.createDirectory(at: early, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: late, withIntermediateDirectories: true)
+    var a = Data()
+    appendLine(try rollout(date(2), 2), to: &a)
+    appendLine(try rollout(date(30), 6), to: &a)
+    try a.write(to: early.appendingPathComponent("rollout-a.jsonl"))
+    var b = Data()
+    appendLine(try rollout(date(10), 90, account: "another"), to: &b)
+    appendLine(try rollout(date(12), 91, account: "another"), to: &b)
+    try b.write(to: late.appendingPathComponent("rollout-b.jsonl"))
+    let account = QuotaAccount(account: "account", subject: "person")
+    let pass = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(), account: account))
+    check(pass.foreignSeen && pass.candidates.allSatisfy { $0.provenance == .unlabeledStrict }
+          && pass.candidates.map(\.reading.date).sorted() == [date(2), date(30)],
+          "with a foreign identity only unlabeled rows outside its span survive a clean scan")
+    check(UsageCodexBackfill.attributed(pass.candidates, key: key, anchors: [], switchedAt: nil, now: date(31)).isEmpty,
+          "strict unlabeled rows need a fresh same-cycle API sample")
+    check(UsageCodexBackfill.attributed(pass.candidates, key: key, anchors: [observation(date(31), 7)],
+                                      switchedAt: nil, now: date(31)).count == 2,
+          "strict unlabeled rows keep the live match rule")
+    // A foreign file that cannot be read completely can hide its span: only labeled rows remain.
+    var oversized = try rollout(date(11), 92, account: "another")
+    oversized.append(Data(repeating: 120, count: 3_000))
+    appendLine(oversized, to: &b)
+    try b.write(to: late.appendingPathComponent("rollout-b.jsonl"))
+    let hidden = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(), account: account,
+                                         limits: .init(maxLineBytes: 1024)))
+    check(hidden.foreignSeen && hidden.incompleteFiles == 1 && hidden.candidates.isEmpty,
+          "an incomplete file in a multi-account archive withholds unlabeled rows everywhere")
+}
+
+do {
+    // Truncation is tracked per file: one incomplete file cannot poison the others.
+    let sessions = root.appendingPathComponent("per-file-sessions")
+    let first = sessions.appendingPathComponent("2026/11/05")
+    let second = sessions.appendingPathComponent("2026/11/06")
+    try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+    var damaged = Data()
+    appendLine(try rollout(date(2), 2), to: &damaged)
+    var event = try rollout(date(3), 3)
+    event.append(Data(repeating: 120, count: 4_000))   // an event-shaped line above the line cap could hide a reading
+    appendLine(event, to: &damaged)
+    appendLine(try rollout(date(4), 4), to: &damaged)
+    try damaged.write(to: first.appendingPathComponent("rollout-damaged.jsonl"))
+    var healthy = Data()
+    appendLine(try rollout(date(10), 5), to: &healthy)
+    appendLine(try rollout(date(11), 6), to: &healthy)
+    try healthy.write(to: second.appendingPathComponent("rollout-healthy.jsonl"))
+    let pass = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendarUTC(), account: nil,
+                                       limits: .init(maxLineBytes: 1024)))
+    check(pass.truncated && pass.incompleteFiles == 1 && pass.incompleteDays == 1 && !pass.foreignSeen,
+          "per-file and per-day incompleteness is reported")
+    check(pass.candidates.map(\.reading.date) == [date(10), date(11)]
+          && pass.replayCandidates.count == 4,
+          "the healthy day is imported; the incomplete file withholds its own unlabeled rows only")
+
+    // Budget cuts resume across passes and finish the file instead of poisoning it.
+    let resume = root.appendingPathComponent("resume-sessions")
+    let resumeDay = resume.appendingPathComponent("2026/11/06")
+    try FileManager.default.createDirectory(at: resumeDay, withIntermediateDirectories: true)
+    var pair = Data()
+    appendLine(try rollout(date(10), 5), to: &pair)
+    appendLine(try rollout(date(11), 6), to: &pair)
+    try pair.write(to: resumeDay.appendingPathComponent("rollout-pair.jsonl"))
+    let resumable = UsageCodexBackfill(sessionsRoot: resume, now: now, calendar: calendarUTC(), account: nil,
+                                       limits: .init(bytes: pair.count / 2 + 20, chunkBytes: 100))
+    let firstCut = scan(resumable)
+    let finished = scan(resumable)
+    check(firstCut.candidates.isEmpty && firstCut.moreFiles && firstCut.truncated && firstCut.incompleteFiles == 1,
+          "a byte budget leaves the file in progress and withholds its rows")
+    check(finished.candidates.count == 2 && finished.incompleteFiles == 0 && finished.bytesRead == pair.count,
+          "the second pass resumes where the first stopped")
 }
 
 do {

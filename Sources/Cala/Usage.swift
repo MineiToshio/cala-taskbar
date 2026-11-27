@@ -1025,7 +1025,9 @@ final class UsageService: ObservableObject {
             self.quotaHistory.replaceImport(observations, for: job.key, complete: final || !pass.moreFiles,
                                             now: now, cancelled: cancelled,
                                             updated: { [weak self] in self?.quotaFeed.send(.importUpdated) })
-            if pass.truncated { log("usage forecast: Codex history reached a backfill budget") }
+            if pass.truncated && (final || !pass.moreFiles) {
+                log("usage forecast: Codex history left \(pass.incompleteFiles) rollouts incomplete (\(pass.compressedFiles) compressed ones are not read)")
+            }
             if !final && pass.moreFiles { self.continueBackfillWhenIdle(job, login: login, run: run) }
         }
     }

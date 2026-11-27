@@ -16,14 +16,22 @@ private struct Scan {
     let candidates: Int
     let truncated: Bool
     let unsupported: Int
+    let files: Int
+    let incompleteFiles: Int
+    let incompleteDays: Int
+    let compressedFiles: Int
+    let bytes: Int
+    let seconds: Double
+    let foreignSeen: Bool
 }
 
 private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey) -> Scan {
     var limits = UsageCodexBackfill.Limits()
-    // Keep the production tail, line and observation bounds. Offline replay can read more files.
-    limits.files = 4_096
-    limits.bytes = 512 * 1_024 * 1_024
+    // Keep the production line and observation bounds. Offline replay gets longer wall-clock budgets.
     limits.elapsed = 120
+    limits.finalElapsed = 600
+    limits.pause = 0
+    let started = ProcessInfo.processInfo.systemUptime
     let importer = UsageCodexBackfill(sessionsRoot: root, now: asOf, calendar: calendar, account: nil, limits: limits)
     let done = DispatchSemaphore(value: 0)
     var pass: UsageCodexBackfill.Pass?
@@ -55,7 +63,10 @@ private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey
             return available <= asOf ? ArchiveRow(quota: quota, available: available) : nil
         }
     }
-    return Scan(rows: rows, candidates: result.replayCandidates.count, truncated: result.truncated, unsupported: unsupported)
+    return Scan(rows: rows, candidates: result.replayCandidates.count, truncated: result.truncated, unsupported: unsupported,
+                files: result.files, incompleteFiles: result.incompleteFiles, incompleteDays: result.incompleteDays,
+                compressedFiles: result.compressedFiles, bytes: result.bytesRead,
+                seconds: ProcessInfo.processInfo.systemUptime - started, foreignSeen: result.foreignSeen)
 }
 
 private enum Horizon: String, CaseIterable {
@@ -418,6 +429,13 @@ let dates = archive.rows.map(\.available)
 let dateRange = dates.min().flatMap { first in dates.max().map { "\(dateFormat.string(from: first)) to \(dateFormat.string(from: $0))" } } ?? "none"
 print("Codex walk-forward · \(calendar.timeZone.identifier) · archive dates \(dateRange)")
 print("Scan: \(archive.candidates) candidate events, \(archive.rows.count) quota rows before deduplication, \(archive.unsupported) unsupported duration rows, truncated=\(archive.truncated).")
+print(String(format: "Scan coverage: %d rollout files (%d incomplete in %d days, %d compressed .zst not read), %.1f MiB read in %.1f s, foreign identity seen=%@.",
+             archive.files, archive.incompleteFiles, archive.incompleteDays, archive.compressedFiles,
+             Double(archive.bytes) / 1_048_576, archive.seconds, archive.foreignSeen ? "yes" : "no"))
+let localDays = Set(dates.map { calendar.startOfDay(for: $0) })
+let localWeeks = Set(dates.map { weekStart($0, calendar: calendar) })
+let spanDays = (dates.min().flatMap { first in dates.max().map { Int($0.timeIntervalSince(first) / 86_400) + 1 } }) ?? 0
+print("History reach: \(localDays.count) local days with rows over a \(spanDays)-day span, \(localWeeks.count) local calendar weeks (provisional needs 3 observed weeks across 14 days, risk 4).")
 print("Unlabeled archive only, provisional attribution. Weekly origins use the first fresh local-day reading; short cycles use the first fresh reading. Production thresholds are fixed.")
 print("\(replayed.cycles) cycles, \(replayed.origins) eligible origins, \(replayed.origins - replayed.scores.count) omitted for unresolved labels, \(replayed.excludedExhausted) already exhausted at origin.")
 for reason in replayed.unresolved.keys.sorted() { print("Unresolved cycles: \(replayed.unresolved[reason]!) · \(reason)") }
