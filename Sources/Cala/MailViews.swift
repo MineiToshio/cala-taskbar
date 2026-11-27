@@ -223,7 +223,9 @@ struct MailPane: View {
         let canLoadOlder = !messages.isEmpty && service.canLoadOlder(accountID: accountID)
         let loadingOlder = visibleAccountIDs(accountID).contains { service.olderLoading.contains($0) }
         let olderFailed = visibleAccountIDs(accountID).contains { service.olderFailed.contains($0) }
-        let listViewport = max(90, availableHeight - 132)
+        // The list area keeps the height the 8-row list always had (as before 1.1.3), whatever is loaded; the rest scrolls.
+        let listViewport = min(max(90, availableHeight - 132),
+                               CGFloat(problemCount(accountID) * 42) + MailMessageList.height(MailMessageList.visibleRows))
         let listHeight = CGFloat(problemCount(accountID) * 42) + MailMessageList.height(messages.count)
             + (canLoadOlder ? MailLoadOlderRow.height : 0)
         let visibleAccounts = enabledAccounts.filter { accountID == nil || $0.id == accountID }
@@ -290,7 +292,7 @@ struct MailPane: View {
                         }
                     }
                 }
-                .frame(height: min(listViewport, listHeight))
+                .frame(height: listViewport)
             }
             switch phase {
             case .messages, .problem:
@@ -508,6 +510,8 @@ private enum MailRowAction { case toggleRead, archive, delete }
 
 private struct MailMessageList: View {
     static let spacing: CGFloat = 2
+    /// Rows that fit the list area (8 x 64 + 7 x 2 = 526 pt); more messages scroll inside it.
+    static let visibleRows = 8
     let messages: [MailMessage]
     var selection: Set<String> = []
     let accountColor: (MailMessage) -> Color?
