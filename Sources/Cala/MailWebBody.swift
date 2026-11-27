@@ -18,8 +18,9 @@ struct MailWebBody: View {
         self.timingID = timingID
         self.deliveredAt = deliveredAt
         self.onError = onError
-        // After prewarm() the rule is already compiled: render on the first pass, no spinner frame.
-        _localOnlyRule = State(initialValue: MailWebShared.cachedLocalOnly)
+        // Only the remote-images-off path uses the block rule. After prewarm() it is already compiled:
+        // render on the first pass, no spinner frame. With remote images on it stays nil.
+        _localOnlyRule = State(initialValue: loadsRemoteImages ? nil : MailWebShared.cachedLocalOnly)
     }
 
     /// Call once early (mail service start / mail panel appears) so the first message doesn't pay for
@@ -30,7 +31,7 @@ struct MailWebBody: View {
     var body: some View {
         if loadsRemoteImages || localOnlyRule != nil {
             MailWebPage(document: MailWebDocument(content: content, loadsRemoteImages: loadsRemoteImages),
-                        rule: localOnlyRule, timingID: timingID, deliveredAt: deliveredAt, onError: onError)
+                        rule: loadsRemoteImages ? nil : localOnlyRule, timingID: timingID, deliveredAt: deliveredAt, onError: onError)
         } else {
             ProgressView().controlSize(.small)
                 .accessibilityLabel(tx("Preparing message", "Preparando mensaje"))
