@@ -131,10 +131,17 @@ final class UsageCodexBackfill {
         var slice: TimeInterval = 0.05
     }
 
-    struct Candidate {
-        let reading: UsageReading
+    enum Candidate {
         // Matching is decided before batching so raw identity metadata is not retained.
-        let identified: Bool
+        case reading(UsageReading, identified: Bool)
+        case foreignAccount(Date)
+
+        init(reading: UsageReading, identified: Bool) { self = .reading(reading, identified: identified) }
+
+        var identified: Bool {
+            if case .reading(_, true) = self { return true }
+            return false
+        }
     }
 
     struct Pass {
@@ -294,9 +301,20 @@ final class UsageCodexBackfill {
     }
 
     private func append(_ line: Data) {
-        guard let event = UsageJSON.codexRollout(line), let payload = event.reading.quota, !payload.windows.isEmpty,
+        guard let event = UsageJSON.codexRollout(line),
               event.reading.date >= now.addingTimeInterval(-UsageQuotaHistory.retention),
               event.reading.date <= now.addingTimeInterval(5) else { return }
+        if let id = event.account, id != account?.account {
+            readings.append(.foreignAccount(event.reading.date))
+            meterCount += 1
+            return
+        }
+        if let subject = event.subject, let activeSubject = account?.subject, subject != activeSubject {
+            readings.append(.foreignAccount(event.reading.date))
+            meterCount += 1
+            return
+        }
+        guard let payload = event.reading.quota, !payload.windows.isEmpty else { return }
         let identified: Bool
         if let id = event.account {
             guard let account, account.matches(QuotaAccount(account: id, subject: event.subject)) else { return }
@@ -322,10 +340,26 @@ final class UsageCodexBackfill {
                            switchedAt: Date?, now: Date, realtime: Bool = false) -> [QuotaObservation] {
         let fresh = anchors.filter { now.timeIntervalSince($0.date) <= ($0.series.meter.durationSeconds == 18_000 ? 600 : 1_800)
             && $0.date <= now.addingTimeInterval(5) && $0.reset > now }
+        let latestForeign = candidates.compactMap { candidate -> Date? in
+            if case .foreignAccount(let date) = candidate, date <= now.addingTimeInterval(5) { return date }
+            return nil
+        }.max()
+        func isAfterSwitches(_ date: Date) -> Bool {
+            date >= (switchedAt ?? .distantPast) && date > (latestForeign ?? .distantPast)
+        }
+        // The active login can only own unlabeled rows after its first confirmed return.
+        let archiveReturn = latestForeign.flatMap { _ in
+            candidates.compactMap { candidate -> Date? in
+                if case .reading(let reading, true) = candidate, isAfterSwitches(reading.date) { return reading.date }
+                return nil
+            }.min()
+        }
         func capture(_ candidate: Candidate, anchors: [UsageQuotaCapture.AnchorKey: [QuotaObservation]]) -> [QuotaObservation] {
-            UsageQuotaCapture.observations(candidate.reading, provider: .codex, profile: key.profile, timeZoneID: key.timeZoneID,
-                                           source: .rollout, attribution: candidate.identified ? .verifiedArchive : .provisional,
-                                           now: now, anchors: anchors)
+            guard case .reading(let reading, let identified) = candidate,
+                  identified || isAfterSwitches(reading.date) else { return [] }
+            return UsageQuotaCapture.observations(reading, provider: .codex, profile: key.profile, timeZoneID: key.timeZoneID,
+                                                  source: .rollout, attribution: identified ? .verifiedArchive : .provisional,
+                                                  now: now, anchors: anchors)
         }
         let labeled = candidates.filter(\.identified)
         let verifiedAnchors = UsageQuotaCapture.anchorIndex(fresh + labeled.flatMap { capture($0, anchors: [:]) })
@@ -334,9 +368,10 @@ final class UsageCodexBackfill {
         }
         let grouped = Dictionary(grouping: observations, by: \.series)
         return grouped.flatMap { series, rows -> [QuotaObservation] in
-            let lived = fresh.first { $0.series == series }
+            let lived = fresh.first { $0.series == series && isAfterSwitches($0.date) }
+            let unlabeledSince = latestForeign == nil ? .distantPast : ([archiveReturn, lived?.date].compactMap { $0 }.min() ?? .distantFuture)
             let archivalAnchor = lived.flatMap { live in
-                rows.filter { (realtime || $0.date <= live.date) && $0.date >= (switchedAt ?? .distantPast)
+                rows.filter { (realtime || $0.date <= live.date) && isAfterSwitches($0.date) && $0.date >= unlabeledSince
                     && $0.reset == live.reset && $0.resetKind == .explicit }
                     .max { $0.date == $1.date ? $0.used < $1.used : $0.date < $1.date }
             }
@@ -346,7 +381,7 @@ final class UsageCodexBackfill {
                 else { compatible = archivalAnchor.used <= lived.used + 1 }
             } else { compatible = false }
             return rows.filter { row in
-                row.attribution == .verifiedArchive || (compatible && row.date >= (switchedAt ?? .distantPast))
+                row.attribution == .verifiedArchive || (compatible && isAfterSwitches(row.date) && row.date >= unlabeledSince)
             }
         }
     }

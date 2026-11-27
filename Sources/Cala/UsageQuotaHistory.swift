@@ -3,15 +3,17 @@ import CryptoKit
 import Darwin
 
 extension QuotaObservation {
+    fileprivate static let calculatedResetTolerance: TimeInterval = 2
+
     func normalized(now: Date) -> Self? {
         let seconds = series.meter.durationSeconds
         guard (1...31_536_000).contains(seconds), (0...100).contains(used),
               TimeZone(identifier: series.timeZoneID) != nil,
               UsageJSON.boundedDate(date) != nil, UsageJSON.boundedDate(reset) != nil,
               date <= now.addingTimeInterval(5), date < reset,
-              reset.timeIntervalSince(date) <= Double(seconds) + (resetKind == .calculated ? 2 : 0) else { return nil }
+              reset.timeIntervalSince(date) <= Double(seconds) + (resetKind == .calculated ? Self.calculatedResetTolerance : 0) else { return nil }
         let anchor = Date(timeIntervalSince1970: reset.timeIntervalSince1970.rounded(.down))
-        guard date < anchor, anchor.timeIntervalSince(date) <= Double(seconds) + 2 else { return nil }
+        guard date < anchor else { return nil }
         return Self(series: series, date: date, used: used, reset: anchor, source: source, resetKind: resetKind,
                     attribution: attribution, companion: companion, bindingWeekly: bindingWeekly, hardBlockUntil: hardBlockUntil)
     }
@@ -90,7 +92,7 @@ private struct QuotaCursor: Codable {
         let equivalentReset = cycle.map { anchor in
             if anchor.reset == observation.reset { return true }
             return explicitAnchor && observation.resetKind == .calculated
-                && abs(anchor.reset.timeIntervalSince(observation.reset)) <= 2
+                && abs(anchor.reset.timeIntervalSince(observation.reset)) <= QuotaObservation.calculatedResetTolerance
                 && observation.date < anchor.reset
                 && anchor.reset.timeIntervalSince(observation.date) <= Double(meter.durationSeconds)
                 && observation.used >= highWater
@@ -226,7 +228,19 @@ private struct QuotaStoredRow {
         bucket.coveredSeconds += cell.direct
         bucket.quietSeconds += cell.quiet
         bucket.flags.formUnion(cell.flags)
-        if let sample = cell.sample { bucket.latest = sample }
+        guard let sample = cell.sample else { return }
+        if sample.used == 100 && bucket.firstHit == nil { bucket.firstHit = sample.date }
+        if let prior = bucket.latest, prior.companion != .unknown, bucket.series.meter.durationSeconds == 604_800 {
+            // Preserve the first and last superseded companion samples per minute, bounding very busy archives.
+            let minute = floor(prior.date.timeIntervalSince1970 / 60)
+            let count = bucket.earlierCompanionSamples.count
+            if count >= 2, floor(bucket.earlierCompanionSamples[count - 2].date.timeIntervalSince1970 / 60) == minute {
+                bucket.earlierCompanionSamples[count - 1] = prior
+            } else {
+                bucket.earlierCompanionSamples.append(prior)
+            }
+        }
+        bucket.latest = sample
     }
 }
 
@@ -460,7 +474,9 @@ final class UsageQuotaHistory {
     }
 
     private func ingestOne(_ raw: QuotaObservation, now: Date) -> QuotaObservation? {
-        guard let observation = raw.normalized(now: now), validSeries(observation.series),
+        // Unlabeled rollouts train through the provisional import partition. They cannot interrupt live pairs.
+        guard raw.attribution != .provisional,
+              let observation = raw.normalized(now: now), validSeries(observation.series),
               valid(observation, for: observation.series, now: now),
               observation.date >= now.addingTimeInterval(-Self.retention) else { return nil }
         let series = observation.series
@@ -680,11 +696,19 @@ final class UsageQuotaHistory {
 }
 
 private extension UsageQuotaHistory {
+    struct DiskRecord<Value: Codable>: Codable {
+        let value: Value?
+
+        init(_ value: Value) { self.value = value }
+        init(from decoder: Decoder) throws { value = try? Value(from: decoder) }
+        func encode(to encoder: Encoder) throws { try value.encode(to: encoder) }
+    }
+
     struct DiskShard: Codable {
         let version: Int
-        let cycles: [QuotaCycle]
-        let rows: [DiskRow]
-        let gaps: [DiskGap]
+        let cycles: [DiskRecord<QuotaCycle>]
+        let rows: [DiskRecord<DiskRow>]
+        let gaps: [DiskRecord<DiskGap>]
     }
 
     struct DiskRow: Codable {
@@ -697,6 +721,12 @@ private extension UsageQuotaHistory {
         let flags: QuotaBucketFlags
         let imported: Bool
         let sample: QuotaBucketSample?
+        let details: Details?
+
+        struct Details: Codable {
+            let firstHit: Date?
+            let companionSamples: [QuotaBucketSample]?
+        }
 
         init(_ row: QuotaStoredRow, series: Int, cycle: Int) {
             let bucket = row.bucket
@@ -709,6 +739,9 @@ private extension UsageQuotaHistory {
             flags = bucket.flags
             imported = row.imported
             sample = bucket.latest
+            let earlier = bucket.earlierCompanionSamples
+            details = bucket.firstHit == nil && earlier.isEmpty ? nil
+                : Details(firstHit: bucket.firstHit, companionSamples: earlier.isEmpty ? nil : earlier)
         }
 
         init(from decoder: Decoder) throws {
@@ -721,7 +754,7 @@ private extension UsageQuotaHistory {
             quiet = try values.decode(Double.self)
             flags = try values.decode(QuotaBucketFlags.self)
             imported = try values.decode(Bool.self)
-            if values.isAtEnd { sample = nil; return }
+            if values.isAtEnd { sample = nil; details = nil; return }
             let date = Date(timeIntervalSince1970: start + (try values.decode(Double.self)))
             let used = try values.decode(Double.self)
             let source = try values.decode(QuotaSource.self)
@@ -731,6 +764,7 @@ private extension UsageQuotaHistory {
             let block = try values.decodeIfPresent(Date.self)
             sample = QuotaBucketSample(date: date, used: used, source: source, attribution: attribution,
                                        companion: companion, bindingWeekly: bindingWeekly, hardBlockUntil: block)
+            details = try values.decodeIfPresent(Details.self)
         }
 
         func encode(to encoder: Encoder) throws {
@@ -749,13 +783,14 @@ private extension UsageQuotaHistory {
             try values.encode(sample.source)
             try values.encode(sample.attribution)
             let block = sample.hardBlockUntil
-            if sample.companion != .unknown || sample.bindingWeekly != .unknown || block != nil {
+            if sample.companion != .unknown || sample.bindingWeekly != .unknown || block != nil || details != nil {
                 try values.encode(sample.companion == .unknown ? nil : sample.companion)
             }
-            if sample.bindingWeekly != .unknown || block != nil {
+            if sample.bindingWeekly != .unknown || block != nil || details != nil {
                 try values.encode(sample.bindingWeekly == .unknown ? nil : sample.bindingWeekly)
             }
-            if let block { try values.encode(block) }
+            if block != nil || details != nil { try values.encode(block) }
+            if let details { try values.encode(details) }
         }
     }
 
@@ -793,7 +828,8 @@ private extension UsageQuotaHistory {
                            debit: gap.deltaHundredths, source: gap.source, attribution: gap.attribution,
                            localized: gap.localized, canLocalizeToHour: gap.canLocalizeToHour, imported: record.imported)
         }
-        return try JSONEncoder().encode(DiskShard(version: Self.version, cycles: cycles, rows: rows, gaps: gaps))
+        return try JSONEncoder().encode(DiskShard(version: Self.version, cycles: cycles.map(DiskRecord.init),
+                                                  rows: rows.map(DiskRecord.init), gaps: gaps.map(DiskRecord.init)))
     }
 
     func boundedRead(_ url: URL, maximum: Int) -> Data? {
@@ -833,52 +869,65 @@ private extension UsageQuotaHistory {
     func validCycle(_ cycle: QuotaCycle, for series: QuotaSeries) -> Bool {
         UsageJSON.boundedDate(cycle.reset) != nil && UsageJSON.boundedDate(cycle.segmentStart) != nil
             && cycle.segmentStart < cycle.reset
-            && cycle.reset.timeIntervalSince(cycle.segmentStart) <= Double(series.meter.durationSeconds)
+            && cycle.reset.timeIntervalSince(cycle.segmentStart) <= Double(series.meter.durationSeconds) + QuotaObservation.calculatedResetTolerance
     }
 
-    func decode(_ data: Data, week: Int, series: [Int: QuotaSeries]) -> QuotaShard? {
+    func decode(_ data: Data, week: Int, series: [Int: QuotaSeries]) -> (shard: QuotaShard, skippedRows: Bool)? {
         guard let disk = try? JSONDecoder().decode(DiskShard.self, from: data), disk.version == Self.version,
               disk.rows.count + disk.gaps.count <= limits.rows, disk.cycles.count <= disk.rows.count + disk.gaps.count else { return nil }
         var shard = QuotaShard()
-        for row in disk.rows {
+        for record in disk.rows {
+            guard let row = record.value else { continue }
             let start = Date(timeIntervalSince1970: row.start)
             guard let identity = series[row.series], disk.cycles.indices.contains(row.cycle),
+                  let cycle = disk.cycles[row.cycle].value,
                   UsageJSON.boundedDate(start) != nil, Self.weekID(start) == week,
                   (0...10_000).contains(row.debit), row.direct >= 0, row.quiet >= 0,
                   row.direct + row.quiet <= Double(identity.meter.bucketSeconds) + 0.000_001,
-                  (0..<64).contains(row.flags.rawValue) else { return nil }
-            let cycle = disk.cycles[row.cycle]
+                  (0..<64).contains(row.flags.rawValue) else { continue }
             let bucket = QuotaCalendarBuckets.interval(containing: start, timeZoneID: identity.timeZoneID,
                                                        seconds: identity.meter.bucketSeconds)
             let end = bucket.end
             guard start == bucket.start, row.direct + row.quiet <= bucket.duration + 0.000_001,
-                  validCycle(cycle, for: identity), start < cycle.reset, end > cycle.segmentStart else { return nil }
-            if let sample = row.sample {
-                let usable = (0...100).contains(sample.used) && start <= sample.date && sample.date < end
+                  validCycle(cycle, for: identity), start < cycle.reset, end > cycle.segmentStart else { continue }
+            func validSample(_ sample: QuotaBucketSample) -> Bool {
+                (0...100).contains(sample.used) && start <= sample.date && sample.date < end
                     && sample.date >= cycle.segmentStart && sample.date < cycle.reset && validCap(sample.companion)
                     && validCap(sample.bindingWeekly)
                     && (sample.hardBlockUntil == nil || UsageJSON.boundedDate(sample.hardBlockUntil) != nil)
-                guard usable else { return nil }
+            }
+            if let sample = row.sample {
+                guard validSample(sample) else { continue }
+            }
+            let earlier = row.details?.companionSamples ?? []
+            guard earlier.count <= 120, earlier.allSatisfy({ validSample($0) && $0.companion != .unknown }),
+                  zip(earlier, earlier.dropFirst()).allSatisfy({ $0.date < $1.date }),
+                  earlier.last.map({ $0.date < (row.sample?.date ?? .distantPast) }) ?? true else { continue }
+            if let hit = row.details?.firstHit {
+                guard row.flags.contains(.censored), hit >= max(start, cycle.segmentStart), hit < min(end, cycle.reset),
+                      hit <= (row.sample?.date ?? .distantPast) else { continue }
             }
             let key = QuotaRowKey(series: identity, cycle: cycle, start: start)
-            guard shard.rows[key] == nil else { return nil }
+            guard shard.rows[key] == nil else { continue }
             var stored = QuotaStoredRow(key, imported: row.imported)
             stored.apply(.init(key: key, debit: row.debit, direct: row.direct, quiet: row.quiet,
                                flags: row.flags, sample: row.sample))
+            if let hit = row.details?.firstHit { stored.bucket.firstHit = hit }
+            stored.bucket.earlierCompanionSamples = earlier
             shard.rows[key] = stored
         }
-        for gap in disk.gaps {
-            guard let identity = series[gap.series], disk.cycles.indices.contains(gap.cycle),
+        for record in disk.gaps {
+            guard let gap = record.value, let identity = series[gap.series], disk.cycles.indices.contains(gap.cycle),
+                  let cycle = disk.cycles[gap.cycle].value,
                   UsageJSON.boundedDate(gap.start) != nil, UsageJSON.boundedDate(gap.end) != nil,
-                  Self.weekID(gap.start) == week, gap.start < gap.end, (0...10_000).contains(gap.debit) else { return nil }
-            let cycle = disk.cycles[gap.cycle]
-            guard validCycle(cycle, for: identity), gap.start >= cycle.segmentStart, gap.end < cycle.reset else { return nil }
+                  Self.weekID(gap.start) == week, gap.start < gap.end, (0...10_000).contains(gap.debit),
+                  validCycle(cycle, for: identity), gap.start >= cycle.segmentStart, gap.end < cycle.reset else { continue }
             shard.gaps.append(.init(gap: QuotaGap(series: identity, cycle: cycle, start: gap.start, end: gap.end,
                                                 deltaHundredths: gap.debit, source: gap.source,
                                                 attribution: gap.attribution, localized: gap.localized,
                                                 canLocalizeToHour: gap.canLocalizeToHour), imported: gap.imported))
         }
-        return shard
+        return (shard, shard.count < disk.rows.count + disk.gaps.count)
     }
 
     func load() {
@@ -907,17 +956,24 @@ private extension UsageQuotaHistory {
             if let anchor = track.apiAnchor, !valid(anchor, for: track.series, now: now) || anchor.source != .api {
                 track.apiAnchor = nil
             }
+            if track.cursor.previous?.attribution == .provisional { track.cursor = QuotaCursor() }
+            track.tail.removeAll { $0.attribution == .provisional }
             tracks[track.series] = track
         }
         var bytesLeft = limits.bytes - data.count
         for (week, file) in saved.files.sorted(by: { $0.key > $1.key }) {
             if file.bytes > 0, file.bytes <= bytesLeft, safeName(file.name),
                let bytes = boundedRead(directory.appendingPathComponent(file.name), maximum: file.bytes),
-               bytes.count == file.bytes, let shard = decode(bytes, week: week, series: saved.series),
-               shard.count <= limits.rows - totalCount {
-                shards[week] = shard
-                totalCount += shard.count
+               bytes.count == file.bytes, let decoded = decode(bytes, week: week, series: saved.series),
+               decoded.shard.count <= limits.rows - totalCount {
+                shards[week] = decoded.shard
+                totalCount += decoded.shard.count
                 bytesLeft -= bytes.count
+                if decoded.skippedRows {
+                    dirty.insert(week)
+                    scheduleFlush()
+                    report("usage forecast: skipped damaged history rows")
+                }
             } else {
                 dirty.insert(week)
                 manifest.imports.removeAll()

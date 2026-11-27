@@ -121,6 +121,84 @@ do {
 }
 
 do {
+    let history = store("stored-reset-tolerance")
+    let short = QuotaSeries(provider: .codex, profile: profile, plan: "plus", meter: session, timeZoneID: utc)
+    let corrupt = QuotaSeries(provider: .codex, profile: profile, plan: "max", meter: weekly, timeZoneID: utc)
+    let weeklyReset = t.addingTimeInterval(Double(weekly.durationSeconds + 1))
+    let shortReset = t.addingTimeInterval(Double(session.durationSeconds + 2))
+    history.ingest([observation(t, 2, reset: weeklyReset, kind: .calculated),
+                    observation(date(10), 3, reset: weeklyReset, kind: .calculated),
+                    observation(t, 4, short, reset: shortReset, kind: .calculated),
+                    observation(date(10), 6, short, reset: shortReset, kind: .calculated),
+                    observation(t, 8, corrupt), observation(date(10), 9, corrupt),
+                    observation(date(60), 10, corrupt)], now: now)
+    check(history.flush(), "write calculated-reset cycles")
+    let reopened = store("stored-reset-tolerance")
+    check(buckets(reopened).first?.deltaHundredths == 100 && buckets(reopened, short).first?.deltaHundredths == 200,
+          "calculated cycle durations +1 s and +2 s survive shard reload")
+
+    let directory = root.appendingPathComponent("stored-reset-tolerance")
+    let manifestURL = directory.appendingPathComponent("manifest.json")
+    var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
+    var files = manifest["files"] as! [String: [String: Any]]
+    let week = files.keys.first!
+    let shardURL = directory.appendingPathComponent(files[week]!["name"] as! String)
+    var shard = try JSONSerialization.jsonObject(with: Data(contentsOf: shardURL)) as! [String: Any]
+    var rows = shard["rows"] as! [[Any]]
+    let corruptRow = rows.firstIndex { ($0[3] as? Int) == 100 && ($0[9] as? Double) == 9 }!
+    rows[corruptRow][4] = 3_601
+    rows.append(["malformed row"])
+    shard["rows"] = rows
+    let data = try JSONSerialization.data(withJSONObject: shard)
+    try data.write(to: shardURL)
+    files[week]!["bytes"] = data.count
+    manifest["files"] = files
+    try JSONSerialization.data(withJSONObject: manifest).write(to: manifestURL)
+    let recovered = store("stored-reset-tolerance")
+    check(buckets(recovered).first?.deltaHundredths == 100 && buckets(recovered, short).first?.deltaHundredths == 200
+          && buckets(recovered, corrupt).allSatisfy { $0.deltaHundredths == 0 },
+          "invalid or malformed shard rows leave other meters intact")
+}
+
+do {
+    let history = store("alternating-rollout")
+    history.ingest([observation(t, 10),
+                    observation(date(5), 11, source: .rollout, attribution: .provisional),
+                    observation(date(10), 12),
+                    observation(date(15), 13, source: .rollout, attribution: .provisional),
+                    observation(date(20), 14)], now: date(20))
+    let rows = buckets(history)
+    check(rows.count == 1 && rows[0].coveredSeconds == 1_200 && rows[0].deltaHundredths == 400,
+          "alternating provisional rollout and API preserves 20 minutes of live coverage")
+    check(history.flush() && buckets(store("alternating-rollout")) == rows,
+          "alternating-rollout live coverage survives restart")
+}
+
+do {
+    let history = store("first-hit")
+    history.ingest([observation(t, 90), observation(date(10), 100), observation(date(50), 100)], now: now)
+    let rows = buckets(history)
+    check(rows.count == 1 && rows[0].firstHit == date(10) && rows[0].latest?.date == date(50)
+          && rows[0].coveredSeconds == 600 && rows[0].deltaHundredths == 1000,
+          "flat 100% samples preserve the minute-10 hit and censor through minute 50")
+    check(history.flush() && buckets(store("first-hit")) == rows, "first saturation time survives restart")
+}
+
+do {
+    let history = store("companion-samples")
+    let readings = [15.0, 30, 45].map { minute -> QuotaObservation in
+        var reading = observation(date(minute), 7)
+        reading.companion = .present(.active(used: 80 + minute / 10, reset: date(120)))
+        return reading
+    }
+    history.ingest(readings, now: now)
+    let rows = buckets(history)
+    check(rows.first?.earlierCompanionSamples.map(\.date) == [date(15), date(30)]
+          && rows.first?.latest?.date == date(45), "quarter-hour companion samples share one bucket")
+    check(history.flush() && buckets(store("companion-samples")) == rows, "within-bucket companion samples survive restart")
+}
+
+do {
     let history = store("resets")
     history.ingest([observation(t, 4), observation(date(10), 3.6), observation(date(20), 4),
                     observation(date(30), 4.12, reset: reset.addingTimeInterval(2), kind: .calculated),
@@ -241,7 +319,6 @@ do {
     appendLine(Data("{bad".utf8), to: &one)
     appendLine(try rollout(t, 2), to: &one)
     appendLine(try rollout(date(10), 4), to: &one)
-    appendLine(try rollout(date(11), 67, account: "another"), to: &one)
     appendLine(try rollout(date(12), 67, limitID: "other"), to: &one)
     appendLine(Data(repeating: 120, count: 2048), to: &one)
     appendLine(try rollout(date(14), 4.5, labeledPlan: false), to: &one)
@@ -249,7 +326,6 @@ do {
     try one.write(to: recent.appendingPathComponent("rollout-new.jsonl"))
     var two = Data()
     appendLine(try rollout(date(-1), 1, account: "account", subject: "person"), to: &two)
-    appendLine(try rollout(date(-2), 1, account: "account", subject: "other"), to: &two)
     try two.write(to: earlier.appendingPathComponent("rollout-old.jsonl"))
 
     var calendar = Calendar(identifier: .gregorian)
@@ -275,6 +351,31 @@ do {
     let imported = store("archive-order")
     imported.replaceImport(attributed.filter { $0.attribution == .provisional }, for: key, complete: true, now: current)
     check(buckets(imported).reduce(0) { $0 + $1.deltaHundredths } == 250, "out-of-order events and duplicate debit")
+}
+
+do {
+    let sessions = root.appendingPathComponent("shared-sessions")
+    let day = sessions.appendingPathComponent("2026/11/06")
+    try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+    var lines = Data()
+    appendLine(try rollout(date(10), 4), to: &lines)
+    appendLine(try rollout(date(2), 2, account: "account", subject: "person"), to: &lines)
+    appendLine(try rollout(date(12), 5, account: "account", subject: "person"), to: &lines)
+    appendLine(try rollout(date(5), 80, account: "another"), to: &lines)
+    appendLine(try rollout(date(14), 6), to: &lines)
+    appendLine(try rollout(date(11), 81, account: "account", subject: "other"), to: &lines)
+    appendLine(try rollout(date(11.5), 4.5), to: &lines)
+    appendLine(try rollout(date(4), 3), to: &lines)
+    try lines.write(to: day.appendingPathComponent("rollout-shared.jsonl"))
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: utc)!
+    let reader = UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendar,
+                                    account: .init(account: "account", subject: "person"))
+    let attributed = UsageCodexBackfill.attributed(scan(reader).candidates, key: key, anchors: [observation(date(17), 7)],
+                                                   switchedAt: nil, now: date(17))
+    check(attributed.map(\.date).sorted() == [date(2), date(12), date(14)]
+          && attributed.filter { $0.attribution == .provisional }.map(\.date) == [date(14)],
+          "shared rollout home rejects unlabeled rows across explicit other-account or user evidence")
 }
 
 do {

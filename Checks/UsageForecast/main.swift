@@ -160,6 +160,39 @@ check(forecast(active, current(companion: .present(.active(used: 18, reset: now.
 let near = QuotaCapState.present(.active(used: 85, reset: now.addingTimeInterval(2 * hour)))
 let nearRows = weeks(8, cap: { _, date in .present(.active(used: 95, reset: date.addingTimeInterval(2.5 * hour))) })
 check(forecast(nearRows, current(companion: near)).readiness == .normal, "near cap requires a comparable reset")
+let quarterHourRows = nearRows.map { bucket -> QuotaBucket in
+    var row = bucket
+    if calendar.component(.weekday, from: row.start) == 2 && calendar.component(.hour, from: row.start) == 18 {
+        let capReset = row.start.addingTimeInterval(3 * hour)
+        let cap = QuotaCapState.present(.active(used: 95, reset: capReset))
+        row.earlierCompanionSamples = [15.0, 30].map { sample(row.start.addingTimeInterval($0 * 60), 7, cap) }
+        row.latest = sample(row.start.addingTimeInterval(45 * 60), 7, cap)
+    }
+    return row
+}
+let quarterHourForecasts = [30.0, 45].map { minute -> ForecastResult in
+    let time = now.addingTimeInterval(minute * 60)
+    let cap = QuotaCapState.present(.active(used: 85, reset: now.addingTimeInterval(3 * hour)))
+    return forecast(quarterHourRows, current(at: time, companion: cap), at: time)
+}
+check(quarterHourForecasts.allSatisfy { $0.readiness == .normal && close($0.expectedUsed, 39) },
+      "quarter-hour companion matching at :30 and :45")
+let flatAtCap = ordinary.map { bucket -> QuotaBucket in
+    var row = bucket
+    if calendar.component(.weekday, from: row.start) == 2 && calendar.component(.hour, from: row.start) == 18 {
+        row.deltaHundredths = 1_000
+        row.coveredSeconds = 600
+        row.quietSeconds = 0
+        row.flags.insert(.censored)
+        row.firstHit = row.start.addingTimeInterval(600)
+        row.latest = sample(row.start.addingTimeInterval(3_000), 100)
+    }
+    return row
+}
+let beforeFirstHit = now.addingTimeInterval(-hour)
+let firstHitForecast = forecast(flatAtCap, current(95, at: beforeFirstHit, reset: now.addingTimeInterval(900)), at: beforeFirstHit)
+check(firstHitForecast.readiness == .likely && firstHitForecast.eta == now.addingTimeInterval(300),
+      "replay places debit before the first 100% reading despite a later flat sample")
 let mismatch = current(companion: .present(.active(used: 85, reset: now.addingTimeInterval(4 * hour))))
 check(forecast(nearRows, mismatch).readiness == .learning, "near-cap reset outside tolerance cannot fall back to profile")
 check(forecast(active, current(companion: near)).readiness == .learning, "low-cap paths cannot stand in for near-cap paths")
@@ -211,6 +244,27 @@ let historicalPoint = forecast(available, earlierReading, at: earlierNow)
 check(historicalPoint.expectedUsed != nil &&
       forecast(available.filter { $0.start != lastKnown } + retrospectivelyResolved, earlierReading, at: earlierNow) == historicalPoint,
       "a later quiet endpoint cannot retroactively resolve a forecast's input")
+
+do {
+    let zone = "America/New_York"
+    var local = Calendar(identifier: .gregorian)
+    local.timeZone = TimeZone(identifier: zone)!
+    func date(_ month: Int, _ day: Int, hour: Int = 0) -> Date {
+        local.date(from: DateComponents(year: 2026, month: month, day: day, hour: hour))!
+    }
+    let key = series("dst", zone: zone)
+    let sundayNine = 6 * 24 + 9
+    let fall = forecast(weeks(8, for: key, preceding: date(10, 26), debit: { _, slot in slot == sundayNine ? 20 : 0 }),
+                        current(90, for: key, at: date(11, 1), reset: date(11, 1, hour: 9)), at: date(11, 1), in: local)
+    check(fall.readiness == .normal && fall.exhaustProbability == 0 && close(fall.expectedUsed, 90) && fall.eta == nil,
+          "New York fall-back replay excludes Sunday debit at the 09:00 reset")
+
+    let spring = forecast(weeks(8, for: key, preceding: date(3, 2), debit: { _, slot in slot == sundayNine - 1 ? 20 : 0 }),
+                          current(90, for: key, at: date(3, 8), reset: date(3, 8, hour: 9)), at: date(3, 8), in: local)
+    let crossing = date(3, 8, hour: 8).addingTimeInterval(30 * 60)
+    check(spring.readiness == .likely && close(spring.exhaustProbability, 1) && spring.eta == crossing,
+          "New York spring-forward replay retains debit at 08:00 and its local ETA")
+}
 
 func sessions(_ count: Int = 15, shift: Double = 0, key: QuotaSeries = short,
               bind: (Date) -> QuotaCapState = { _ in .absent },

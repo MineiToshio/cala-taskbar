@@ -43,7 +43,9 @@ struct UsageForecast: UsageForecasting {
         let run = Run(current: current, now: now, start: start, grid: grid, short: short, band: band)
         if band == .unknown {
             let recent = snapshot.buckets(for: current.series, in: now.addingTimeInterval(-1_800)..<now.addingTimeInterval(1))
-            let latest = recent.compactMap(\.latest).filter {
+            let latest = recent.flatMap { row in
+                row.latest.map { row.earlierCompanionSamples + [$0] } ?? row.earlierCompanionSamples
+            }.filter {
                 $0.date <= now && now.timeIntervalSince($0.date) <= 1_800 && Applicability($0.companion) != .unknown
             }.max { $0.date < $1.date }
             if let latest, CapBand(latest.companion, at: now).nearLimit { return Self.learning }
@@ -134,6 +136,27 @@ private extension UsageForecast {
         func bounds(_ date: Date, seconds: Int) -> DateInterval {
             QuotaCalendarBuckets.interval(containing: date, timeZoneID: zoneID, seconds: seconds)
         }
+
+        struct WallSpan {
+            let start: Date
+            let end: Date
+            let offset: TimeInterval
+
+            func absolute(_ wall: Date) -> Date { wall.addingTimeInterval(-offset) }
+        }
+
+        /// Local clock coordinates for runs with a constant UTC offset.
+        func wallSpans(from start: Date, to end: Date) -> [WallSpan] {
+            var spans: [WallSpan] = []
+            var date = start
+            while date < end {
+                let offset = Double(zone.secondsFromGMT(for: date))
+                let next = min(end, zone.nextDaylightSavingTimeTransition(after: date) ?? end)
+                spans.append(.init(start: date.addingTimeInterval(offset), end: next.addingTimeInterval(offset), offset: offset))
+                date = next
+            }
+            return spans
+        }
     }
 
     struct Cell {
@@ -175,11 +198,14 @@ private extension UsageForecast {
                 }
                 let sample = row.latest.flatMap { $0.date <= run.now ? $0 : nil }
                 let verified = !row.flags.contains(.provisional) && sample?.attribution != .provisional
+                let earlier = row.earlierCompanionSamples.filter { $0.date <= run.now && (!trusted || $0.attribution != .provisional) }
                 let cap = sample.map { run.short ? $0.bindingWeekly : $0.companion } ?? .unknown
                 let observed = Applicability(cap)
                 if observed != .unknown, !trusted || verified { applicability = observed }
+                else if !run.short, let prior = earlier.last { applicability = Applicability(prior.companion) }
 
                 guard !trusted || verified else { continue }
+                if !run.short { caps.append(contentsOf: earlier) }
                 if let sample {
                     if run.short { sessions[row.cycle, default: []].append(sample) }
                     else if observed != .unknown { caps.append(sample) }
@@ -196,7 +222,9 @@ private extension UsageForecast {
                 if next < rows.endIndex, rows[next].start == row.start {
                     end = min(end, rows[next].cycle.segmentStart)
                 }
-                if row.flags.contains(.censored), let sample, sample.used == 100 { end = min(end, sample.date) }
+                if row.flags.contains(.censored), let hit = row.firstHit ?? (sample?.used == 100 ? sample?.date : nil) {
+                    end = min(end, hit)
+                }
                 let duration = end.timeIntervalSince(start)
                 // A partially published bucket can contain debits confirmed by a later observation.
                 guard start >= earliest, end <= availableThrough, duration > 0, seconds <= duration + epsilon else { continue }
@@ -416,6 +444,12 @@ private extension UsageForecast {
         let replay: Replay
     }
 
+    struct ReplaySpan {
+        let target: Date
+        let source: Date?
+        let duration: TimeInterval
+    }
+
     struct Outcome {
         let expected: Double
         let probability: Double
@@ -606,16 +640,39 @@ private extension UsageForecast {
         }
 
         private func weeklyPaths(_ history: History, profile: Profile) -> [Path] {
-            (1...16).compactMap { week in
-                guard let origin = grid.calendar.date(byAdding: .day, value: -7 * week, to: now) else { return nil }
+            let live = grid.wallSpans(from: now, to: current.reset)
+            return (1...16).compactMap { week in
+                let lag = Double(week * 7) * day
+                let spans = weeklySpans(live, lag: lag)
+                let mappedOrigin = spans.first?.source
+                guard let origin = mappedOrigin ?? grid.calendar.date(byAdding: .day, value: -7 * week, to: now) else { return nil }
                 if band != .absent {
-                    guard let sample = history.cap(at: origin),
+                    guard mappedOrigin != nil, let sample = history.cap(at: origin),
                           band.matches(sample.companion, origin: origin, current: current.companion, now: now,
                                        matchReset: true) else { return nil }
-                } else if let sample = history.cap(at: origin), Applicability(sample.companion) == .present {
+                } else if let mappedOrigin, let sample = history.cap(at: mappedOrigin), Applicability(sample.companion) == .present {
                     return nil
                 }
-                return replay(origin, cycle: nil, history: history, profile: profile)
+                return replay(origin, spans: spans, cycle: nil, history: history, profile: profile)
+            }
+        }
+
+        private func weeklySpans(_ live: [Grid.WallSpan], lag: TimeInterval) -> [ReplaySpan] {
+            // The padding keeps both occurrences of repeated clock times in the historical range.
+            let history = grid.wallSpans(from: now.addingTimeInterval(-lag - 2 * day),
+                                         to: current.reset.addingTimeInterval(-lag + 2 * day))
+            let boundaries = Set(history.flatMap { [$0.start, $0.end] }).sorted()
+            return live.flatMap { span in
+                let start = span.start.addingTimeInterval(-lag)
+                let end = span.end.addingTimeInterval(-lag)
+                let cuts = [start] + boundaries.filter { start < $0 && $0 < end } + [end]
+                return zip(cuts, cuts.dropFirst()).map { lower, upper in
+                    let matches = history.filter { $0.start <= lower && lower < $0.end }
+                    // An ordinary hour can supply either repeat. When both weeks repeat, match the offset.
+                    let source = (matches.first { $0.offset == span.offset } ?? matches.first)?.absolute(lower)
+                    return ReplaySpan(target: span.absolute(lower.addingTimeInterval(lag)), source: source,
+                                      duration: upper.timeIntervalSince(lower))
+                }
             }
         }
 
@@ -632,12 +689,13 @@ private extension UsageForecast {
                 let local = grid.position(origin)
                 let difference = abs(local.second - target.second)
                 let distance = min(difference, day - difference)
+                let span = ReplaySpan(target: now, source: origin, duration: remaining)
                 guard origin >= cycle.segmentStart, local.weekend == target.weekend, distance <= 4 * hour,
                       !resets.contains(cycle.reset), let samples = history.sessions[cycle],
                       let reading = history.sessionUsed(cycle, samples: samples, at: origin, grid: grid),
                       reading.used < 100, sessionBand(reading.used) == usedBand,
                       band.matches(reading.binding, origin: origin, current: current.bindingWeekly, now: now, matchReset: false),
-                      let path = replay(origin, cycle: cycle, history: history, profile: profile) else { continue }
+                      let path = replay(origin, spans: [span], cycle: cycle, history: history, profile: profile) else { continue }
                 resets.insert(cycle.reset)
                 if distance <= 2 * hour { narrow.append(path) }
                 if wide.count < 40 { wide.append(path) }
@@ -652,41 +710,51 @@ private extension UsageForecast {
             return used >= 50 ? 1 : 0
         }
 
-        private func replay(_ origin: Date, cycle: QuotaCycle?, history: History, profile: Profile) -> Path? {
-            let first = origin.addingTimeInterval(start.timeIntervalSince(now))
-            let last = first.addingTimeInterval(duration)
-            var position = first
+        private func replay(_ origin: Date, spans: [ReplaySpan], cycle: QuotaCycle?, history: History, profile: Profile) -> Path? {
             var replay = Replay(used: current.used)
+            for span in spans {
+                replaySpan(span, cycle: cycle, history: history, profile: profile, replay: &replay)
+                if replay.observed.crossing != nil { break }
+            }
+            let considered = replay.observed.crossing ?? duration
+            let coverage = considered > 0 ? min(1, replay.covered / considered) : 0
+            guard coverage + epsilon >= 0.7, !replay.unsupported || replay.observed.crossing != nil else { return nil }
+            return Path(week: grid.position(origin).week, age: now.timeIntervalSince(origin), coverage: coverage, replay: replay)
+        }
+
+        private func replaySpan(_ span: ReplaySpan, cycle: QuotaCycle?, history: History, profile: Profile, replay: inout Replay) {
+            let offset = span.target.timeIntervalSince(start)
+            let skip = max(0, -offset)
+            guard skip < span.duration else { return }
+            let first = span.source ?? span.target
+            let last = first.addingTimeInterval(span.duration)
+            var position = first.addingTimeInterval(skip)
             while position < last {
                 let bounds = grid.bounds(position, seconds: bucketSeconds)
                 let end = min(bounds.end, last)
                 let prior = profile.slots[grid.position(bounds.start).slot]
                 var cursor = position
-                for cell in history.cells[bounds.start] ?? [] where cycle == nil || cell.cycle == cycle {
+                for cell in (span.source != nil ? history.cells[bounds.start] : nil) ?? [] where cycle == nil || cell.cycle == cycle {
                     let lower = max(cursor, cell.start)
                     let upper = min(end, cell.end)
                     guard upper > lower else { continue }
                     if lower > cursor {
-                        replay.add(at: cursor.timeIntervalSince(first), seconds: lower.timeIntervalSince(cursor),
+                        replay.add(at: offset + cursor.timeIntervalSince(first), seconds: lower.timeIntervalSince(cursor),
                                    fraction: 0, debit: 0, prior: prior)
                     }
                     let seconds = upper.timeIntervalSince(lower)
-                    replay.add(at: lower.timeIntervalSince(first), seconds: seconds, fraction: cell.fraction,
+                    replay.add(at: offset + lower.timeIntervalSince(first), seconds: seconds, fraction: cell.fraction,
                                debit: seconds * cell.debitPerSecond, prior: prior)
                     cursor = upper
                     if replay.observed.crossing != nil { break }
                 }
                 if replay.observed.crossing != nil { break }
                 if cursor < end {
-                    replay.add(at: cursor.timeIntervalSince(first), seconds: end.timeIntervalSince(cursor),
+                    replay.add(at: offset + cursor.timeIntervalSince(first), seconds: end.timeIntervalSince(cursor),
                                fraction: 0, debit: 0, prior: prior)
                 }
                 position = end
             }
-            let considered = replay.observed.crossing ?? duration
-            let coverage = considered > 0 ? min(1, replay.covered / considered) : 0
-            guard coverage + epsilon >= 0.7, !replay.unsupported || replay.observed.crossing != nil else { return nil }
-            return Path(week: grid.position(origin).week, age: now.timeIntervalSince(origin), coverage: coverage, replay: replay)
         }
     }
 }

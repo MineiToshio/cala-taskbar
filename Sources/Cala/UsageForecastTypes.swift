@@ -143,6 +143,8 @@ struct QuotaBucket: Equatable, Sendable {
     var quietSeconds: Double
     var flags: QuotaBucketFlags
     var latest: QuotaBucketSample?
+    var firstHit: Date? = nil
+    var earlierCompanionSamples: [QuotaBucketSample] = []
     var end: Date {
         QuotaCalendarBuckets.interval(containing: start, timeZoneID: series.timeZoneID, seconds: series.meter.bucketSeconds).end
     }
