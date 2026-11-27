@@ -81,6 +81,8 @@ final class TrayModule: CalaModule {
         UsagePace.shared.start(store: store)
         if visible { UsageService.shared.refresh() }
         MainActor.assumeIsolated {
+            // Warm the message web view (rule list, data store, WebContent process) only when mail is set up.
+            if !MailService.shared.accounts.isEmpty { MailWebBody.prewarm() }
             MailService.shared.start(explainingKeychain: MailKeychainNoticeController.shared.show,
                                      dismissing: MailKeychainNoticeController.shared.dismiss)
         }

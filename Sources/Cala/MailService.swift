@@ -547,7 +547,6 @@ final class MailService: ObservableObject {
     func start() {
         guard !running else { return }
         running = true
-        // TODO prewarm: call MailWebBody.prewarm() here once that symbol lands (another agent owns MailWebBody.swift).
         let run = UUID()
         runID = run
         if observesWake {
