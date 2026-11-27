@@ -9,6 +9,7 @@ struct Config: Codable, Equatable {
         "com.apple.systempreferences",
     ]
     var autoHide = true
+    var attentionEdgeCue = false
     /// Interface language: "system" (follow macOS), "en" or "es".
     var language = "system"
     var iconSize: Double = 28
@@ -106,7 +107,7 @@ struct Config: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case language
-        case pinned, autoHide, iconSize, previewDelay, previewWidth, alignments, order, theme, barOpacity
+        case pinned, autoHide, attentionEdgeCue, iconSize, previewDelay, previewWidth, alignments, order, theme, barOpacity
         case hideNativeDock, switcherEnabled, switcherReplaceCmdTab, restoreDockOnQuit
         case calendarEnabled, calendarJoinEnabled, calendarDays, calendarExcludedIDs, diskEnabled, diskFolders, monitorEnabled, monitorBarMetric, trayLayout, trayOrder
         case dockBackupSaved, dockBackupAutohide, dockBackupDelay
@@ -133,6 +134,7 @@ extension Config {
         }
         pinned = field([String].self, .pinned) ?? pinned
         autoHide = field(Bool.self, .autoHide) ?? autoHide
+        attentionEdgeCue = field(Bool.self, .attentionEdgeCue) ?? attentionEdgeCue
         language = field(String.self, .language) ?? language
         mailLoadsRemoteImages = field(Bool.self, .mailLoadsRemoteImages) ?? mailLoadsRemoteImages
         if !["system", "en", "es"].contains(language) { language = "system"; invalid = true }

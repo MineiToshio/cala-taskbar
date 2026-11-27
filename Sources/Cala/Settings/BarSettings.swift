@@ -185,6 +185,7 @@ struct BarSettingsPane: View {
     @State private var confirmReset = false
 
     var body: some View {
+        let attentionEdgeTitle = tx("Glow at the edge when an app needs attention", "Avisar en el borde cuando una app pide atención")
         VStack(alignment: .leading, spacing: 22) {
             HStack(spacing: 14) {
                 Button(tx("Style and previews", "Aspecto y vistas previas")) { open(.barStyle) }
@@ -196,6 +197,15 @@ struct BarSettingsPane: View {
                     Toggle("", isOn: Binding(get: { store.config.autoHide }, set: { store.config.autoHide = $0 })).toggleStyle(.switch).labelsHidden()
                         .accessibilityLabel(tx("Hide the bar automatically", "Ocultar la barra automáticamente"))
                 }
+                RowDivider()
+                SettingRow(title: attentionEdgeTitle,
+                           caption: tx("A glow appears below the app’s icon only while the bar is hidden.",
+                                       "Muestra un resplandor debajo del icono de la app solo mientras la barra está oculta.")) {
+                    Toggle("", isOn: Binding(get: { store.config.attentionEdgeCue }, set: { store.config.attentionEdgeCue = $0 }))
+                        .toggleStyle(.switch).labelsHidden()
+                        .accessibilityLabel(attentionEdgeTitle)
+                }
+                .disabled(!store.config.autoHide)
             }
             SectionTitle(text: tx("macOS Dock", "Dock de macOS"))
             dock

@@ -143,11 +143,15 @@ final class BarController {
             guard let self, self.isRunning else { return }
             self.layoutAll(animated: false)
             self.syncMoveMonitors()
+            if self.store.config.autoHide && self.store.config.attentionEdgeCue {
+                self.attentionEdge.start()
+            } else {
+                self.attentionEdge.stop()
+            }
         }
         installMonitors()
         syncMoveMonitors()
         AppAttention.shared.start()
-        attentionEdge.start()
         timer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in self?.tick() }
     }
 
@@ -723,11 +727,14 @@ extension BarController {
     /// One glow per hidden bar and app wanting attention, under where its icon sits. Nothing while the bar shows:
     /// the icon itself carries the cue then.
     func attentionEdgeTargets() -> [AttentionEdgeCue.Target] {
-        guard isRunning, store.config.autoHide else { return [] }
+        guard isRunning, store.config.autoHide, store.config.attentionEdgeCue else { return [] }
         let pids = AppAttention.shared.pids
         let items = model.items.filter { $0.pid.map(pids.contains) ?? false }
         return bars.filter(\.hidden).flatMap { b in
-            items.map { AttentionEdgeCue.Target(screen: b.screen.frame, x: iconCenterX(b, $0.id, fallback: b.screen.frame.midX)) }
+            items.compactMap { item in
+                guard let frame = b.frames[item.id], !frame.isEmpty else { return nil }
+                return AttentionEdgeCue.Target(screen: b.screen.frame, x: b.panel.frame.minX + frame.midX)
+            }
         }
     }
 }

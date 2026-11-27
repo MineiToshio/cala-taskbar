@@ -25,6 +25,7 @@ final class AttentionEdgeCue {
         let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        refresh()
     }
 
     func stop() {
