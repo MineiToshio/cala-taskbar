@@ -10,6 +10,8 @@ struct MailBodyPart: Equatable {
     var encoding: String?
     var size: Int = 0
     var disposition: String?    // lowercased disposition type ("attachment", "inline")
+    /// Content-Disposition parameters (names lowercased), e.g. "filename".
+    var dispositionParameters: [String: String] = [:]
     var children: [MailBodyPart] = []
     /// message/rfc822 or message/global: the forwarded message's own structure.
     var message: [MailBodyPart] = []
@@ -107,7 +109,10 @@ enum MailBodyStructure {
             extensionStart = 10
         }
         // body-ext-1part: md5, then disposition
-        if extensionStart + 1 < items.count { result.disposition = disposition(items[extensionStart + 1]) }
+        if extensionStart + 1 < items.count {
+            result.disposition = disposition(items[extensionStart + 1])
+            result.dispositionParameters = dispositionParameters(items[extensionStart + 1])
+        }
         return result
     }
 
@@ -126,6 +131,11 @@ enum MailBodyStructure {
 
     private static func disposition(_ node: Node) -> String? {
         node.list?.first?.string?.lowercased()
+    }
+
+    private static func dispositionParameters(_ node: Node) -> [String: String] {
+        guard let list = node.list, list.count >= 2 else { return [:] }
+        return parameters(list[1])
     }
 }
 

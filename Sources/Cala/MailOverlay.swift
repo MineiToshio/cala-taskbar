@@ -19,11 +19,24 @@ struct MailOverlay: Equatable {
         case readAll
         /// Mark all as read up to the newest UID the person saw: rows above it (mail that arrived later) keep their state.
         case readAllThrough(uid: UInt32)
+        /// A bulk action on selected rows (one entry, so the whole set confirms or reverts together; see `update`).
+        case hideMany(messageIDs: [String])
+        case readMany(messageIDs: [String])
+        case unreadMany(messageIDs: [String])
 
         var messageID: String? {
             switch self {
             case let .hide(id), let .read(id), let .unread(id): id
-            case .readAll, .readAllThrough: nil
+            case .readAll, .readAllThrough, .hideMany, .readMany, .unreadMany: nil
+            }
+        }
+
+        /// Every message the effect names (one for single effects, none for the mark-all ones).
+        var messageIDs: [String] {
+            switch self {
+            case let .hide(id), let .read(id), let .unread(id): [id]
+            case let .hideMany(ids), let .readMany(ids), let .unreadMany(ids): ids
+            case .readAll, .readAllThrough: []
             }
         }
     }
@@ -76,12 +89,22 @@ struct MailOverlay: Equatable {
         return entries.remove(at: index)
     }
 
+    /// Replaces what entry `id` does, keeping its place and state (a bulk action that only partly happened).
+    mutating func update(_ id: Int, effect: Effect) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries[index] = Entry(id: id, effect: effect, state: entries[index].state)
+    }
+
     /// A snapshot from sync `appliedSync` was applied: confirmed entries from before it started are now in the snapshot.
-    mutating func prune(appliedSync: Int) {
+    /// Returns the entries it dropped (rows kept outside the snapshot, such as older pages, apply them for good).
+    @discardableResult
+    mutating func prune(appliedSync: Int) -> [Entry] {
+        var dropped: [Entry] = []
         entries.removeAll {
-            if case let .confirmed(afterSync) = $0.state { return afterSync < appliedSync }
+            if case let .confirmed(afterSync) = $0.state, afterSync < appliedSync { dropped.append($0); return true }
             return false
         }
+        return dropped
     }
 
     func apply(to snapshot: MailInboxSnapshot) -> Result { Self.apply(snapshot, entries) }
@@ -110,8 +133,42 @@ struct MailOverlay: Equatable {
                 // Everything unseen outside the window is older than the window, so only newer rows can stay unread.
                 for index in rows.indices where rows[index].uid <= uid { rows[index].unread = false }
                 unread = rows.filter(\.unread).count
+            case let .hideMany(ids):
+                let set = Set(ids)
+                unread -= rows.filter { set.contains($0.id) && $0.unread }.count
+                rows.removeAll { set.contains($0.id) }
+            case let .readMany(ids):
+                let set = Set(ids)
+                for index in rows.indices where set.contains(rows[index].id) && rows[index].unread {
+                    rows[index].unread = false
+                    unread -= 1
+                }
+            case let .unreadMany(ids):
+                let set = Set(ids)
+                for index in rows.indices where set.contains(rows[index].id) && !rows[index].unread {
+                    rows[index].unread = true
+                    unread += 1
+                }
             }
         }
         return Result(messages: rows, unread: max(0, unread))
+    }
+}
+
+extension MailOverlay.Effect {
+    /// Makes a confirmed effect permanent on rows kept outside any snapshot (older pages). Pure.
+    func applied(to rows: [MailMessage]) -> [MailMessage] {
+        var rows = rows
+        switch self {
+        case let .hide(id): rows.removeAll { $0.id == id }
+        case let .hideMany(ids): let set = Set(ids); rows.removeAll { set.contains($0.id) }
+        case let .read(id): for i in rows.indices where rows[i].id == id { rows[i].unread = false }
+        case let .readMany(ids): let set = Set(ids); for i in rows.indices where set.contains(rows[i].id) { rows[i].unread = false }
+        case let .unread(id): for i in rows.indices where rows[i].id == id { rows[i].unread = true }
+        case let .unreadMany(ids): let set = Set(ids); for i in rows.indices where set.contains(rows[i].id) { rows[i].unread = true }
+        case .readAll: for i in rows.indices { rows[i].unread = false }
+        case let .readAllThrough(uid): for i in rows.indices where rows[i].uid <= uid { rows[i].unread = false }
+        }
+        return rows
     }
 }

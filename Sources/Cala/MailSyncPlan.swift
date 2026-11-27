@@ -122,3 +122,20 @@ final class MailQueueSignal: @unchecked Sendable {
     var contentWaiting: Bool { lock.withLock { content > 0 } }
     var anyWaiting: Bool { lock.withLock { content + actions > 0 } }
 }
+
+/// Paging into older mail (pure): which UIDs the next "load older" fetches.
+enum MailOlderPager {
+    /// The `size` highest UIDs below `below` from `candidates` (newest first), and the ones left for later pages.
+    static func page(candidates: [UInt32], below: UInt32, above: UInt32 = 0, size: Int) -> (page: [UInt32], rest: [UInt32]) {
+        let older = Array(Set(candidates.filter { $0 > above && $0 < below })).sorted(by: >)
+        return (Array(older.prefix(max(0, size))), Array(older.dropFirst(max(0, size))))
+    }
+}
+
+/// A cancel button's state, read from the connection's context while a download runs.
+final class MailCancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.withLock { cancelled = true } }
+    var isCancelled: Bool { lock.withLock { cancelled } }
+}

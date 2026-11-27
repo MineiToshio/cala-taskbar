@@ -64,6 +64,8 @@ final class MailIMAP {
     /// BODYSTRUCTURE-guided second look at a preview: one part, from its start.
     private static let partPreviewSize = 32 * 1024
     fileprivate static let messageSizeLimit = 25 * 1024 * 1024
+    /// One response may carry a 50 MB attachment, base64-encoded.
+    fileprivate static let responseSizeLimit = 72 * 1024 * 1024
     private static let commandTimeout = MailLink.commandTimeout
     /// Body downloads (fast tuning) fail only after this long without a single byte, however long the whole reply takes.
     static let bodyStallMS = 20_000
@@ -111,6 +113,8 @@ final class MailIMAP {
     private var abandonedTags: Set<String> = []
     /// Set while prefetch runs: true when the person is waiting for something, so a slow download is given up.
     private var abandonCheck: (() -> Bool)?
+    /// Set while an attachment downloads: told how far the reply got after every wait slice.
+    private var progressHook: (() -> Void)?
     /// A background body download never takes longer than this in total, however slowly bytes keep arriving.
     static let prefetchCapSeconds = 60
     // Latency instrumentation (mail-timing log lines only; no behaviour depends on these).
@@ -447,6 +451,22 @@ final class MailIMAP {
     }
 
     func content(of message: MailMessage) async throws -> MailContent {
+        try await contentWithAttachments(of: message).content
+    }
+
+    /// The body and the message's attachment list (from BODYSTRUCTURE, or from the whole message when it was
+    /// downloaded whole). No attachment bytes are fetched.
+    func contentWithAttachments(of message: MailMessage) async throws -> (content: MailContent, attachments: [MailAttachment]) {
+        lastAttachments = []
+        let content = try await readContent(of: message)
+        return (content, lastAttachments)
+    }
+
+    /// Attachment lists of the messages the last prefetch downloaded, by UID.
+    private(set) var prefetchedAttachments: [UInt32: [MailAttachment]] = [:]
+    private var lastAttachments: [MailAttachment] = []
+
+    private func readContent(of message: MailMessage) async throws -> MailContent {
         let contentStart = MailTiming.now()
         try validate(message)
         guard tuning.partialBodies else { return try await wholeContent(of: message, started: contentStart) }
@@ -459,6 +479,7 @@ final class MailIMAP {
             .first(where: { $0.uid == message.uid && $0.messageSize != nil }), let size = info.messageSize else {
             throw MailIMAPError.staleMessage
         }
+        if let structure = info.bodyStructure { lastAttachments = MailAttachmentList.from(structure: structure) }
         if let structure = info.bodyStructure, let plan = MailPartPlan.plan(structure) {
             if let parsed = try await partialContent(uid: message.uid, structure: structure, plan: plan) {
                 MailTiming.line("body-plan \(timingContext) mode=partial sections=\(plan.sections.count) part_bytes=\(plan.bytes) full_bytes=\(size)")
@@ -491,6 +512,7 @@ final class MailIMAP {
             guard bytes.count <= Self.messageSizeLimit else { throw MailIMAPError.messageTooLarge }
             let parseStart = MailTiming.now()
             let parsed = MailMIME.content(bytes)
+            if lastAttachments.isEmpty { lastAttachments = MailAttachmentList.from(message: bytes) }
             MailTiming.line("mime-parse \(timingContext) ms=\(MailTiming.ms(since: parseStart)) raw_bytes=\(bytes.count)")
             MailTiming.line("content-fetched \(timingContext) imap_and_parse_ms=\(MailTiming.ms(since: contentStart))")
             return parsed
@@ -546,8 +568,11 @@ final class MailIMAP {
         }
         var plans: [UInt32: (structure: MailBodyPart, plan: MailPartPlan)] = [:]
         var sizes: [UInt32: (bytes: Int, largest: Int)] = [:]
+        prefetchedAttachments = [:]
         for fetch in responses.compactMap(\.fetch) {
-            guard let uid = fetch.uid, let structure = fetch.bodyStructure, let plan = MailPartPlan.plan(structure) else { continue }
+            guard let uid = fetch.uid, let structure = fetch.bodyStructure else { continue }
+            prefetchedAttachments[uid] = MailAttachmentList.from(structure: structure)
+            guard let plan = MailPartPlan.plan(structure) else { continue }
             let largest = structure.leaves.filter { plan.sections.contains($0.section) }.map(\.size).max() ?? 0
             plans[uid] = (structure, plan)
             sizes[uid] = (plan.bytes, largest)
@@ -628,19 +653,68 @@ final class MailIMAP {
     }
 
     func archive(_ message: MailMessage) async throws {
-        lastMoveStage = .none
-        try validate(message)
-        try await move(message, toTrash: false)
+        try await archive([message])
     }
 
     func trash(_ message: MailMessage) async throws {
-        lastMoveStage = .none
-        try validate(message)
-        try await move(message, toTrash: true)
+        try await trash([message])
     }
 
-    private func move(_ message: MailMessage, toTrash: Bool) async throws {
+    /// Archives `messages` with one command per step for the whole UID set (UID MOVE, or UID COPY + UID STORE
+    /// \Deleted + UID EXPUNGE of that set; never a plain EXPUNGE). Every message must belong to the current epoch.
+    func archive(_ messages: [MailMessage]) async throws {
         lastMoveStage = .none
+        try validate(messages)
+        try await move(messages.map(\.uid), toTrash: false)
+    }
+
+    func trash(_ messages: [MailMessage]) async throws {
+        lastMoveStage = .none
+        try validate(messages)
+        try await move(messages.map(\.uid), toTrash: true)
+    }
+
+    /// Adds or removes \Seen on every message, 300 UIDs per command.
+    func setSeen(_ messages: [MailMessage], seen: Bool) async throws {
+        try validate(messages)
+        let uids = Array(Set(messages.map(\.uid))).sorted()
+        for first in stride(from: 0, to: uids.count, by: 300) {
+            let set = MailSyncPlanner.uidSet(Array(uids[first..<min(first + 300, uids.count)]))
+            _ = try await command("UID STORE \(set) \(seen ? "+" : "-")FLAGS.SILENT (\\Seen)")
+        }
+    }
+
+    /// Undoes the \Deleted flag a refused UID EXPUNGE left on these messages.
+    func clearDeleted(_ messages: [MailMessage]) async throws {
+        try validate(messages)
+        _ = try await command("UID STORE \(MailSyncPlanner.uidSet(messages.map(\.uid))) -FLAGS.SILENT (\\Deleted)")
+    }
+
+    /// Where a lost bulk move left each message (one UID FETCH set (UID FLAGS)).
+    func moveStates(of messages: [MailMessage]) async throws -> [UInt32: MoveCheck] {
+        try validate(messages)
+        let uids = messages.map(\.uid)
+        let responses = try await solicited(uids: uids, flags: true) {
+            try await command("UID FETCH \(MailSyncPlanner.uidSet(uids)) (UID FLAGS)")
+        }
+        var result = Dictionary(uniqueKeysWithValues: uids.map { ($0, MoveCheck.gone) })
+        for fetch in responses.compactMap(\.fetch) {
+            guard let uid = fetch.uid, result[uid] != nil, fetch.messageSize == nil, fetch.structureTokens == nil,
+                  !fetch.hasBodyData else { continue }
+            if fetch.flags.contains("\\DELETED") { result[uid] = .flaggedDeleted }
+            else if result[uid] != .flaggedDeleted { result[uid] = .present }
+        }
+        return result
+    }
+
+    private func validate(_ messages: [MailMessage]) throws {
+        guard !messages.isEmpty else { throw MailIMAPError.staleMessage }
+        for message in messages { try validate(message) }
+    }
+
+    private func move(_ uids: [UInt32], toTrash: Bool) async throws {
+        lastMoveStage = .none
+        let set = MailSyncPlanner.uidSet(uids)
         // LIST supplies the wire name (including modified UTF-7). Only quote it for the command.
         var cached = tuning.cachesMailboxList && mailboxCache != nil
         var boxes = try await listMailboxes(reuse: true)
@@ -665,27 +739,93 @@ final class MailIMAP {
         }
         if capabilities.contains("MOVE") {
             do {
-                _ = try await command("UID MOVE \(message.uid) \(Self.quote(mailbox.name))")
+                _ = try await command("UID MOVE \(set) \(Self.quote(mailbox.name))")
             } catch MailIMAPError.rejected where cached {
                 // NO/BAD means nothing moved; a renamed mailbox is the likely cause. One retry with the new name.
                 mailbox = try await renamed()
-                _ = try await command("UID MOVE \(message.uid) \(Self.quote(mailbox.name))")
+                _ = try await command("UID MOVE \(set) \(Self.quote(mailbox.name))")
             }
         } else {
             // Ordinary EXPUNGE could permanently remove other clients' pending deletions.
             guard capabilities.contains("UIDPLUS") else { throw MailIMAPError.moveUnsupported }
             do {
-                _ = try await command("UID COPY \(message.uid) \(Self.quote(mailbox.name))")
+                _ = try await command("UID COPY \(set) \(Self.quote(mailbox.name))")
             } catch MailIMAPError.rejected where cached {
                 mailbox = try await renamed()
-                _ = try await command("UID COPY \(message.uid) \(Self.quote(mailbox.name))")
+                _ = try await command("UID COPY \(set) \(Self.quote(mailbox.name))")
             }
             lastMoveStage = .copied
-            _ = try await command("UID STORE \(message.uid) +FLAGS.SILENT (\\Deleted)")
+            _ = try await command("UID STORE \(set) +FLAGS.SILENT (\\Deleted)")
             lastMoveStage = .flagged
-            _ = try await command("UID EXPUNGE \(message.uid)")
+            _ = try await command("UID EXPUNGE \(set)")
         }
         lastMoveStage = .done
+    }
+
+    /// Downloads one attachment part (BODY.PEEK[section]) and undoes its transfer encoding. Waits as long as bytes keep
+    /// arriving; `shouldCancel` gives up between reads (the late reply is skipped); `progress` gets the bytes received.
+    func attachmentData(of message: MailMessage, part: MailAttachment, shouldCancel: @escaping () -> Bool = { false },
+                        progress: @escaping (Int) -> Void = { _ in }) async throws -> Data {
+        try validate(message)
+        guard !part.isTooLarge else { throw MailIMAPError.messageTooLarge }
+        abandonCheck = shouldCancel
+        let start = socket.receivedByteCount
+        progressHook = { [socket] in progress(socket.receivedByteCount - start) }
+        defer { abandonCheck = nil; progressHook = nil }
+        let responses = try await solicited(uids: [message.uid]) {
+            try await command("UID FETCH \(message.uid) (UID BODY.PEEK[\(part.section)])", timeout: 600,
+                              stallMS: Self.bodyStallMS, abandonOnTimeout: true)
+        }
+        guard let raw = responses.lazy.compactMap(\.fetch).first(where: { $0.uid == message.uid })?.body(part.section) else {
+            throw MailIMAPError.staleMessage
+        }
+        guard let decoded = MailAttachment.decode(raw, encoding: part.encoding),
+              decoded.count <= MailAttachment.downloadLimit else { throw MailIMAPError.messageTooLarge }
+        return decoded
+    }
+
+    /// The next page of older messages: `count` UIDs just below `below`, newest first, with headers and a preview
+    /// (and their own \Seen state). `candidates`: older UIDs already known from an earlier page (UID SEARCH runs once
+    /// per epoch otherwise). Returns the page and the UIDs still older than it.
+    func olderMessages(accountID: String, below: UInt32, above: UInt32 = 0, count: Int = MailLink.window,
+                       candidates: [UInt32]?) async throws -> (messages: [MailMessage], remaining: [UInt32]) {
+        guard let validity else { throw MailIMAPError.invalidResponse }
+        var older = candidates ?? []
+        if candidates == nil, below > above + 1 {
+            var found: [UInt32] = []
+            for response in try await command("UID SEARCH UID \(above + 1):\(below - 1)") {
+                let words = response.line.split(separator: " ")
+                guard words.first == "*", words.dropFirst().first?.uppercased() == "SEARCH" else { continue }
+                found += words.dropFirst(2).compactMap { UInt32($0) }.filter { $0 > above && $0 < below }
+            }
+            older = found
+        }
+        let page = MailOlderPager.page(candidates: older, below: below, above: above, size: count)
+        guard !page.page.isEmpty else { return ([], []) }
+        let fields = "UID FLAGS INTERNALDATE\(gmailIDs) BODY.PEEK[\(Self.header)] BODY.PEEK[TEXT]<0.\(Self.previewSize)>"
+        let responses = try await solicited(uids: page.page, flags: true) {
+            try await command("UID FETCH \(MailSyncPlanner.uidSet(page.page)) (\(fields))")
+        }
+        var messages: [MailMessage] = []
+        var emptyPreviews: [UInt32] = []
+        for fetch in responses.compactMap(\.fetch) {
+            guard let uid = fetch.uid, page.page.contains(uid), let header = fetch.body(Self.header),
+                  !fetch.flags.contains("\\DELETED") else { continue }
+            let fields = MailMIME.headers(header)
+            var snippet = ""
+            if let preview = fetch.body("TEXT", partial: true) {
+                snippet = MailMIME.snippet(preview, headers: fields)
+                if snippet.isEmpty && preview.count == Self.previewSize { emptyPreviews.append(uid) }
+            }
+            messages.append(Self.message(fetch, uid: uid, fields: fields, snippet: snippet, accountID: accountID,
+                                         validity: validity, unread: !fetch.flags.contains("\\SEEN")))
+        }
+        if !emptyPreviews.isEmpty {
+            let found = try await partPreviews(emptyPreviews)
+            messages = messages.map { found[$0.uid].map($0.withSnippet) ?? $0 }
+        }
+        MailTiming.line("older-page \(timingContext) asked=\(page.page.count) got=\(messages.count) remaining=\(page.rest.count)")
+        return (messages.sorted { $0.uid > $1.uid }, page.rest)
     }
 
     private var supportsMove: Bool { capabilities.contains("MOVE") || capabilities.contains("UIDPLUS") }
@@ -824,6 +964,11 @@ final class MailIMAP {
                 return responses
             }
             guard words.first == "*" else { throw MailIMAPError.invalidResponse }
+            // While an abandoned command's answer may still arrive, its body data is dropped, not retained.
+            if !abandonedTags.isEmpty, words.count == 3, words[2].prefix(6).uppercased() == "FETCH ",
+               let late = response.fetch, late.hasBodyData || late.structureTokens != nil, !isSolicited(response, sequence: -1) {
+                continue
+            }
             if status == "OK" || status == "NO" || status == "BAD" || status == "BYE" {
                 temporaryFailure = temporaryFailure || response.line.uppercased().contains("[UNAVAILABLE]")
                 reported = Self.preferredError(reported, .classify(response.line))
@@ -876,6 +1021,7 @@ final class MailIMAP {
             if now > seen {
                 seen = now
                 lastProgress = DispatchTime.now()
+                progressHook?()
             }
             if DispatchTime.now() >= lastProgress + .milliseconds(stallMS) { throw MailIMAPError.timedOut }
             if let overall, DispatchTime.now() >= overall {
@@ -959,7 +1105,7 @@ extension MailContent {
 private final class MailIMAPSocket: MailIMAPTransport, @unchecked Sendable {
     private let queue = DispatchQueue(label: "Cala.MailIMAP")
     private let connection: NWConnection
-    private var framer = MailIMAPFramer(maxResponseSize: MailIMAP.messageSizeLimit + 64 * 1024)
+    private var framer = MailIMAPFramer(maxResponseSize: MailIMAP.responseSizeLimit)
     private var waiter: CheckedContinuation<MailIMAPResponse?, Error>?
     private var timer: DispatchWorkItem?
     private var readInProgress = false

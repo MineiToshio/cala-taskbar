@@ -39,6 +39,8 @@ final class MailBodyCache: @unchecked Sendable {
     private struct Stored: Codable {
         let html: String?
         let text: String
+        /// The message's attachment list (names, types, sizes; never their bytes). Absent in older files.
+        var attachments: [MailAttachment]? = nil
     }
 
     private struct DiskEntry {
@@ -53,7 +55,7 @@ final class MailBodyCache: @unchecked Sendable {
     let maxAge: TimeInterval
     private let now: () -> Date
     private let lock = NSLock()
-    private var memory: [MailBodyKey: (content: MailContent, bytes: Int, tick: UInt64)] = [:]
+    private var memory: [MailBodyKey: (content: MailContent, bytes: Int, tick: UInt64, attachments: [MailAttachment]?)] = [:]
     private var memoryBytes = 0
     private var tick: UInt64 = 0
     /// Per account folder path: relative file name -> size and last use. Built on first use of that account.
@@ -93,9 +95,18 @@ final class MailBodyCache: @unchecked Sendable {
     }
 
     /// Memory only (cheap; the disk copy is written separately with `store`).
-    func rememberInMemory(_ content: MailContent, for key: MailBodyKey) { remember(content, for: key) }
+    func rememberInMemory(_ content: MailContent, attachments: [MailAttachment]? = nil, for key: MailBodyKey) {
+        remember(content, attachments: attachments, for: key)
+    }
 
-    private func remember(_ content: MailContent, for key: MailBodyKey) {
+    /// The attachment list stored with a body (memory, then disk), nil when none was stored.
+    func attachments(for key: MailBodyKey) -> [MailAttachment]? {
+        if let entry = lock.withLock({ memory[key] }) { return entry.attachments }
+        guard content(for: key) != nil else { return nil }
+        return lock.withLock { memory[key]?.attachments }
+    }
+
+    private func remember(_ content: MailContent, attachments: [MailAttachment]? = nil, for key: MailBodyKey) {
         guard !content.isBlank else { return }   // a blank body is never served again; the reader fetches it anew
         lock.withLock {
             guard !forgotten.contains(key.account) else { return }
@@ -103,7 +114,7 @@ final class MailBodyCache: @unchecked Sendable {
             guard bytes <= memoryLimit else { return }
             if let old = memory[key] { memoryBytes -= old.bytes }
             tick += 1
-            memory[key] = (content, bytes, tick)
+            memory[key] = (content, bytes, tick, attachments ?? memory[key]?.attachments)
             memoryBytes += bytes
             while memoryBytes > memoryLimit || memory.count > memoryCount,
                   let oldest = memory.min(by: { $0.value.tick < $1.value.tick }) {
@@ -129,8 +140,9 @@ final class MailBodyCache: @unchecked Sendable {
             return nil
         }
         let content = MailContent(html: stored.html, text: stored.text)
+        let attachments = stored.attachments
         touch(url, name: name, account: account)
-        remember(content, for: key)
+        remember(content, attachments: attachments, for: key)
         return (content, .disk)
     }
 
@@ -142,11 +154,12 @@ final class MailBodyCache: @unchecked Sendable {
     }
 
     /// Stores in memory and, when a directory is set, on disk (atomic, 0600), then trims the account to its limits.
-    func store(_ content: MailContent, for key: MailBodyKey) {
+    func store(_ content: MailContent, attachments: [MailAttachment]? = nil, for key: MailBodyKey) {
         guard !content.isBlank, !lock.withLock({ forgotten.contains(key.account) }) else { return }
-        remember(content, for: key)
+        remember(content, attachments: attachments, for: key)
         guard let url = fileURL(for: key), let account = accountFolder(key.account),
-              let data = try? JSONEncoder().encode(Stored(html: content.html, text: content.text)) else { return }
+              let data = try? JSONEncoder().encode(Stored(html: content.html, text: content.text,
+                                                          attachments: attachments ?? lock.withLock({ memory[key]?.attachments }))) else { return }
         let folder = url.deletingLastPathComponent()
         ensureIndexed(account.path)
         guard Self.makePrivateDirectory(folder, excludeFrom: directory) else { return }
