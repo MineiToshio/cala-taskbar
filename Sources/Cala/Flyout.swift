@@ -656,6 +656,8 @@ struct UsagePane: View {
                 let used = window.effectiveUsed(now)
                 let remaining = Int((100 - used).rounded())
                 let color = FlyoutStyle.quota(remaining, dark: scheme == .dark)
+                let forecastLine = UsagePace.shared.line(state, window, now: now)
+                let staleDate = UsagePace.shared.staleReadingDate(state, window, now: now)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline) {
                         Text(window.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
@@ -673,14 +675,20 @@ struct UsagePane: View {
                     }.frame(height: 6)
                     Text(resetLabel(window, now: now)).font(.system(size: 10.5)).flyoutSecondary()
                         .fixedSize(horizontal: false, vertical: true)
-                    if let pace = UsagePace.shared.pace(state.provider, window, now: now) {
-                        Text(pace.text).font(.system(size: 10.5, weight: pace.warn ? .semibold : .regular))
-                            .foregroundStyle(pace.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
+                    if let forecastLine {
+                        Text(forecastLine.text).font(.system(size: 10.5, weight: forecastLine.warn ? .semibold : .regular))
+                            .foregroundStyle(forecastLine.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityHidden(true)
+                    } else if let staleDate, staleDate != state.reading?.date {
+                        Text(age(staleDate, now: now)).font(.system(size: 10.5)).flyoutSecondary()
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityValue(tx("\(remaining)% left, \(Int(used.rounded()))% used", "\(remaining)% restante, \(Int(used.rounded()))% usado"))
+                .accessibilityValue(
+                    tx("\(remaining)% left, \(100 - remaining)% used", "\(remaining)% restante, \(100 - remaining)% usado")
+                    + (forecastLine.map { ". " + $0.text } ?? "")
+                )
             }
             if let error = state.error {
                 Label(error, systemImage: "exclamationmark.circle").font(.system(size: 11)).flyoutSecondary()
