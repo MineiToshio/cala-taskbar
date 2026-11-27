@@ -622,8 +622,10 @@ struct UsagePane: View {
         .onAppear { UsageService.shared.refresh() }
     }
     private func age(_ date: Date?, now: Date) -> String {
-        guard let date else { return tx("Not updated yet", "Aún sin actualizar") }
-        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        guard let date = UsageJSON.observationDate(date, now: now),
+              let seconds = UsagePaceProjection.wholeSeconds(now.timeIntervalSince(date)) else {
+            return tx("Not updated yet", "Aún sin actualizar")
+        }
         if seconds < 5 { return tx("Updated just now", "Actualizado ahora mismo") }
         if seconds < 60 { return tx("Updated \(seconds) s ago", "Actualizado hace \(seconds) s") }
         if seconds < 3600 { return tx("Updated \(seconds / 60) min ago", "Actualizado hace \(seconds / 60) min") }
@@ -635,11 +637,11 @@ struct UsagePane: View {
         if window.isResetting(now) { return tx("resetting…", "reiniciándose…") }
         let formatter = DateFormatter(); formatter.locale = Locale.current; formatter.timeZone = .current
         formatter.dateFormat = "EEE d, h:mm a"
-        let relative = UsagePace.formatted(reset.timeIntervalSince(now))
+        let relative = UsagePaceProjection.formatted(reset.timeIntervalSince(now))
         return tx("resets ", "se reinicia ") + formatter.string(from: reset) + tx(" · in ", " · en ") + relative
     }
     private func provider(_ state: UsageState, now: Date) -> some View {
-        let retry = max(0, Int(ceil(state.cooldownUntil?.timeIntervalSince(now) ?? 0)))
+        let retry = UsagePaceProjection.wholeSeconds(ceil(state.cooldownUntil?.timeIntervalSince(now) ?? 0)) ?? 0
         let brand = Color.primary
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
@@ -656,9 +658,11 @@ struct UsagePane: View {
                 let used = window.effectiveUsed(now)
                 let remaining = Int((100 - used).rounded())
                 let color = FlyoutStyle.quota(remaining, dark: scheme == .dark)
+                let forecastLine = UsagePace.shared.line(state, window, now: now)
+                let staleDate = UsagePace.shared.staleReadingDate(state, window, now: now)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline) {
-                        Text(window.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text(window.localizedTitle).font(.system(size: 12, weight: .medium)).lineLimit(1)
                         Spacer(minLength: 4)
                         HStack(alignment: .firstTextBaseline, spacing: 3) {
                             Text("\(remaining)%").font(.system(size: 23, weight: .semibold))
@@ -673,14 +677,20 @@ struct UsagePane: View {
                     }.frame(height: 6)
                     Text(resetLabel(window, now: now)).font(.system(size: 10.5)).flyoutSecondary()
                         .fixedSize(horizontal: false, vertical: true)
-                    if let pace = UsagePace.shared.pace(state.provider, window, now: now) {
-                        Text(pace.text).font(.system(size: 10.5, weight: pace.warn ? .semibold : .regular))
-                            .foregroundStyle(pace.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
+                    if let forecastLine {
+                        Text(forecastLine.text).font(.system(size: 10.5, weight: forecastLine.warn ? .semibold : .regular))
+                            .foregroundStyle(forecastLine.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityHidden(true)
+                    } else if let staleDate, staleDate != state.reading?.date {
+                        Text(age(staleDate, now: now)).font(.system(size: 10.5)).flyoutSecondary()
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityValue(tx("\(remaining)% left, \(Int(used.rounded()))% used", "\(remaining)% restante, \(Int(used.rounded()))% usado"))
+                .accessibilityValue(
+                    tx("\(remaining)% left, \(100 - remaining)% used", "\(remaining)% restante, \(100 - remaining)% usado")
+                    + (forecastLine.map { ". " + $0.text } ?? "")
+                )
             }
             if let error = state.error {
                 Label(error, systemImage: "exclamationmark.circle").font(.system(size: 11)).flyoutSecondary()
