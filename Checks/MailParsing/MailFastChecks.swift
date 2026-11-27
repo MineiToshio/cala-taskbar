@@ -6,20 +6,7 @@ import Foundation
 // implementation: a scripted IMAP "world" plays the server (shared mailbox state across reconnects), and an independent
 // MIME splitter (below) supplies the BODY[n] / BODY[n.MIME] sections a real server would return.
 
-// MARK: Reporting
-
-/// A check that documents a defect found in Sources: printed as KNOWN-BUG, never counted as a PASS (nor as a FAIL, so
-/// the suite stays green while the bug is reported). When the defect is fixed the line turns into an ordinary PASS.
-var knownBugs: [String] = []
-func expectOrKnownBug(_ name: String, _ condition: Bool, bug: String) {
-    if !condition { debugDump(name) }
-    if condition {
-        expect(name, true)
-    } else {
-        knownBugs.append("\(name): \(bug)")
-        print("KNOWN-BUG \(name) -- \(bug)")
-    }
-}
+// MARK: Waiting
 
 @MainActor
 func waitFor(_ seconds: Double = 5, _ condition: () -> Bool) async -> Bool {
@@ -568,9 +555,8 @@ func checkOptimisticActions() async throws {
         _ = await h.settle()
         expect("A3b MOVE done but its answer lost: the move is not repeated and the list ends at the server's truth",
                world.count("UID MOVE") == 1 && !h.shows(2) && h.service.unreadCount == world.serverUnread)
-        expectOrKnownBug("I5 MOVE done but its answer lost: the row stays hidden across the reconnect (no false \"it's back\" notice)",
-                         h.published.allSatisfy { !$0.contains { $0.uid == 2 } } && h.service.notices.isEmpty,
-                         bug: "MailService.swift lostAnswer() reverts the hide and posts the 'unconfirmed' notice as soon as the link drops, before the reconnect sync can show the server already moved it")
+        expect("I5 MOVE done but its answer lost: the row stays hidden across the reconnect (no false \"it's back\" notice)",
+                         h.published.allSatisfy { !$0.contains { $0.uid == 2 } } && h.service.notices.isEmpty)
     }
 
     // A4. An action queued (not yet sent) when the link dies survives the reconnect and runs once.
@@ -1459,9 +1445,8 @@ func checkFastWire() async throws {
         var sameName: Error?
         do { try await imap.trash(rows[3]!) } catch { sameName = error }
         expect("E4 .fast: a move refused with a cached listing lists the mailboxes again exactly once", world.count("LIST") == lists + 1)
-        expectOrKnownBug("M1 .fast: when the fresh LIST names the same trash, the refused MOVE is not sent again and the refusal surfaces",
-                         world.count("UID MOVE 3 ") == 1 && { if case MailIMAPError.rejected? = sameName { return true }; return false }(),
-                         bug: "MailIMAP.swift move(): `catch MailIMAPError.rejected where cached` re-sends UID MOVE/COPY to the fresh target without checking that its name differs from the refused one")
+        expect("M1 .fast: when the fresh LIST names the same trash, the refused MOVE is not sent again and the refusal surfaces",
+                         world.count("UID MOVE 3 ") == 1 && { if case MailIMAPError.rejected? = sameName { return true }; return false }())
         // Another client renamed the trash: the cached name is refused, the fresh listing gives the new one.
         world.mutate {
             $0.list = #"* LIST () "/" INBOX"# + "\r\n" + #"* LIST (\All) "/" "[Gmail]/All Mail""# + "\r\n"
@@ -1485,10 +1470,9 @@ func checkFastWire() async throws {
         world.on("UID COPY", .reply("§ NO [OVERQUOTA] copy failed"))
         var sameName: Error?
         do { try await imap.trash(inbox.messages.first { $0.uid == 2 }!) } catch { sameName = error }
-        expectOrKnownBug("M1 .fast UIDPLUS: a refused COPY toward an unchanged trash name is not retried and nothing is flagged",
+        expect("M1 .fast UIDPLUS: a refused COPY toward an unchanged trash name is not retried and nothing is flagged",
                          world.count("UID COPY 2 ") == 1 && !world.commands.contains { $0.hasPrefix("UID STORE 2 ") || $0.hasPrefix("UID EXPUNGE 2") }
-                             && { if case MailIMAPError.rejected? = sameName { return true }; return false }(),
-                         bug: "MailIMAP.swift move(): the UIDPLUS branch retries UID COPY after re-LIST even when the mailbox name is unchanged")
+                             && { if case MailIMAPError.rejected? = sameName { return true }; return false }())
         world.mutate {
             $0.list = #"* LIST (\Trash) "/" "[Gmail]/Papelera""# + "\r\n"
             $0.rules.removeAll()
@@ -1570,7 +1554,7 @@ func checkDeadLinkReconnect() async throws {
     expect("F service: a dead link shows no notice and keeps the list", h.service.notices.isEmpty && h.service.messages.count == 2)
 }
 
-// MARK: Review findings on 2e6ccb4 (I1-I6, M1, M3). Expected KNOWN-BUG until the fix lands; they then turn into PASS.
+// MARK: Review findings on 2e6ccb4 (I1-I6, M1-M3), fixed in 8f2334b: regressions fail the script.
 
 /// multipart/related whose start= root is itself a multipart/alternative (Apple Mail and Outlook send this).
 let fixtureRelatedAlternativeRoot = crlfData("""
@@ -1612,9 +1596,8 @@ func checkReviewFindings() async throws {
     if let root = parsedStructure(fixtureRelatedAlternativeRootStructure), let plan = MailPartPlan.plan(root) {
         let parts = mimeSections(fixtureRelatedAlternativeRoot).filter { plan.sections.contains($0.key) }
         let assembled = MailPartAssembler.assemble(root, parts: parts, boundary: "seed").map(MailMIME.content)
-        expectOrKnownBug("I1 assemble: related with start= naming a nested alternative reads like the whole message",
-                         assembled == whole,
-                         bug: "MailBodyStructure.swift MailPartAssembler.multipart(): rebuilt multipart children carry no Content-ID (BODYSTRUCTURE has none for multiparts), so MailMIME cannot find the start= root; got text=\(assembled?.text.debugDescription ?? "nil") html=\(assembled?.html == nil ? "nil" : "set")")
+        expect("I1 assemble: related with start= naming a nested alternative reads like the whole message",
+                         assembled == whole)
     } else {
         expect("I1 structure parses and plans", false)
     }
@@ -1625,8 +1608,7 @@ func checkReviewFindings() async throws {
         try await imap.open(email: account, password: "pw")
         let inbox = try await imap.synchronize(accountID: account)
         let opened = try await imap.content(of: inbox.messages[0])
-        expectOrKnownBug("I1 .fast open of that message shows what the whole message shows", opened == whole,
-                         bug: "MailIMAP.swift content(of:) accepts the partial rebuild (see MailPartAssembler) instead of falling back to BODY.PEEK[]")
+        expect("I1 .fast open of that message shows what the whole message shows", opened == whole)
 
         let cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("cala-cache-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: cacheDirectory) }
@@ -1639,9 +1621,8 @@ func checkReviewFindings() async throws {
             let file = MailBodyCache(directory: cacheDirectory).fileURL(for: key)!
             _ = await waitFor(1) { FileManager.default.fileExists(atPath: file.path) }
             let cached = MailBodyCache(directory: cacheDirectory).content(for: key)?.content
-            expectOrKnownBug("I1 an empty or wrong partial body is never written to the cache",
-                             cached == nil || (cached == whole && !(cached!.text.isEmpty && cached!.html == nil)),
-                             bug: "MailService.swift content(of:) stores whatever the partial fetch returned (shown text=\(shown.text.debugDescription)); an empty result should not be cached")
+            expect("I1 an empty or wrong partial body is never written to the cache",
+                             cached == nil || (cached == whole && !(cached!.text.isEmpty && cached!.html == nil)))
         } else {
             expect("I1 service harness synced", false)
         }
@@ -1661,10 +1642,9 @@ func checkReviewFindings() async throws {
         _ = await h.settle { world.count("UID STORE") >= 1 && h.service.messages.count == 4 }
         expect("I2 mark all read: the rows listed at tap time end read on the server",
                world.locked { world.messages.filter { $0.uid <= 3 }.allSatisfy { !$0.unread } })
-        expectOrKnownBug("I2 mark all read never marks a message that arrived after the tap (UID > newest listed)",
+        expect("I2 mark all read never marks a message that arrived after the tap (UID > newest listed)",
                          world.locked { world.messages.first { $0.uid == 4 }?.unread == true } && h.row(4)?.unread == true
-                             && h.service.unreadCount == 1,
-                         bug: "MailIMAP.swift markAllRead() stores \\Seen on every UID SEARCH UNSEEN result at send time; it needs the max UID known at tap time (e.g. UID SEARCH UNSEEN UID 1:<max>); sent: \(world.commands.filter { $0.hasPrefix("UID STORE") })")
+                             && h.service.unreadCount == 1)
     }
 
     // I3. A prefetch whose answer times out must not take the connection down (nor loop reconnecting).
@@ -1680,10 +1660,8 @@ func checkReviewFindings() async throws {
         _ = await waitFor { world.count("UID FETCH 1:3 (UID RFC822.SIZE BODYSTRUCTURE)") >= 1 }
         _ = await waitFor(3.5) { false }   // long enough for a quick reconnect and a 2 s backoff retry
         expect("I3 prefetch timeout: the list stays and no notice is shown", h.service.messages.count == 3 && h.service.notices.isEmpty)
-        expectOrKnownBug("I3 a timed-out prefetch keeps the connection (no reconnect)", world.connectionCount == 1,
-                         bug: "MailService.swift monitor() l.1080: prefetch errors propagate like command errors, so a background prefetch timeout closes the link (connections=\(world.connectionCount))")
-        expectOrKnownBug("I3 a prefetch that keeps timing out does not cause repeated reconnects", world.connectionCount <= 2,
-                         bug: "MailService.swift monitor() l.1074 resets quickRetryUsed after every successful sync and prefetchSkipped only grows on done/none, so each reconnect re-prefetches the same rows, times out and reconnects at once again (unbounded; connections in 3.5 s=\(world.connectionCount))")
+        expect("I3 a timed-out prefetch keeps the connection (no reconnect)", world.connectionCount == 1)
+        expect("I3 a prefetch that keeps timing out does not cause repeated reconnects", world.connectionCount <= 2)
     }
 
     // I4. With no connection, an optimistic delete reverts with a notice within a bounded time.
@@ -1700,8 +1678,7 @@ func checkReviewFindings() async throws {
         h.service.trash(target)
         expect("I4 offline delete still hides the row at once", !h.shows(2))
         let reverted = await waitFor(10) { h.service.notices.count == 1 && h.service.messages == before }
-        expectOrKnownBug("I4 offline delete: the row comes back with one notice within 10 s", reverted,
-                         bug: "MailService.swift failOperations(afterDisconnect:) keeps queued moves forever while sign-in keeps failing; the row stays hidden with no notice")
+        expect("I4 offline delete: the row comes back with one notice within 10 s", reverted)
         expect("I4 offline delete: nothing was ever sent", world.count("UID MOVE") == 0)
     }
 
@@ -1717,9 +1694,8 @@ func checkReviewFindings() async throws {
         cache.purge(account: key.account)
         cache.store(MailContent(html: nil, text: "late"), for: key)   // an in-flight write that lands after the removal
         let accountFolder = cache.fileURL(for: key)!.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        expectOrKnownBug("I6 a store after purge(account:) does not recreate the removed account's files",
-                         !FileManager.default.fileExists(atPath: accountFolder.path) && MailBodyCache(directory: root).content(for: key) == nil,
-                         bug: "MailBodyCache.swift store() has no notion of a purged account: a late write recreates <sha256(account)>/... after purge(account:)")
+        expect("I6 a store after purge(account:) does not recreate the removed account's files",
+                         !FileManager.default.fileExists(atPath: accountFolder.path) && MailBodyCache(directory: root).content(for: key) == nil)
         expect("I6 purge(account:) leaves other accounts' bodies", MailBodyCache(directory: root).content(for: kept)?.content.text == "b")
     }
 
@@ -1739,12 +1715,10 @@ func checkReviewFindings() async throws {
         _ = await h.settle { world.heldCount == 0 }
         _ = await waitFor(0.3) { false }
         _ = await h.settle()
-        expectOrKnownBug("M3 read, unread, read (first in flight): the list shows read right after the last tap",
-                         shownAfterTaps == false,
-                         bug: "MailService.swift enqueue(): a markRead is dropped when a markRead for the same message is still in run.pending, even if it is the in-flight one and an unread was queued after it")
-        expectOrKnownBug("M3 read, unread, read (first in flight): the server ends read, matching the last tap",
-                         world.locked { world.messages.first { $0.uid == 2 }?.unread == false } && h.row(2)?.unread == false,
-                         bug: "same enqueue() dedupe: the queued -FLAGS \\Seen is sent last; STOREs sent: \(world.commands.filter { $0.hasPrefix("UID STORE") })")
+        expect("M3 read, unread, read (first in flight): the list shows read right after the last tap",
+                         shownAfterTaps == false)
+        expect("M3 read, unread, read (first in flight): the server ends read, matching the last tap",
+                         world.locked { world.messages.first { $0.uid == 2 }?.unread == false } && h.row(2)?.unread == false)
 
         world.on("UID STORE", .hold)
         h.service.markUnread(other)
@@ -1761,6 +1735,137 @@ func checkReviewFindings() async throws {
     }
 }
 
+// MARK: Follow-up on the fixes: offline grace, half-done UIDPLUS moves (M2), lost-MOVE verification (I5)
+
+@MainActor
+func checkFixFollowUps() async throws {
+    let base: [(UInt32, Bool)] = [(1, false), (2, true), (3, true)]
+    func says(_ notice: MailNotice?, _ english: String, _ spanish: String) -> Bool {
+        guard let text = notice?.text.lowercased() else { return false }
+        return text.contains(english) || text.contains(spanish)
+    }
+
+    // (a) I4 offline grace: a delete queued while the reconnect hangs (no failure to react to) reverts after the grace.
+    expect("I4 the default offline grace is 30 s", MailService.offlineGrace == .seconds(30))
+    do {
+        let saved = MailService.offlineGrace
+        MailService.offlineGrace = .milliseconds(400)
+        defer { MailService.offlineGrace = saved }
+        let world = FakeIMAPWorld(uids: base)
+        let h = try MailHarness(world: world)
+        defer { h.finish() }
+        guard await h.start(rows: 3), let target = h.row(2) else { expect("I4 grace: harness synced", false); return }
+        let before = h.service.messages
+        world.on("DONE", .drop)
+        world.on("LOGIN", .hold)                     // the reconnect's sign-in hangs: no error, no live connection
+        h.service.refresh()
+        _ = await waitFor { world.connectionCount == 2 && world.heldCount == 1 }
+        h.service.trash(target)
+        let hidden = !h.shows(2)
+        let started = ContinuousClock.now
+        let reverted = await waitFor(3) { h.service.notices.count == 1 && h.service.messages == before }
+        let elapsed = started.duration(to: .now)
+        expect("I4 grace: with the sign-in hanging, the delete hides the row, then reverts with one notice after the grace (not before)",
+               hidden && reverted && elapsed >= .milliseconds(350) && elapsed < .seconds(3))
+        expect("I4 grace: the notice says there was no connection, not that the server refused or might have moved it",
+               !says(h.service.notices.first, "check the inbox", "revisa recibidos")
+                   && h.service.notices.first?.text.contains(MailFailure.rejected.localizedDescription) == false)
+        world.release()                              // the sign-in completes after all
+        _ = await h.settle { h.service.messages.count == 3 }
+        _ = await waitFor(0.3) { false }
+        expect("I4 grace: the dropped delete never runs later behind the person's back",
+               world.count("UID MOVE") == 0 && h.shows(2) && h.service.notices.count == 1)
+    }
+
+    // (b) M2: UIDPLUS move that stops half way.
+    do {
+        let world = FakeIMAPWorld(uids: base)
+        world.mutate { $0.capabilities = "IDLE UIDPLUS" }
+        let h = try MailHarness(world: world)
+        defer { h.finish() }
+        guard await h.start(rows: 3), let target = h.row(2) else { expect("M2: harness synced", false); return }
+        let before = h.service.messages
+        world.on("UID EXPUNGE", .reply("§ NO [CANNOT] expunge refused"))
+        h.service.trash(target)
+        _ = await h.settle { h.service.notices.count == 1 && world.count(#"UID STORE 2 -FLAGS.SILENT (\Deleted)"#) == 1 }
+        _ = await h.settle()
+        let log = world.log
+        let copy = log.firstIndex { $0.command.hasPrefix("UID COPY 2 ") && $0.status == "OK" }
+        let expunge = log.firstIndex { $0.command == "UID EXPUNGE 2" }
+        let repair = log.firstIndex { $0.command == #"UID STORE 2 -FLAGS.SILENT (\Deleted)"# }
+        expect("M2 COPY OK + STORE OK + EXPUNGE NO: a -FLAGS \\Deleted repair is sent once, for the same UID, after the refused EXPUNGE",
+               copy != nil && expunge != nil && repair != nil && expunge! < repair! && world.count("UID STORE 2 -FLAGS") == 1)
+        let span = copy.flatMap { first in repair.map { first <= $0 ? Array(log[first...$0]) : [] } } ?? []
+        expect("M2 repair is sent in the same UIDVALIDITY epoch as the move (same connection, no re-SELECT in between)",
+               !span.isEmpty && Set(span.map(\.connection)).count == 1 && !span.contains { $0.command.hasPrefix("SELECT") }
+                   && world.locked { world.validity } == 7)
+        expect("M2 EXPUNGE refused: the original keeps no \\Deleted flag, the row is back, and nothing else was expunged",
+               world.locked { world.messages.first { $0.uid == 2 }.map { !$0.deleted } == true } && h.service.messages == before
+                   && wireIsSafe(log.map { ($0.command, $0.status) }) && !world.commands.contains("EXPUNGE"))
+        expect("M2 EXPUNGE refused: one notice saying a copy went to the trash",
+               h.service.notices.count == 1 && says(h.service.notices.first, "cop", "cop")
+                   && says(h.service.notices.first, "trash", "papelera"))
+    }
+    do {
+        let world = FakeIMAPWorld(uids: base)
+        world.mutate { $0.capabilities = "IDLE UIDPLUS" }
+        let h = try MailHarness(world: world)
+        defer { h.finish() }
+        guard await h.start(rows: 3), let target = h.row(2) else { expect("M2b: harness synced", false); return }
+        let before = h.service.messages
+        world.on(#"UID STORE 2 +FLAGS.SILENT (\Deleted)"#, .reply("§ NO [CANNOT] store refused"))
+        h.service.trash(target)
+        _ = await h.settle { h.service.notices.count == 1 }
+        _ = await waitFor(0.3) { false }
+        _ = await h.settle()
+        expect("M2 COPY OK + STORE NO: no repair and no EXPUNGE are sent",
+               world.count("UID STORE 2 -FLAGS") == 0 && world.count("UID EXPUNGE") == 0 && world.count("UID COPY 2 ") == 1)
+        expect("M2 COPY OK + STORE NO: the row is back with the same 'a copy went to the trash' notice",
+               h.service.messages == before && h.service.notices.count == 1
+                   && says(h.service.notices.first, "cop", "cop") && says(h.service.notices.first, "trash", "papelera"))
+    }
+
+    // (c) I5: after a MOVE whose answer was lost, Cala asks the server with UID FETCH <uid> (UID).
+    func lostMove(_ action: FakeIMAPWorld.Action, verify: FakeIMAPWorld.Action?) async throws
+        -> (h: MailHarness, world: FakeIMAPWorld, before: [MailMessage])? {
+        let world = FakeIMAPWorld(uids: base)
+        let h = try MailHarness(world: world)
+        guard await h.start(rows: 3), let target = h.row(2) else { h.finish(); return nil }
+        let before = h.service.messages
+        world.on("UID MOVE", action)
+        if let verify { world.on("UID FETCH 2 (UID)", verify) }
+        h.record()
+        h.service.trash(target)
+        _ = await h.settle { world.connectionCount >= 2 && world.count("UID FETCH 2 (UID)") >= 1 }
+        _ = await waitFor(0.3) { false }
+        _ = await h.settle()
+        return (h, world, before)
+    }
+    if let gone = try await lostMove(.applyThenDrop, verify: nil) {
+        defer { gone.h.finish() }
+        let checks = gone.world.log.filter { $0.command == "UID FETCH 2 (UID)" }
+        expect("I5 lost MOVE, message gone: verified once with UID FETCH 2 (UID) on the new connection",
+               checks.count == 1 && checks.first?.connection == 2 && gone.world.count("UID MOVE") == 1)
+        expect("I5 lost MOVE, message gone: stays hidden in every publish, no notice, MOVE not resent",
+               gone.h.published.allSatisfy { !$0.contains { $0.uid == 2 } } && gone.h.service.notices.isEmpty && !gone.h.shows(2))
+    } else { expect("I5 gone: harness synced", false) }
+    if let present = try await lostMove(.drop, verify: nil) {
+        defer { present.h.finish() }
+        expect("I5 lost MOVE, message still there: the row comes back unchanged with one notice, MOVE not resent",
+               present.h.service.messages == present.before && present.h.service.notices.count == 1
+                   && present.world.count("UID MOVE") == 1 && present.world.count("UID FETCH 2 (UID)") == 1)
+        expect("I5 lost MOVE, message still there: the notice says it was not moved (no 'check the inbox' uncertainty)",
+               !says(present.h.service.notices.first, "check the inbox", "revisa recibidos"))
+    } else { expect("I5 present: harness synced", false) }
+    if let failed = try await lostMove(.drop, verify: .reply("§ NO [UNAVAILABLE] try later")) {
+        defer { failed.h.finish() }
+        _ = await failed.h.settle { failed.h.service.notices.count >= 1 }
+        expect("I5 lost MOVE, the check itself fails: the row comes back with one 'check the inbox' notice, MOVE not resent",
+               failed.h.service.messages.contains { $0.uid == 2 } && failed.h.service.notices.count == 1
+                   && says(failed.h.service.notices.first, "check the inbox", "revisa recibidos") && failed.world.count("UID MOVE") == 1)
+    } else { expect("I5 verification failure: harness synced", false) }
+}
+
 // MARK: Entry point
 
 @MainActor
@@ -1775,5 +1880,5 @@ func runFastMailChecks() async {
     do { try await checkDeadLink() } catch { expect("F dead link check ran (\(error))", false) }
     do { try await checkDeadLinkReconnect() } catch { expect("F dead link reconnect check ran (\(error))", false) }
     do { try await checkReviewFindings() } catch { expect("Review finding checks ran (\(error))", false) }
-    if !knownBugs.isEmpty { print("\(knownBugs.count) KNOWN-BUG (not counted as PASS)") }
+    do { try await checkFixFollowUps() } catch { expect("Fix follow-up checks ran (\(error))", false) }
 }
