@@ -20,6 +20,13 @@ struct MailBodyPart: Equatable {
     var isAttachment: Bool { disposition == "attachment" }
     var leaves: [MailBodyPart] { isMultipart ? children.flatMap(\.leaves) : [self] }
     var depth: Int { 1 + (children.map(\.depth).max() ?? 0) }
+
+    /// The node numbered `section` in this tree (this node for its own section).
+    func part(at section: String) -> MailBodyPart? {
+        if self.section == section { return self }
+        for child in children { if let found = child.part(at: section) { return found } }
+        return nil
+    }
 }
 
 enum MailBodyStructure {
@@ -151,9 +158,13 @@ struct MailPartPlan: Equatable {
         return part.children.allSatisfy(isPlainTree)
     }
 
+    /// A multipart's own section in `sections` means "fetch only its MIME header" (BODY.PEEK[s.MIME]): BODYSTRUCTURE has
+    /// no Content-ID for multiparts, and a multipart/related `start` may name one (a related whose root is an
+    /// alternative), so the rebuild copies that header's Content-ID. Its children are fetched as usual.
     private static func collect(_ part: MailBodyPart, into sections: inout [String], bytes: inout Int) {
         for (index, child) in part.children.enumerated() {
             if child.isMultipart {
+                if part.subtype == "related", part.parameters["start"] != nil { sections.append(child.section) }
                 collect(child, into: &sections, bytes: &bytes)
                 continue
             }
@@ -211,6 +222,11 @@ enum MailPartAssembler {
         if let start = part.parameters["start"] {
             header += "; start=\"" + start.replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        // A nested multipart's real Content-ID (fetched with BODY.PEEK[s.MIME]), so a related `start` can find it.
+        if let fetched = parts[part.section], let id = MailMIME.headers(fetched.header)["content-id"],
+           !id.contains(where: { $0 == "\r" || $0 == "\n" }) {
+            header += "\r\nContent-ID: " + id
         }
         var data = Data((header + "\r\n\r\n").utf8)
         for child in part.children {

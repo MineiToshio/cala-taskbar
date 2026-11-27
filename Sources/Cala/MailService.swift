@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import Network
 import Security
 import os
 
@@ -331,9 +332,14 @@ final class MailService: ObservableObject {
         case content(MailMessage)
         case markRead(MailMessage)
         case markUnread(MailMessage)
-        case markAllRead
+        /// Every unseen message up to `through` (the newest UID shown when it was tapped), in UIDVALIDITY `validity`.
+        case markAllRead(through: UInt32, validity: UInt32)
         case archive(MailMessage)
         case trash(MailMessage)
+        /// A move whose answer was lost with the connection: read-only check whether the message is still in the inbox.
+        case verifyMove(MailMessage, toTrash: Bool)
+        /// A UIDPLUS move flagged the original \Deleted but its UID EXPUNGE was refused: take the flag off again.
+        case clearDeleted(MailMessage)
 
         var kind: String {
             switch self {
@@ -343,6 +349,8 @@ final class MailService: ObservableObject {
             case .markAllRead: "mark-all-read"
             case .archive: "archive"
             case .trash: "trash"
+            case .verifyMove: "verify-move"
+            case .clearDeleted: "clear-deleted"
             }
         }
 
@@ -353,29 +361,60 @@ final class MailService: ObservableObject {
         /// Never true for MOVE/COPY (a second copy).
         var isRepeatable: Bool {
             switch self {
-            case .content, .markRead, .markUnread, .markAllRead: true
+            case .content, .markRead, .markUnread, .markAllRead, .verifyMove, .clearDeleted: true
             case .archive, .trash: false
+            }
+        }
+        /// Hides a row until the server confirms; such an action never waits for a connection indefinitely.
+        var hidesRow: Bool {
+            switch self {
+            case .archive, .trash, .verifyMove: true
+            default: false
+            }
+        }
+        /// Sent by Cala itself to settle an earlier action: goes ahead of the person's queued actions.
+        var isRepair: Bool {
+            switch self {
+            case .verifyMove, .clearDeleted: true
+            default: false
             }
         }
 
         var message: MailMessage? {
             switch self {
             case let .content(message), let .markRead(message), let .markUnread(message), let .archive(message),
-                 let .trash(message): message
+                 let .trash(message), let .verifyMove(message, _), let .clearDeleted(message): message
             case .markAllRead: nil
             }
         }
 
-        func perform(on connection: MailIMAP) async throws -> MailContent {
+        enum Outcome {
+            case content(MailContent)
+            case done
+            /// verifyMove: whether the message is still in the inbox.
+            case stillInInbox(Bool)
+        }
+
+        func perform(on connection: MailIMAP) async throws -> Outcome {
             switch self {
-            case let .content(message): return try await connection.content(of: message)
+            case let .content(message): return .content(try await connection.content(of: message))
             case let .markRead(message): try await connection.markRead(message)
             case let .markUnread(message): try await connection.markUnread(message)
-            case .markAllRead: try await connection.markAllRead()
+            case let .markAllRead(through, validity): try await connection.markAllRead(through: through, validity: validity)
             case let .archive(message): try await connection.archive(message)
             case let .trash(message): try await connection.trash(message)
+            case let .verifyMove(message, _): return .stillInInbox(try await connection.isInInbox(message))
+            case let .clearDeleted(message): try await connection.clearDeleted(message)
             }
-            return MailContent(html: nil, text: "")
+            return .done
+        }
+
+        private var toTrash: Bool {
+            switch self {
+            case .trash: true
+            case let .verifyMove(_, toTrash): toTrash
+            default: false
+            }
         }
 
         /// What the person reads when the server refused it (the row is already back).
@@ -393,20 +432,57 @@ final class MailService: ObservableObject {
             case .markUnread: what = tx("Couldn’t mark the message as unread.", "No se pudo marcar el mensaje como no leído.")
             case .markAllRead:
                 what = tx("Couldn’t mark all messages as read.", "No se pudieron marcar todos los mensajes como leídos.")
+            case .verifyMove: return unconfirmed
+            case .clearDeleted:
+                what = tx("Couldn’t restore the message in Inbox.", "No se pudo restaurar el mensaje en Recibidos.")
             }
             return what + " " + error.localizedDescription
         }
 
-        /// The connection dropped after a move was sent: the server may or may not have done it.
+        /// The connection dropped after a move was sent and Cala could not find out whether it happened.
         var unconfirmed: String {
-            if case .archive = self {
-                return tx("The connection dropped before the server confirmed the archive. Check the inbox before trying again.",
-                          "Se cortó la conexión antes de que el servidor confirmara el archivado. Revisa Recibidos antes de volver a intentarlo.")
+            if toTrash {
+                return tx("The connection dropped before the server confirmed the delete. Check the inbox before trying again.",
+                          "Se cortó la conexión antes de que el servidor confirmara la eliminación. Revisa Recibidos antes de volver a intentarlo.")
             }
-            return tx("The connection dropped before the server confirmed the delete. Check the inbox before trying again.",
-                      "Se cortó la conexión antes de que el servidor confirmara la eliminación. Revisa Recibidos antes de volver a intentarlo.")
+            return tx("The connection dropped before the server confirmed the archive. Check the inbox before trying again.",
+                      "Se cortó la conexión antes de que el servidor confirmara el archivado. Revisa Recibidos antes de volver a intentarlo.")
+        }
+
+        /// After reconnecting, the message was still in the inbox: the lost move did not happen.
+        var notDone: String {
+            if toTrash {
+                return tx("The connection dropped and the message wasn’t moved to the trash. It’s back in the list.",
+                          "Se cortó la conexión y el mensaje no se movió a la papelera. Volvió a la lista.")
+            }
+            return tx("The connection dropped and the message wasn’t archived. It’s back in the list.",
+                      "Se cortó la conexión y el mensaje no se archivó. Volvió a la lista.")
+        }
+
+        /// No connection for a while: the action was dropped rather than run later behind the person's back.
+        var offline: String {
+            if toTrash {
+                return tx("No connection: the message wasn’t moved to the trash. It’s still in Inbox.",
+                          "Sin conexión: el mensaje no se movió a la papelera. Sigue en Recibidos.")
+            }
+            return tx("No connection: the message wasn’t archived. It’s still in Inbox.",
+                      "Sin conexión: el mensaje no se archivó. Sigue en Recibidos.")
+        }
+
+        /// A UIDPLUS move got as far as copying: the copy exists, the original stays in the inbox.
+        var halfMoved: String {
+            if toTrash {
+                return tx("A copy went to the trash, but the original couldn’t be removed from Inbox.",
+                          "Se copió a la papelera, pero el original no se pudo quitar de Recibidos.")
+            }
+            return tx("A copy was archived, but the original couldn’t be removed from Inbox.",
+                      "Se archivó una copia, pero el original no se pudo quitar de Recibidos.")
         }
     }
+
+    /// Actions dropped because the account stopped syncing (signed out, turned off, Mail stopped).
+    private static let stoppedNotice = tx("Mail stopped before your last changes reached the server, so they weren’t made. The inbox is unchanged.",
+                                          "El correo se detuvo antes de que tus últimos cambios llegaran al servidor, así que no se hicieron. Recibidos no cambió.")
 
     private struct PendingOperation {
         let id: UUID
@@ -422,7 +498,7 @@ final class MailService: ObservableObject {
         var worker: Task<Void, Never>?
         var retryDelay: Task<Void, Never>?
         var connection: MailIMAP?
-        /// Content first, then the person's actions in the order they were made.
+        /// Content first, then Cala's own repairs, then the person's actions in the order they were made.
         var pending: [PendingOperation] = [] {
             didSet {
                 let content = pending.filter(\.operation.isContent).count
@@ -433,8 +509,8 @@ final class MailService: ObservableObject {
         var inFlight: UUID?
         /// What interrupted the connection's wait since it last looked (see wake): "operation", "refresh".
         var wakeCauses: Set<String> = []
-        /// Messages prefetch already looked at and left out (too big, unknown structure): not asked about again.
-        var prefetchSkipped: Set<String> = []
+        /// Signed in and synced: actions sent now reach the server promptly.
+        var live = false
     }
 
     private struct DeferredRead {
@@ -460,6 +536,17 @@ final class MailService: ObservableObject {
     private let bodyCache: MailBodyCache?
     /// Disk writes and purges of the body cache, in order, off the main thread.
     private let cacheQueue = DispatchQueue(label: "Cala.MailBodyCache", qos: .utility)
+    /// Messages prefetch looked at and left out (too big, unknown structure, failed): not tried again in this process.
+    private var prefetchSkipped: Set<String> = []
+    /// Reconnects as soon as the network comes back instead of waiting out the retry delay.
+    private var pathMonitor: NWPathMonitor?
+    private var pathSatisfied = true
+    /// Mail stopped while Cala keeps running: the cached bodies are deleted shortly after (cancelled by start()). At quit
+    /// the process ends before it runs, so the cache survives a relaunch.
+    private var pendingPurge: DispatchWorkItem?
+    /// An action that hides a row is dropped (row back, notice) when it could not be sent for this long for lack of a
+    /// connection.
+    static var offlineGrace: Duration = .seconds(30)
     private var pendingSignIns: [String: MailIMAP] = [:]
     private var wakeObserver: NSObjectProtocol?
     private var observesWake = false
@@ -549,7 +636,23 @@ final class MailService: ObservableObject {
         running = true
         let run = UUID()
         runID = run
+        pendingPurge?.cancel()
+        pendingPurge = nil
+        if let bodyCache {
+            let keep = accounts.filter(\.enabled).map(\.id)
+            cacheQueue.async { bodyCache.cleanUp(keeping: keep) }
+        }
         if observesWake {
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] path in
+                let satisfied = path.status == .satisfied
+                Task { @MainActor in
+                    guard let self, self.runID == run else { return }
+                    self.networkChanged(satisfied: satisfied)
+                }
+            }
+            monitor.start(queue: DispatchQueue(label: "Cala.MailPath", qos: .utility))
+            pathMonitor = monitor
             wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
             ) { [weak self] _ in
@@ -639,6 +742,8 @@ final class MailService: ObservableObject {
         wakeObserver = nil
         awaitingKeychainNotice = false
         accountsAwaitingNotice.removeAll()
+        pathMonitor?.cancel()
+        pathMonitor = nil
         for connection in pendingSignIns.values { connection.close() }
         pendingSignIns.removeAll()
         guard running else { return }
@@ -649,6 +754,19 @@ final class MailService: ObservableObject {
         deferredReads.removeAll()
         for account in accounts { status[account.id] = .paused }
         publishInbox()
+        if let bodyCache {
+            let purge = DispatchWorkItem { bodyCache.purgeAll() }
+            pendingPurge = purge
+            cacheQueue.asyncAfter(deadline: .now() + 3, execute: purge)
+        }
+    }
+
+    /// The network came back: accounts waiting out a retry delay reconnect now.
+    private func networkChanged(satisfied: Bool) {
+        defer { pathSatisfied = satisfied }
+        guard satisfied, !pathSatisfied else { return }
+        MailTiming.line("network-back runs=\(runs.count)")
+        for run in runs.values where run.connection == nil { run.retryDelay?.cancel() }
     }
 
     func refresh() {
@@ -750,7 +868,7 @@ final class MailService: ObservableObject {
             status[id] = MailFailure.from(error).status
             return
         }
-        endRun(id)
+        endRun(id, removing: true)
         accounts = updated
         status[id] = nil
         snapshots[id] = nil
@@ -762,7 +880,9 @@ final class MailService: ObservableObject {
     private func forgetCachedBodies(of id: String) {
         known[id] = nil
         guard let bodyCache else { return }
-        cacheQueue.async { bodyCache.purge(account: id) }
+        // From now on nothing of this account is kept or written, even by a write already queued.
+        bodyCache.forget(account: id)
+        cacheQueue.async { bodyCache.deleteFiles(account: id) }
     }
 
     func dismissNotice(_ id: Int) {
@@ -826,7 +946,8 @@ final class MailService: ObservableObject {
                     run.pending.remove(at: index).contentResult?.resume(throwing: CancellationError())
                 }
             }
-            if let bodyCache, let key, accounts.contains(where: { $0.id == id && $0.enabled }) {
+            // Never a blank body (a later open fetches it again), never for an account that went away meanwhile.
+            if let bodyCache, let key, !content.isBlank, running, accounts.contains(where: { $0.id == id && $0.enabled }) {
                 bodyCache.rememberInMemory(content, for: key)
                 cacheQueue.async { bodyCache.store(content, for: key) }
                 MailTiming.line("cache-store op=\(timingID) acct=\(logName(id)) bytes=\(MailBodyCache.size(of: content))")
@@ -884,7 +1005,10 @@ final class MailService: ObservableObject {
         let tapped = MailTiming.now()
         let id = accountID.map(Self.normalize)
         for account in accounts where account.enabled && (id == nil || account.id == id) {
-            enqueue(.markAllRead, for: account.id, tapped: tapped, effect: .readAll)
+            // Only what the person could see: mail that arrives after the tap stays unread.
+            guard let snapshot = snapshots[account.id], let newest = snapshot.messages.map(\.uid).max() else { continue }
+            enqueue(.markAllRead(through: newest, validity: snapshot.validity), for: account.id, tapped: tapped,
+                    effect: .readAllThrough(uid: newest))
         }
     }
 
@@ -948,9 +1072,10 @@ final class MailService: ObservableObject {
         guard running, accounts.contains(where: { $0.id == id && $0.enabled }) else { discardExisting(); return }
         if runs[id] == nil { launch(id) }
         guard let run = runs[id] else { discardExisting(); return }
+        // A read already waiting (not sent yet) covers this one. One on the wire does not: a later unread may follow it.
         if case let .markRead(message) = operation, run.pending.contains(where: {
-            if case let .markRead(queued) = $0.operation { return queued.id == message.id }
-            return false
+            guard $0.id != run.inFlight, case let .markRead(queued) = $0.operation else { return false }
+            return queued.id == message.id
         }) { discardExisting(); return }
         // A read and an unread of the same message that was not sent yet cancel out: only the newest is sent.
         if let message = operation.message, case .markRead = operation {
@@ -968,6 +1093,7 @@ final class MailService: ObservableObject {
         }
         MailTiming.line("enqueue op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) since_tap_ms=\(MailTiming.ms(from: tapped, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil) effect=\(pending.effect.map(String.init) ?? "-")")
         insert(pending, into: run)
+        if operation.hidesRow { expireIfOffline(pending.id, id: id, run: run) }
         if pending.effect != nil {
             let publishStart = MailTiming.now()
             publishInbox()
@@ -985,13 +1111,49 @@ final class MailService: ObservableObject {
         }
     }
 
-    /// Content requests go ahead of every action that is not already on the wire; actions keep their order.
+    /// Content requests go ahead of everything not already on the wire, then Cala's own repairs (checking a lost move,
+    /// undoing a half move); the person's actions keep their order.
     private func insert(_ pending: PendingOperation, into run: AccountRun) {
-        if pending.operation.isContent,
-           let index = run.pending.firstIndex(where: { !$0.operation.isContent && $0.id != run.inFlight }) {
+        func rank(_ operation: Operation) -> Int { operation.isContent ? 0 : operation.isRepair ? 1 : 2 }
+        let mine = rank(pending.operation)
+        if mine < 2, let index = run.pending.firstIndex(where: { rank($0.operation) > mine && $0.id != run.inFlight }) {
             run.pending.insert(pending, at: index)
         } else {
             run.pending.append(pending)
+        }
+    }
+
+    /// Drops every queued (not sent) action that hides a row: the row comes back with a notice.
+    private func dropRowActions(in run: AccountRun, id: String, reason: String) {
+        var dropped: [Operation] = []
+        run.pending.removeAll { pending in
+            guard pending.operation.hidesRow, pending.id != run.inFlight else { return false }
+            if let effect = pending.effect { overlays[id]?.remove(effect) }
+            MailTiming.line("optimistic-revert op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=\(reason)")
+            dropped.append(pending.operation)
+            return true
+        }
+        for operation in dropped {
+            if case .verifyMove = operation { notify(id, operation.unconfirmed) } else { notify(id, operation.offline) }
+        }
+    }
+
+    /// An action that hides a row and has not reached the server `offlineGrace` after it was queued, because there is no
+    /// working connection, is dropped: the row comes back with a notice, and it never runs later behind the person's back.
+    private func expireIfOffline(_ operationID: UUID, id: String, run: AccountRun) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.offlineGrace)
+            guard let self, self.runs[id] === run, !run.live, run.inFlight != operationID,
+                  let index = run.pending.firstIndex(where: { $0.id == operationID }) else { return }
+            let pending = run.pending.remove(at: index)
+            if let effect = pending.effect { self.overlays[id]?.remove(effect) }
+            MailTiming.line("optimistic-revert op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(self.logName(id)) reason=offline")
+            if case .verifyMove = pending.operation {
+                self.notify(id, pending.operation.unconfirmed)
+            } else {
+                self.notify(id, pending.operation.offline)
+            }
+            self.publishInbox()
         }
     }
 
@@ -1003,6 +1165,7 @@ final class MailService: ObservableObject {
 
     private func launch(_ id: String) {
         guard runs[id] == nil else { return }
+        bodyCache?.allow(account: id)
         let run = AccountRun()
         runs[id] = run
         status[id] = .connecting
@@ -1011,25 +1174,27 @@ final class MailService: ObservableObject {
         }
     }
 
-    private func endRun(_ id: String) {
+    /// `removing`: the account is going away, so its notices go too and nothing new is said about it.
+    private func endRun(_ id: String, removing: Bool = false) {
         for (messageID, read) in deferredReads where read.message.accountID == id { deferredReads[messageID] = nil }
-        overlays[id] = nil
-        notices.removeAll { $0.accountID == id }
-        guard let run = runs.removeValue(forKey: id) else { return }
+        if removing { notices.removeAll { $0.accountID == id } }
+        guard let run = runs.removeValue(forKey: id) else { overlays[id] = nil; return }
         run.worker?.cancel()
         run.retryDelay?.cancel()
         run.connection?.close()
-        failOperations(in: run, id: id, with: .unavailable)
+        failOperations(in: run, id: id, with: .unavailable, announce: !removing)
         overlays[id] = nil
     }
 
     private func monitor(_ id: String, run: AccountRun) async {
         var backoff = 2
         var connectAttempt = 0
-        /// The first reconnect after a dead link (or a dropped connection that had been working) happens at once.
+        /// The first reconnect after a link failure that hit something the person is waiting for happens at once. It is
+        /// granted again only after a connection stayed up for a minute (so a flapping link can't loop).
         var quickRetryUsed = false
         defer {
             run.worker = nil
+            run.live = false
             if runs[id] === run { runs[id] = nil }
         }
         while runs[id] === run && !Task.isCancelled {
@@ -1039,15 +1204,20 @@ final class MailService: ObservableObject {
             run.connection = connection
             connectAttempt += 1
             if connectAttempt > 1 { MailTiming.line("reconnect acct=\(logName(id)) attempt=\(connectAttempt)") }
-            var syncedAt: ContinuousClock.Instant?
+            var connectedAt: ContinuousClock.Instant?
             var signedIn = false
+            /// The failure came from prefetch (background): it never earns an immediate reconnect.
+            var backgroundFailure = false
             do {
                 try await withTaskCancellationHandler {
                     defer { connection.close() }
                     try await signIn(id, name: logName(id), on: connection)
                     signedIn = true
+                    run.live = true
+                    connectedAt = .now
                     var syncReason = "connect"
                     var lastSync: ContinuousClock.Instant?
+                    var firstSync = true
                     while runs[id] === run && !Task.isCancelled {
                         let revision = connection.changeRevision
                         let hadOperations = !run.pending.isEmpty
@@ -1064,19 +1234,23 @@ final class MailService: ObservableObject {
                         if !barrier && !run.pending.isEmpty { continue }
                         if !syncReason.isEmpty {
                             guard let snapshot = try await synchronize(id, run: run, on: connection, reason: syncReason,
-                                                                       yieldOnlyToContent: barrier) else { continue }
+                                                                       yieldOnlyToContent: barrier, first: firstSync) else { continue }
                             syncReason = ""
                             lastSync = .now
                             status[id] = .connected
-                            if syncedAt == nil {
-                                syncedAt = .now
-                                quickRetryUsed = false
+                            if firstSync {
+                                firstSync = false
                                 log("mail: \(logName(id)) synced messages=\(snapshot.messages.count) unread=\(snapshot.unread)")
                             }
                         }
                         guard run.pending.isEmpty else { continue }
                         let beforePrefetch = connection.changeRevision
-                        try await prefetch(id, run: run, on: connection)
+                        do {
+                            try await prefetch(id, run: run, on: connection)
+                        } catch {
+                            backgroundFailure = true
+                            throw error
+                        }
                         guard runs[id] === run, !Task.isCancelled else { return }
                         if connection.changeRevision != beforePrefetch { syncReason = "server-change" }
                         guard run.pending.isEmpty, syncReason.isEmpty else { continue }
@@ -1106,11 +1280,12 @@ final class MailService: ObservableObject {
             } catch {
                 connection.close()
                 run.connection = nil
+                run.live = false
                 guard runs[id] === run, !Task.isCancelled else { return }
                 let failure = MailFailure.from(error)
-                MailTiming.line("connection-lost acct=\(logName(id)) failure=\(failure.logCode) timed_out=\({ if case MailIMAPError.timedOut = error { return true }; return false }()) context=\(connection.timingContext)")
+                MailTiming.line("connection-lost acct=\(logName(id)) failure=\(failure.logCode) timed_out=\({ if case MailIMAPError.timedOut = error { return true }; return false }()) background=\(backgroundFailure) context=\(connection.timingContext)")
                 if failure == .keychainNeedsNotice {
-                    failOperations(in: run, id: id, with: .unavailable)
+                    failOperations(in: run, id: id, with: .unavailable, announce: true)
                     publishInbox()
                     explainKeychainAgain(for: id)
                     return
@@ -1124,12 +1299,22 @@ final class MailService: ObservableObject {
                 case .linkDead?, .disconnected?, .timedOut?: linkFailure = true
                 default: linkFailure = false
                 }
-                let quick = signedIn && linkFailure && !quickRetryUsed && !failure.requiresUserAction
-                failOperations(in: run, id: id, with: failure, afterDisconnect: !failure.requiresUserAction, keepContent: quick)
+                let healthy = connectedAt.map { $0.duration(to: .now) >= .seconds(60) } ?? false
+                if healthy {
+                    backoff = 2
+                    quickRetryUsed = false
+                }
+                // Immediate only when the person is waiting on this connection (something queued or on the wire).
+                let interactive = !backgroundFailure && !run.pending.isEmpty
+                let quick = signedIn && linkFailure && interactive && !quickRetryUsed && !failure.requiresUserAction
+                failOperations(in: run, id: id, with: failure, afterDisconnect: !failure.requiresUserAction, keepContent: quick,
+                               announce: failure.requiresUserAction)
+                // Could not even connect: there is no connection to carry a delete or archive, so those come back now
+                // rather than running later behind the person's back (reads stay queued: they are harmless to send late).
+                if !signedIn && !failure.requiresUserAction { dropRowActions(in: run, id: id, reason: "connect-failed") }
                 publishInbox()
                 if failure.requiresUserAction { return }
 
-                if let syncedAt, syncedAt.duration(to: .now) >= .seconds(60) { backoff = 2 }
                 if quick {
                     quickRetryUsed = true
                     MailTiming.line("reconnect-immediate acct=\(logName(id)) failure=\(failure.logCode) queued=\(run.pending.count)")
@@ -1149,7 +1334,7 @@ final class MailService: ObservableObject {
     /// Reads the inbox and applies it. nil: it stepped aside for something the person is waiting for (an open, or any
     /// action unless `yieldOnlyToContent`), having applied nothing; the caller runs that and syncs again.
     private func synchronize(_ id: String, run: AccountRun, on connection: MailIMAP, reason: String,
-                             yieldOnlyToContent: Bool) async throws -> MailInboxSnapshot? {
+                             yieldOnlyToContent: Bool, first: Bool) async throws -> MailInboxSnapshot? {
         connection.timingContext = "acct=\(logName(id)) sync=\(MailTiming.nextID())"
         connection.timingReason = reason
         let sequence = (syncStarted[id] ?? 0) + 1
@@ -1170,15 +1355,18 @@ final class MailService: ObservableObject {
             for (messageID, read) in deferredReads where read.message.accountID == id && read.message.uidValidity != snapshot.validity {
                 dropDeferredRead(messageID)
             }
-            if let bodyCache {
-                let validity = snapshot.validity
-                cacheQueue.async { bodyCache.purge(account: id, keepingValidity: validity) }
-            }
         }
+        if let bodyCache, first || previous?.validity != snapshot.validity {
+            // Bodies cached under another epoch name other messages now (also after one changed while Cala was off).
+            let validity = snapshot.validity
+            cacheQueue.async { bodyCache.purge(account: id, keepingValidity: validity) }
+        }
+        // Rows whose preview was cut short are not remembered, so the next sync reads them again.
+        let complete = snapshot.messages.filter { !snapshot.incomplete.contains($0.uid) }
         if known[id]?.validity == snapshot.validity {
-            known[id]?.merge(snapshot.messages)
+            known[id]?.merge(complete)
         } else {
-            known[id] = MailKnownMessages(validity: snapshot.validity, messages: snapshot.messages)
+            known[id] = MailKnownMessages(validity: snapshot.validity, messages: complete)
         }
         snapshots[id] = snapshot
         overlays[id]?.prune(appliedSync: sequence)
@@ -1191,13 +1379,15 @@ final class MailService: ObservableObject {
 
     /// After a sync, with nothing queued: bodies of the top visible rows not cached yet, unread first, within
     /// MailPrefetchPlanner's limits; skipped on constrained or expensive networks, stopped by any queued work.
+    /// A refusal is handled here; a message that failed is never tried again in this process. Only a link that sent
+    /// nothing for MailIMAP.bodyStallMS reaches the caller (the connection is unusable then).
     private func prefetch(_ id: String, run: AccountRun, on connection: MailIMAP) async throws {
         guard connection.tuning.prefetch, let bodyCache, run.pending.isEmpty else { return }
         if connection.isConstrainedPath {
             MailTiming.line("prefetch-skip acct=\(logName(id)) reason=constrained-network")
             return
         }
-        let skipped = run.prefetchSkipped
+        let skipped = prefetchSkipped
         let rows = messages.filter { $0.accountID == id && !skipped.contains($0.id) }
         let candidates = await Task.detached(priority: .utility) {
             MailPrefetchPlanner.candidates(visible: rows, isCached: { MailBodyKey($0).map(bodyCache.contains) ?? true })
@@ -1207,11 +1397,26 @@ final class MailService: ObservableObject {
         MailTiming.line("prefetch-start acct=\(logName(id)) candidates=\(candidates.count)")
         connection.timingContext = "acct=\(logName(id)) prefetch"
         let signal = run.signal
-        let result = try await connection.prefetch(candidates, shouldStop: { signal.anyWaiting })
+        let result: (contents: [(MailMessage, MailContent)], stop: String)
+        do {
+            result = try await connection.prefetch(candidates, shouldStop: { signal.anyWaiting })
+        } catch {
+            prefetchSkipped.formUnion(candidates.map(\.id))
+            let refused = connection.lastCommandRefused
+            MailTiming.line("prefetch-failed acct=\(logName(id)) err=\(MailTiming.describe(error)) refused=\(refused) ms=\(MailTiming.ms(since: started))")
+            if error is CancellationError { throw error }
+            // NO/BAD, an unreadable reply, or a reply that stalled (abandoned, its late answer is skipped): the
+            // connection stays up. A dead link shows up at the next DONE instead.
+            if case MailIMAPError.timedOut = error { return }
+            if refused || !Self.isLinkFailure(error) { return }
+            throw error
+        }
         let fetched = Set(result.contents.map(\.0.id))
         if result.stop == "done" || result.stop == "none" {
-            run.prefetchSkipped.formUnion(candidates.map(\.id).filter { !fetched.contains($0) })
+            prefetchSkipped.formUnion(candidates.map(\.id).filter { !fetched.contains($0) })
         }
+        // Account removed or turned off meanwhile: nothing of it is written.
+        guard runs[id] === run, running, accounts.contains(where: { $0.id == id && $0.enabled }) else { return }
         var bytes = 0
         for (message, content) in result.contents {
             guard let key = MailBodyKey(message) else { continue }
@@ -1220,6 +1425,13 @@ final class MailService: ObservableObject {
             cacheQueue.async { bodyCache.store(content, for: key) }
         }
         MailTiming.line("prefetch-done acct=\(logName(id)) fetched=\(result.contents.count) of=\(candidates.count) content_bytes=\(bytes) ms=\(MailTiming.ms(since: started)) stop=\(result.stop)")
+    }
+
+    private static func isLinkFailure(_ error: Error) -> Bool {
+        switch error as? MailIMAPError {
+        case .linkDead?, .disconnected?, .timedOut?, .invalidResponse?, .server?: true
+        default: false
+        }
     }
 
     /// Account position only: the debug log never names the address.
@@ -1262,7 +1474,7 @@ final class MailService: ObservableObject {
             let performStart = MailTiming.now()
             MailTiming.line("start op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) queue_wait_ms=\(MailTiming.ms(from: timing.enqueued, to: performStart)) since_tap_ms=\(MailTiming.ms(from: timing.tapped, to: performStart)) attempt=\(pending.attempts)")
             connection.timingContext = "acct=\(logName(id)) op=\(timing.id)"
-            let result: Result<MailContent, MailFailure>
+            let result: Result<Operation.Outcome, MailFailure>
             do {
                 result = .success(try await pending.operation.perform(on: connection))
             } catch MailIMAPError.staleMessage {
@@ -1275,10 +1487,15 @@ final class MailService: ObservableObject {
                 result = .failure(.rejected)
             } catch MailIMAPError.messageTooLarge {
                 result = .failure(.messageTooLarge)
+            } catch MailIMAPError.server(let reason) where connection.lastCommandRefused {
+                // A tagged NO/BAD ([UNAVAILABLE], or an auth complaint): the command did not run and the link is fine.
+                MailTiming.line("op-refused op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) reason=\(reason)")
+                let mapped = MailFailure.from(MailIMAPError.server(reason))
+                result = .failure(mapped == .offline ? .rejected : mapped)
             } catch {
                 MailTiming.line("end op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) err=\(MailTiming.describe(error)) perform_ms=\(MailTiming.ms(since: performStart)) since_tap_ms=\(MailTiming.ms(since: timing.tapped))")
                 // The answer is lost with the connection. Settle the list now, before the connection closes.
-                if runs[id] === run, !Task.isCancelled { lostAnswer(pending, id: id) }
+                if runs[id] === run, !Task.isCancelled { lostAnswer(pending, id: id, run: run) }
                 throw error
             }
             let performed: String
@@ -1290,7 +1507,13 @@ final class MailService: ObservableObject {
 
             run.pending.remove(at: index)
             switch result {
-            case let .success(content):
+            case .success(.stillInInbox(true)):
+                // The lost move did not happen: the row comes back.
+                if let effect = pending.effect { overlays[id]?.remove(effect) }
+                MailTiming.line("move-verified op=\(timing.id) acct=\(logName(id)) moved=false")
+                notify(id, pending.operation.notDone)
+            case let .success(outcome):
+                if case .stillInInbox = outcome { MailTiming.line("move-verified op=\(timing.id) acct=\(logName(id)) moved=true") }
                 if let effect = pending.effect {
                     let sequence = syncStarted[id] ?? 0
                     overlays[id]?.confirm(effect, latestStartedSync: sequence)
@@ -1299,13 +1522,17 @@ final class MailService: ObservableObject {
                 if pending.contentResult != nil {
                     MailTiming.line("content-resume op=\(timing.id) acct=\(logName(id)) since_request_ms=\(MailTiming.ms(since: timing.tapped))")
                 }
-                pending.contentResult?.resume(returning: content)
+                if case let .content(content) = outcome {
+                    pending.contentResult?.resume(returning: content)
+                } else {
+                    pending.contentResult?.resume(returning: MailContent(html: nil, text: ""))
+                }
             case let .failure(error):
                 if pending.contentResult == nil {
                     if let effect = pending.effect, overlays[id]?.remove(effect) != nil {
                         MailTiming.line("optimistic-revert op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) reason=\(error.logCode)")
                     }
-                    notify(id, pending.operation.refusal(error))
+                    notify(id, refusalText(pending.operation, error, stage: connection.lastMoveStage, run: run, id: id))
                 }
                 pending.contentResult?.resume(throwing: error)
             }
@@ -1320,27 +1547,66 @@ final class MailService: ObservableObject {
         return false
     }
 
+    /// The notice for a refused action. A UIDPLUS move that got past UID COPY says so; if it also flagged the original
+    /// \Deleted, the flag is taken off again (the original stays in the inbox).
+    private func refusalText(_ operation: Operation, _ error: MailFailure, stage: MailIMAP.MoveStage, run: AccountRun,
+                             id: String) -> String {
+        switch operation {
+        case let .archive(message), let .trash(message):
+            if stage == .flagged {
+                MailTiming.line("move-partial acct=\(logName(id)) stage=flagged undo=clear-deleted")
+                var timing = MailTiming.Op(id: MailTiming.nextID(), kind: "clear-deleted", tapped: MailTiming.now())
+                timing.enqueued = timing.tapped
+                insert(PendingOperation(id: UUID(), operation: .clearDeleted(message), contentResult: nil, timing: timing), into: run)
+                return operation.halfMoved
+            }
+            if stage == .copied {
+                MailTiming.line("move-partial acct=\(logName(id)) stage=copied")
+                return operation.halfMoved
+            }
+        default:
+            break
+        }
+        return operation.refusal(error)
+    }
+
     /// The connection failed while `pending` was on the wire. A repeatable action stops showing until it is sent again
-    /// after reconnecting; a move is never resent (it could copy twice): its row comes back with a notice.
-    private func lostAnswer(_ pending: PendingOperation, id: String) {
+    /// after reconnecting. A move is never resent (it could copy twice): the row stays hidden while Cala checks, after
+    /// reconnecting, whether the message is still in the inbox (see Operation.verifyMove).
+    private func lostAnswer(_ pending: PendingOperation, id: String, run: AccountRun) {
         guard pending.contentResult == nil, let effect = pending.effect else { return }
+        if case .verifyMove = pending.operation {
+            overlays[id]?.set(.queued, for: effect)   // still checking: the row stays hidden
+            return
+        }
         if pending.operation.isRepeatable {
             overlays[id]?.set(.held, for: effect)
             MailTiming.line("optimistic-hold op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=connection-lost")
-        } else {
-            overlays[id]?.remove(effect)
-            MailTiming.line("optimistic-revert op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=connection-lost")
-            notify(id, pending.operation.unconfirmed)
+            publishInbox()
+            return
         }
-        publishInbox()
+        guard let message = pending.operation.message else { return }
+        var toTrash = false
+        if case .trash = pending.operation { toTrash = true }
+        // The check takes over the row's overlay entry; the lost move itself is dropped by failOperations.
+        if let index = run.pending.firstIndex(where: { $0.id == pending.id }) { run.pending[index].effect = nil }
+        overlays[id]?.set(.queued, for: effect)
+        var timing = MailTiming.Op(id: MailTiming.nextID(), kind: "verify-move", tapped: pending.timing.tapped)
+        timing.enqueued = MailTiming.now()
+        let verify = PendingOperation(id: UUID(), operation: .verifyMove(message, toTrash: toTrash), contentResult: nil,
+                                      timing: timing, effect: effect)
+        insert(verify, into: run)
+        expireIfOffline(verify.id, id: id, run: run)
+        MailTiming.line("optimistic-verify op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=connection-lost")
     }
 
     /// `afterDisconnect`: actions not sent yet, and repeatable ones, survive the reconnect; a move that was on the wire
-    /// does not (lostAnswer already put its row back). `keepContent`: the reconnect is immediate, so opens wait for it
-    /// (each is tried at most twice) instead of failing.
+    /// does not (lostAnswer handed its row to a check). `keepContent`: the reconnect is immediate, so opens wait for it
+    /// (each is tried at most twice) instead of failing. `announce`: a notice says that dropped actions weren't made.
     private func failOperations(in run: AccountRun, id: String, with error: MailFailure, afterDisconnect: Bool = false,
-                                keepContent: Bool = false) {
+                                keepContent: Bool = false, announce: Bool = false) {
         defer { run.inFlight = nil }
+        var dropped: [Operation] = []
         run.pending.removeAll { pending in
             if afterDisconnect {
                 if pending.contentResult == nil {
@@ -1349,9 +1615,18 @@ final class MailService: ObservableObject {
                     return false
                 }
             }
-            if let effect = pending.effect { overlays[id]?.remove(effect) }
+            if let effect = pending.effect, overlays[id]?.remove(effect) != nil {
+                MailTiming.line("optimistic-revert op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=\(error.logCode)")
+                dropped.append(pending.operation)
+            }
             pending.contentResult?.resume(throwing: error)
             return true
+        }
+        guard announce, !dropped.isEmpty else { return }
+        if dropped.count == 1, case .verifyMove = dropped[0] {
+            notify(id, dropped[0].unconfirmed)
+        } else {
+            notify(id, Self.stoppedNotice)
         }
     }
 

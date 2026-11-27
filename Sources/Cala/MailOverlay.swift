@@ -17,11 +17,13 @@ struct MailOverlay: Equatable {
         case read(messageID: String)
         case unread(messageID: String)
         case readAll
+        /// Mark all as read up to the newest UID the person saw: rows above it (mail that arrived later) keep their state.
+        case readAllThrough(uid: UInt32)
 
         var messageID: String? {
             switch self {
             case let .hide(id), let .read(id), let .unread(id): id
-            case .readAll: nil
+            case .readAll, .readAllThrough: nil
             }
         }
     }
@@ -104,6 +106,10 @@ struct MailOverlay: Equatable {
             case .readAll:
                 for index in rows.indices { rows[index].unread = false }
                 unread = 0
+            case let .readAllThrough(uid):
+                // Everything unseen outside the window is older than the window, so only newer rows can stay unread.
+                for index in rows.indices where rows[index].uid <= uid { rows[index].unread = false }
+                unread = rows.filter(\.unread).count
             }
         }
         return Result(messages: rows, unread: max(0, unread))

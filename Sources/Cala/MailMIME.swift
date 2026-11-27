@@ -1086,6 +1086,10 @@ struct MailIMAPFramer {
 struct MailIMAPFetch {
     let uid: UInt32?
     let flags: Set<String>
+    /// The response carried a FLAGS item (possibly empty).
+    let hasFlags: Bool
+    /// How many items the response carried (UID counts).
+    let attributeCount: Int
     let threadID: UInt64?
     let messageID: UInt64?
     let internalDate: Date?
@@ -1100,12 +1104,14 @@ struct MailIMAPFetch {
         var attributes: [String: MailIMAPToken] = [:]
         var flags: Set<String> = []
         var structure: [MailIMAPToken]?
+        var sawFlags = false
         var index = 4
         while index + 1 < tokens.count, case let .atom(key) = tokens[index] {
             let name = key.uppercased()
             index += 1
             let value = tokens[index]
             index += 1
+            if name == "FLAGS" { sawFlags = true }
             if value == .openList {
                 let listStart = index - 1
                 var depth = 1
@@ -1123,6 +1129,8 @@ struct MailIMAPFetch {
         }
         self.attributes = attributes
         self.flags = flags
+        hasFlags = sawFlags
+        attributeCount = attributes.count + (sawFlags ? 1 : 0)
         structureTokens = structure
         uid = attributes["UID"]?.string.flatMap(UInt32.init)
         threadID = attributes["X-GM-THRID"]?.string.flatMap(UInt64.init)
