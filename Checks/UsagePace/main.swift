@@ -157,9 +157,9 @@ if let accepted = UsageService.latestCodexRollout([foreignSpanRollout, foreignRo
                                                  activeAccount: activeCodex, since: nil, now: now) {
     rolloutDisplay.acceptReading(accepted.reading, original: nil)
 }
-expect("Null rate_limits.account_id cannot show or alert on payload account B's 5% balance",
+expect("Latest unlabeled balance is display-only despite a preceding foreign marker",
        foreignRollout.identity(for: activeCodex) == .foreign
-       && rolloutDisplay.remaining(now) == 80
+       && rolloutDisplay.remaining(now) == 5
        && rolloutDisplay.orderedWindows.allSatisfy { UsagePace.thresholdAlert(rolloutDisplay, $0, threshold: 20, now: now) == nil })
 let outerRollout = parseRollout(rolloutJSON.replacingOccurrences(of: "\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"account_id\":\"account-b\",",
                                                                 with: "\"type\":\"event_msg\",\"account_id\":\"account-b\",\"payload\":{\"type\":\"token_count\","))
@@ -167,8 +167,30 @@ let nestedRollout = parseRollout(rolloutJSON.replacingOccurrences(of: "\"account
 let conflictingRollout = parseRollout(rolloutJSON.replacingOccurrences(of: "\"account_id\":null", with: "\"account_id\":\"account-a\",\"user_id\":\"subject-a\""))
 expect("Outer, nested and conflicting rollout identities fail closed",
        [outerRollout, nestedRollout, conflictingRollout].allSatisfy {
-           UsageService.latestCodexRollout([$0], activeAccount: activeCodex, since: nil, now: now) == nil
+           UsageService.latestCodexRollout([$0], activeAccount: activeCodex, since: nil, now: now)?.identified == false
        } && matchingRollout.identity(for: activeCodex) == .matching && foreignSpanRollout.identity(for: activeCodex) == .unlabeled)
+
+let accountOnly = parseRollout(rolloutJSON.replacingOccurrences(of: "account-b", with: "account-a"))
+for (event, canAlert) in [(accountOnly, true), (foreignSpanRollout, false), (foreignRollout, false)] {
+    let selected = UsageService.latestCodexRollout([event], activeAccount: activeCodex, since: nil, now: now)!
+    rolloutDisplay.acceptReading(selected.reading, original: nil)
+    expect("A tail scan uses only the row identity (\(event.identity(for: activeCodex)))",
+           rolloutDisplay.remaining(now) == 5 && (UsagePace.thresholdAlert(rolloutDisplay, selected.reading.windows[0],
+                                                                           threshold: 20, now: now) != nil) == canAlert)
+}
+for format in ["http", "rpc"] {
+    let data = format == "rpc"
+        ? ["primary": ["usedPercent": 20, "windowDurationMins": 10080]]
+        : ["primary_window": ["used_percent": 20, "limit_window_seconds": 604800]]
+    let api = UsageJSON.codex(data, at: now, format: format)
+    rolloutDisplay.acceptReading(api, original: nil)
+    func fallback(_ seconds: Double) -> UsageReading? {
+        UsageService.latestCodexRollout([foreignSpanRollout], activeAccount: activeCodex, since: nil,
+                                       now: now.addingTimeInterval(seconds), current: rolloutDisplay.reading)?.reading
+    }
+    expect("A \(format) balance takes priority through 15 minutes inclusive",
+           fallback(900) == nil && rolloutDisplay.remaining(now) == 80 && fallback(901)?.codexRolloutIdentified == false)
+}
 
 func codexReading(_ slot: String, used: Double = 20, reset: Date, at date: Date = now, model: String? = nil,
                   minutes: Int = 10080) -> UsageReading {
@@ -187,10 +209,10 @@ let secondary = codexReading("secondary", used: 70, reset: weeklyReset)
 let sharedWeekly = alertBase(primary)
 expect("A Codex weekly meter keeps its alert identity after moving from primary to secondary",
        sharedWeekly != nil && sharedWeekly == alertBase(secondary))
-expect("Alert identity distinguishes meter scope, duration and cycle",
+expect("Alert storage distinguishes meter scope and duration across cycles",
        sharedWeekly != alertBase(codexReading("primary", reset: weeklyReset, model: "o3"))
        && sharedWeekly != alertBase(codexReading("primary", reset: weeklyReset, minutes: 300))
-       && sharedWeekly != alertBase(codexReading("primary", reset: weeklyReset.addingTimeInterval(60))))
+       && sharedWeekly == alertBase(codexReading("primary", reset: weeklyReset.addingTimeInterval(60))))
 let countdown = UsageJSON.codex(["secondary_window": ["used_percent": 70, "limit_window_seconds": week,
                                                        "reset_after_seconds": day + 1]], at: now, format: "http")
 expect("Countdown jitter within the same reset minute preserves the alert identity", sharedWeekly == alertBase(countdown))
@@ -211,14 +233,18 @@ func estimatedAlert(_ offset: TimeInterval) -> UsagePace.AlertContext? {
 }
 guard let beforeMinute = estimatedAlert(-1), let afterMinute = estimatedAlert(1) else { fatalError("Missing threshold candidates") }
 let firedAt = now.timeIntervalSince1970
-expect("Pre-upgrade positional and canonical alert keys suppress their original alert kind",
-       afterMinute.wasFired("thr", recorded: ["codex|primary|\(minute - 1)|thr": firedAt])
-       && beforeMinute.wasFired("proj", recorded: ["codex|604800|\(minute)|shared|proj": firedAt])
-       && !afterMinute.wasFired("proj", recorded: ["codex|primary|\(minute - 1)|thr": firedAt]))
-expect("Estimated resets at minus and plus one second across a minute deduplicate a fired alert",
-       beforeMinute.id("thr") == afterMinute.id("thr")
-       && afterMinute.wasFired("thr", recorded: [beforeMinute.id("thr"): firedAt])
-       && estimatedAlert(61)?.id("thr") != afterMinute.id("thr"))
+let migrated = UsagePace.migratedAlerts(["codex|primary|\(minute - 1)|thr": firedAt,
+                                       "codex|604800|\(minute)|shared|proj": firedAt])
+let movedAlert = thresholdAlerts(codexReading("secondary", used: 95, reset: minuteReset)).first!
+expect("Migrated primary follows weekly to secondary, including old canonical and v2 keys",
+       movedAlert.wasFired("thr", recorded: migrated) && beforeMinute.wasFired("proj", recorded: migrated)
+       && !afterMinute.wasFired("proj", recorded: UsagePace.migratedAlerts(["codex|primary|\(minute)|thr": firedAt]))
+       && movedAlert.wasFired("thr", recorded: UsagePace.migratedAlerts(["v2|codex|604800|\(minute)|shared|thr": firedAt])))
+let recorded = [beforeMinute.id("thr"): beforeMinute.cycle.reset.timeIntervalSince1970]
+expect("Reset dates deduplicate :57/:59 and both inclusive ten-minute boundaries",
+       estimatedAlert(-3)!.wasFired("thr", recorded: recorded) && afterMinute.wasFired("thr", recorded: recorded)
+       && [-601.0, 599].allSatisfy { estimatedAlert($0)!.wasFired("thr", recorded: recorded) }
+       && [-602.0, 600].allSatisfy { !estimatedAlert($0)!.wasFired("thr", recorded: recorded) })
 
 let models = UsageJSON.codex([
     "primary": ["used_percent": 95, "window_minutes": 10080, "resets_at": scopedReset, "model_id": "o3"],
@@ -229,7 +255,7 @@ let modelObservations = UsageWindowObservation.capture(models, provider: .codex)
 expect("Equal-duration Codex models with identical 5% balances and resets both qualify for distinct alerts",
        modelObservations["primary"]?.meter?.scope == .modelID("o3")
        && modelObservations["secondary"]?.meter?.scope == .modelID("gpt-5")
-       && modelAlerts.count == 2 && !modelAlerts[1].wasFired("thr", recorded: [modelAlerts[0].id("thr"): firedAt]))
+       && modelAlerts.count == 2 && !modelAlerts[1].wasFired("thr", recorded: [modelAlerts[0].id("thr"): modelAlerts[0].cycle.reset.timeIntervalSince1970]))
 
 let series = QuotaSeries(provider: .codex, profile: QuotaProfileID(rawValue: "test"), plan: "pro",
                          meter: QuotaMeter(scope: .shared, durationSeconds: Int(week)), timeZoneID: "UTC")

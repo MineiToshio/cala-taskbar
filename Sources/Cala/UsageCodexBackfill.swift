@@ -131,21 +131,27 @@ final class UsageCodexBackfill {
         var slice: TimeInterval = 0.05
     }
 
-    enum Candidate {
-        // Matching is decided before batching so raw identity metadata is not retained.
-        case reading(UsageReading, identified: Bool)
-        case foreignAccount(Date)
+    struct Candidate {
+        let reading: UsageReading
+        let identified: Bool
+        fileprivate let file: Int
+    }
 
-        init(reading: UsageReading, identified: Bool) { self = .reading(reading, identified: identified) }
+    private struct Activity {
+        var first = Date.distantFuture
+        var last = Date.distantPast
+        var foreign = false
 
-        var identified: Bool {
-            if case .reading(_, true) = self { return true }
-            return false
+        mutating func observe(_ date: Date) {
+            first = min(first, date)
+            last = max(last, date)
         }
     }
 
     struct Pass {
         let candidates: [Candidate]
+        // Offline replay has no active account and never writes to production history.
+        let replayCandidates: [Candidate]
         let truncated: Bool
         let moreFiles: Bool
     }
@@ -169,6 +175,7 @@ final class UsageCodexBackfill {
     private var exhaustedDays = Set<Int>()
     private var nextDay = 0
     private var cursor: FileCursor?
+    private var activity: [Activity] = []
     private var readings: [Candidate] = []
     private var meterCount = 0
     private var completedPasses = 0
@@ -218,7 +225,8 @@ final class UsageCodexBackfill {
                 truncated = truncated || (more && (completedPasses == 1 || meterCount >= limits.observations))
                 active = false
                 completedPasses += 1
-                let pass = Pass(candidates: readings, truncated: truncated, moreFiles: more)
+                let pass = Pass(candidates: eligibleReadings(complete: !more && !truncated),
+                                replayCandidates: readings, truncated: truncated, moreFiles: more)
                 if completedPasses == 2 || !more { close(); days.removeAll(); readings.removeAll() }
                 finish(pass)
                 return
@@ -255,7 +263,8 @@ final class UsageCodexBackfill {
     }
 
     private func open(_ url: URL) {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        activity.append(Activity())
+        guard let handle = try? FileHandle(forReadingFrom: url) else { truncated = true; return }
         do {
             let size = try handle.seekToEnd()
             let tail = UInt64(max(1, limits.fileTailBytes))
@@ -270,13 +279,17 @@ final class UsageCodexBackfill {
                 truncated = true
             }
             cursor = FileCursor(handle: handle, remaining: Int(size - start), skipping: skipping)
-        } catch { try? handle.close() }
+        } catch { truncated = true; try? handle.close() }
     }
 
     private func readChunk() {
         guard var file = cursor else { return }
         let count = min(16_384, file.remaining, limits.bytes - passBytes)
-        guard count > 0, let data = try? file.handle.read(upToCount: count), !data.isEmpty else { close(); return }
+        guard count > 0, let data = try? file.handle.read(upToCount: count), !data.isEmpty else {
+            if file.remaining > 0 { truncated = true }
+            close()
+            return
+        }
         file.remaining -= data.count
         passBytes += data.count
         var start = data.startIndex
@@ -296,27 +309,46 @@ final class UsageCodexBackfill {
             file.skipping = false
             start = end + 1
         }
+        if meterCount >= limits.observations && start < data.endIndex { truncated = true }
         cursor = file
         if file.remaining == 0 { close() } // A non-newline-terminated tail is an incomplete record.
     }
 
     private func append(_ line: Data) {
-        guard let event = UsageJSON.codexRollout(line),
+        guard let object = UsageJSON.object(line) else { return }
+        let file = activity.count - 1
+        if let date = UsageJSON.date(object["timestamp"]) { activity[file].observe(date) }
+        let ids = UsageJSON.rolloutIDs(object)
+        let identity = UsageJSON.CodexRollout.identity(accounts: ids.accounts, subjects: ids.subjects, active: account)
+        if identity == .foreign { activity[file].foreign = true; return }
+        guard let event = UsageJSON.codexRollout(object, ids: ids),
               event.reading.date >= now.addingTimeInterval(-UsageQuotaHistory.retention),
               event.reading.date <= now.addingTimeInterval(5) else { return }
-        let identity = event.identity(for: account)
-        if identity == .foreign {
-            guard meterCount < limits.observations else { truncated = true; return }
-            readings.append(.foreignAccount(event.reading.date))
-            meterCount += 1
-            return
-        }
         guard let payload = event.reading.quota, !payload.windows.isEmpty else { return }
         guard meterCount + payload.windows.count <= limits.observations else { truncated = true; return }
         meterCount += payload.windows.count
         var reading = event.reading
         reading.windows.removeAll()
-        readings.append(.reading(reading, identified: identity == .matching))
+        readings.append(Candidate(reading: reading, identified: identity == .matching, file: file))
+    }
+
+    private func eligibleReadings(complete: Bool) -> [Candidate] {
+        // A skipped prefix, oversized line or unfinished scan can hide both an identity and its span.
+        guard complete else { return readings.filter(\.identified) }
+        let foreign = activity.filter(\.foreign)
+        guard !foreign.contains(where: { $0.first > $0.last }) else { return readings.filter(\.identified) }
+        // Sweep the foreign spans once, including endpoints shared by concurrent sessions.
+        let spans = foreign.sorted { $0.first < $1.first }
+        var next = 0
+        var foreignUntil = Date.distantPast
+        return readings.sorted { $0.reading.date < $1.reading.date }.filter { candidate in
+            let date = candidate.reading.date
+            while next < spans.count && spans[next].first <= date {
+                foreignUntil = max(foreignUntil, spans[next].last)
+                next += 1
+            }
+            return candidate.identified || (!activity[candidate.file].foreign && date > foreignUntil)
+        }
     }
 
     private func close() {
@@ -326,26 +358,13 @@ final class UsageCodexBackfill {
 
     /// Unlabeled history stays provisional and needs a same-meter, same-cycle match with a fresh API sample.
     static func attributed(_ candidates: [Candidate], key: QuotaImportKey, anchors: [QuotaObservation],
-                           switchedAt: Date?, now: Date, realtime: Bool = false) -> [QuotaObservation] {
+                           switchedAt: Date?, now: Date) -> [QuotaObservation] {
         let fresh = anchors.filter { now.timeIntervalSince($0.date) <= ($0.series.meter.durationSeconds == 18_000 ? 600 : 1_800)
             && $0.date <= now.addingTimeInterval(5) && $0.reset > now }
-        let latestForeign = candidates.compactMap { candidate -> Date? in
-            if case .foreignAccount(let date) = candidate, date <= now.addingTimeInterval(5) { return date }
-            return nil
-        }.max()
-        func isAfterSwitches(_ date: Date) -> Bool {
-            date >= (switchedAt ?? .distantPast) && date > (latestForeign ?? .distantPast)
-        }
-        // The active login can only own unlabeled rows after its first confirmed return.
-        let archiveReturn = latestForeign.flatMap { _ in
-            candidates.compactMap { candidate -> Date? in
-                if case .reading(let reading, true) = candidate, isAfterSwitches(reading.date) { return reading.date }
-                return nil
-            }.min()
-        }
         func capture(_ candidate: Candidate, anchors: [UsageQuotaCapture.AnchorKey: [QuotaObservation]]) -> [QuotaObservation] {
-            guard case .reading(let reading, let identified) = candidate,
-                  identified || isAfterSwitches(reading.date) else { return [] }
+            let reading = candidate.reading
+            let identified = candidate.identified
+            guard identified || reading.date >= (switchedAt ?? .distantPast) else { return [] }
             return UsageQuotaCapture.observations(reading, provider: .codex, profile: key.profile, timeZoneID: key.timeZoneID,
                                                   source: .rollout, attribution: identified ? .verifiedArchive : .provisional,
                                                   now: now, anchors: anchors)
@@ -357,20 +376,18 @@ final class UsageCodexBackfill {
         }
         let grouped = Dictionary(grouping: observations, by: \.series)
         return grouped.flatMap { series, rows -> [QuotaObservation] in
-            let lived = fresh.first { $0.series == series && isAfterSwitches($0.date) }
-            let unlabeledSince = latestForeign == nil ? .distantPast : ([archiveReturn, lived?.date].compactMap { $0 }.min() ?? .distantFuture)
+            let lived = fresh.first { $0.series == series && $0.date >= (switchedAt ?? .distantPast) }
             let archivalAnchor = lived.flatMap { live in
-                rows.filter { (realtime || $0.date <= live.date) && isAfterSwitches($0.date) && $0.date >= unlabeledSince
+                rows.filter { $0.date <= live.date && $0.date >= (switchedAt ?? .distantPast)
                     && $0.reset == live.reset && $0.resetKind == .explicit }
                     .max { $0.date == $1.date ? $0.used < $1.used : $0.date < $1.date }
             }
             let compatible: Bool
             if let lived, let archivalAnchor, lived.resetKind == .explicit {
-                if realtime && archivalAnchor.date > lived.date { compatible = archivalAnchor.used >= lived.used - 1 }
-                else { compatible = archivalAnchor.used <= lived.used + 1 }
+                compatible = archivalAnchor.used <= lived.used + 1
             } else { compatible = false }
             return rows.filter { row in
-                row.attribution == .verifiedArchive || (compatible && isAfterSwitches(row.date) && row.date >= unlabeledSince)
+                row.attribution == .verifiedArchive || compatible
             }
         }
     }

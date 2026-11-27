@@ -662,7 +662,7 @@ final class UsageService: ObservableObject {
         if force {
             return (errorCounts[p] ?? 0) == 0 || now.timeIntervalSince(lastAttempt[p] ?? .distantPast) >= 15
         }
-        let sourceDate = p == .claude ? s.reading?.apiDate : s.reading?.date
+        let sourceDate = s.reading?.apiDate
         return (retryNotBefore[p] ?? .distantPast) <= now && now.timeIntervalSince(sourceDate ?? .distantPast) >= p.interval && now.timeIntervalSince(lastAttempt[p] ?? .distantPast) >= p.interval
     }
     private static func failureDelay(_ count: Int) -> TimeInterval { min(1800, 120 * pow(2, Double(max(0, min(count, 4))))) }
@@ -677,6 +677,7 @@ final class UsageService: ObservableObject {
             failures[p] = 0; states[i].cooldownUntil = nil
             errorCounts[p] = 0; retryNotBefore[p] = nil
             if p == .claude { blockedClaudeStamp = nil }
+            if p == .codex && (!captureQuota || reading.windows.isEmpty) { return }
             accept(reading, provider: p, source: captureQuota ? .api : nil)
         } else {
             let count = errorCounts[p] ?? 0
@@ -903,10 +904,13 @@ final class UsageService: ObservableObject {
         let login = quotaHistory.login(provider: provider, directory: directory, account: account, signedIn: signedIn, now: now, rotate: rotate)
         quotaLogins[provider] = login
         quotaAccounts[provider] = account
-        if provider == .codex, let switchedAt = login?.switchedAt,
-           let reading = state.reading, reading.date < switchedAt {
+        if provider == .codex, let reading = state.reading,
+           reading.date < (login?.switchedAt ?? .distantPast) || (reading.codexProfile != nil && reading.codexProfile != login?.profile.rawValue) {
             states[index(provider)].reading = nil
             states[index(provider)].windowObservations.removeAll()
+        }
+        if provider == .codex && account == nil && states[index(provider)].reading?.codexRolloutIdentified == true {
+            states[index(provider)].reading?.codexRolloutIdentified = false
         }
         if (previous != nil && previous?.profile != login?.profile) || login?.switchedAt != previous?.switchedAt {
             quotaLocalSince[provider] = now
@@ -915,7 +919,7 @@ final class UsageService: ObservableObject {
         }
     }
 
-    private func captureQuota(_ reading: UsageReading, provider: UsageProvider, source: QuotaSource, rolloutAccount: QuotaAccount?) {
+    private func captureQuota(_ reading: UsageReading, provider: UsageProvider, source: QuotaSource) {
         guard let run, !run.isCancelled, !asleep, reading.quota != nil else { return }
         guard let login = quotaLogins[provider] else { return }
         let now = Date()
@@ -930,21 +934,10 @@ final class UsageService: ObservableObject {
                   UsageWatcher.resolvedPath(path) == UsageWatcher.resolvedPath(claudeDir) else { return }
         }
         let fallback = provider == .claude ? states[index(provider)].plan : nil
-        var observations: [QuotaObservation]
-        if source == .rollout {
-            observations = UsageCodexBackfill.attributed(
-                [.init(reading: reading, identified: rolloutAccount != nil)], key: key,
-                anchors: quotaHistory.liveAnchors(for: key), switchedAt: login.switchedAt, now: now, realtime: true
-            )
-            // A labeled event from the currently active login is positive live evidence.
-            if rolloutAccount != nil {
-                for i in observations.indices { observations[i].attribution = .live }
-            }
-        } else {
-            observations = UsageQuotaCapture.observations(reading, provider: provider, profile: login.profile,
+        if source == .rollout && reading.codexRolloutIdentified != true { return }
+        var observations = UsageQuotaCapture.observations(reading, provider: provider, profile: login.profile,
                                                           timeZoneID: zone, source: source, attribution: .live,
                                                           now: now, fallbackPlan: fallback)
-        }
         if source != .api {
             observations.removeAll { $0.date < (quotaLocalSince[provider] ?? login.switchedAt ?? .distantPast) }
         }
@@ -1047,12 +1040,19 @@ final class UsageService: ObservableObject {
     }
 
     private func accept(_ reading: UsageReading, provider: UsageProvider, source: QuotaSource? = nil,
-                        original: UsageReading? = nil, rolloutAccount: QuotaAccount? = nil) {
+                        original: UsageReading? = nil) {
         if source == .statusLine { updateQuotaLogin(provider, signedIn: states[index(provider)].signedIn) }
-        if let source { captureQuota(original ?? reading, provider: provider, source: source, rolloutAccount: rolloutAccount) }
         let i = index(provider)
-        guard reading.date <= Date().addingTimeInterval(5), reading.date > (states[i].reading?.date ?? .distantPast) else { return }
+        let now = Date()
+        if let source { captureQuota(original ?? reading, provider: provider, source: source) }
+        let liveReplacingRollout = provider == .codex && source == .api && states[i].reading?.apiDate == nil
+        let previous = states[i].reading
+        let revisedIdentity = source == .rollout && reading.date == previous?.date
+            && reading.codexRolloutIdentified != previous?.codexRolloutIdentified
+        guard reading.date <= now.addingTimeInterval(5),
+              liveReplacingRollout || revisedIdentity || reading.date > (previous?.date ?? .distantPast) else { return }
         var reading = reading
+        if provider == .codex { reading.codexProfile = quotaLogins[provider]?.profile.rawValue }
         if reading.plan == nil { reading.plan = states[i].reading?.plan ?? states[i].plan }
         states[i].acceptReading(reading, original: original)
         if !reading.windows.isEmpty { states[i].error = nil }
@@ -1111,8 +1111,8 @@ final class UsageService: ObservableObject {
             }
         }
         if let best = Self.latestCodexRollout(events, activeAccount: activeAccount,
-                                             since: quotaLogins[.codex]?.switchedAt, now: Date()) {
-            accept(best.reading, provider: .codex, source: .rollout, rolloutAccount: best.identified ? activeAccount : nil)
+                                             since: quotaLogins[.codex]?.switchedAt, now: Date(), current: states[index(.codex)].reading) {
+            accept(best.reading, provider: .codex, source: .rollout)
         }
         if claude && states[0].enabled && config.usageClaudeStatusLine == true, let obj = readJSON(support.appendingPathComponent("claude-usage.json")),
            let date = UsageJSON.date(obj["timestamp"]), let limits = obj["rate_limits"] as? [String: Any] {
@@ -1124,27 +1124,22 @@ final class UsageService: ObservableObject {
         }
         publish()
     }
-    static func latestCodexRollout(_ events: [UsageJSON.CodexRollout], activeAccount: QuotaAccount?, since: Date?, now: Date)
+    static func latestCodexRollout(_ events: [UsageJSON.CodexRollout], activeAccount: QuotaAccount?, since: Date?, now: Date,
+                                   current: UsageReading? = nil)
         -> (reading: UsageReading, identified: Bool)? {
-        var foreignAt = Date.distantPast
-        var confirmedAt = Date.distantPast
-        var best: (reading: UsageReading, identified: Bool)?
-        let ordered = events.map { ($0, $0.identity(for: activeAccount)) }.sorted {
-            ($0.0.reading.date, $0.1.rawValue) < ($1.0.reading.date, $1.1.rawValue)
+        if let api = current?.apiDate, current?.windows.isEmpty == false, now.timeIntervalSince(api) <= 900 { return nil }
+        let latest = events.filter {
+            !$0.reading.windows.isEmpty && $0.reading.date >= (since ?? .distantPast)
+                && UsageJSON.observationDate($0.reading.date, now: now) != nil
+        }.max { lhs, rhs in
+            if lhs.reading.date == rhs.reading.date { return lhs.identity(for: activeAccount) != .matching && rhs.identity(for: activeAccount) == .matching }
+            return lhs.reading.date < rhs.reading.date
         }
-        for (event, identity) in ordered {
-            let date = event.reading.date
-            guard date >= (since ?? .distantPast), UsageJSON.observationDate(date, now: now) != nil else { continue }
-            if identity == .foreign {
-                foreignAt = date
-                continue
-            }
-            if identity == .matching { confirmedAt = date }
-            guard !event.reading.windows.isEmpty, date > (best?.reading.date ?? .distantPast),
-                  identity == .matching || foreignAt == .distantPast || confirmedAt > foreignAt else { continue }
-            best = (event.reading, identity == .matching)
-        }
-        return best
+        guard let latest else { return nil }
+        var reading = latest.reading
+        let identified = latest.identity(for: activeAccount) == .matching
+        reading.codexRolloutIdentified = identified
+        return (reading, identified)
     }
 
     struct Cache: Codable {
@@ -1165,6 +1160,9 @@ final class UsageService: ObservableObject {
                 return window
             }
             reading.apiDate = UsageJSON.observationDate(reading.apiDate, now: now)
+            if state.provider == .codex && reading.apiDate == nil && reading.codexRolloutIdentified == nil {
+                reading.codexRolloutIdentified = false
+            }
             state.reading = reading
             state.windowObservations = (observations?[id] ?? [:]).filter {
                 UsageJSON.observationDate($0.value.observedAt, now: now) != nil

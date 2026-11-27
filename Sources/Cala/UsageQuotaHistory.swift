@@ -222,6 +222,14 @@ private struct QuotaStoredRow {
                              deltaHundredths: 0, coveredSeconds: 0, quietSeconds: 0, flags: [], latest: nil)
     }
 
+    private static func continuous(_ first: QuotaBucketSample, _ second: QuotaBucketSample) -> Bool {
+        guard QuotaCapBand(first.companion, at: first.date) == QuotaCapBand(second.companion, at: second.date),
+              first.attribution == second.attribution else { return false }
+        if case .present(.active(let a, let resetA)) = first.companion,
+           case .present(.active(let b, let resetB)) = second.companion { return resetA == resetB && a <= b }
+        return first.companion == second.companion
+    }
+
     mutating func apply(_ cell: QuotaHistoryChange.Cell) {
         bucket.deltaHundredths += cell.debit
         bucket.coveredSeconds += cell.direct
@@ -230,12 +238,15 @@ private struct QuotaStoredRow {
         guard let sample = cell.sample else { return }
         if sample.used == 100 && bucket.firstHit == nil { bucket.firstHit = sample.date }
         if let prior = bucket.latest, prior.companion != .unknown, bucket.series.meter.durationSeconds == 604_800 {
-            // Keep the first observation of each forecast band and the latest sample in each minute.
-            let minute = Date(timeIntervalSince1970: floor(prior.date.timeIntervalSince1970 / 60) * 60)
-            if let last = bucket.earlierCompanionSamples.last, last.date >= minute {
-                let band = QuotaCapBand(last.companion, at: last.date)
-                let sameMinute = bucket.earlierCompanionSamples.dropLast().reversed().prefix { $0.date >= minute }
-                if sameMinute.contains(where: { QuotaCapBand($0.companion, at: $0.date) == band }) {
+            // Compact only interior samples of an uninterrupted band in the same short cycle.
+            // Both sides of a reset or band crossing stay available to replay.
+            let earlier = bucket.earlierCompanionSamples
+            if earlier.count >= 2 {
+                let last = earlier[earlier.count - 1]
+                let before = earlier[earlier.count - 2]
+                let minute = floor(prior.date.timeIntervalSince1970 / 60)
+                if floor(before.date.timeIntervalSince1970 / 60) == minute,
+                   Self.continuous(before, last), Self.continuous(last, prior) {
                     bucket.earlierCompanionSamples.removeLast()
                 }
             }
@@ -289,6 +300,7 @@ final class UsageQuotaHistory {
         var files: [Int: ShardFile] = [:]
         var tracks: [QuotaLiveTrack] = []
         var imports: Set<QuotaImportKey> = []
+        var fileScopedImports: Bool? = true
     }
 
     private let queue = DispatchQueue(label: "local.cala.usage.history", qos: .utility)
@@ -901,8 +913,7 @@ private extension UsageQuotaHistory {
                 guard validSample(sample) else { continue }
             }
             let earlier = row.details?.companionSamples ?? []
-            let maxSamples = (identity.meter.bucketSeconds / 60 + 1) * QuotaCapBand.allCases.count
-            guard earlier.count <= maxSamples, earlier.allSatisfy({ validSample($0) && $0.companion != .unknown }),
+            guard earlier.allSatisfy({ validSample($0) && $0.companion != .unknown }),
                   zip(earlier, earlier.dropFirst()).allSatisfy({ $0.date < $1.date }),
                   earlier.last.map({ $0.date < (row.sample?.date ?? .distantPast) }) ?? true else { continue }
             if let hit = row.details?.firstHit {
@@ -987,6 +998,23 @@ private extension UsageQuotaHistory {
                 scheduleFlush()
                 report("usage forecast: skipped a damaged history shard")
             }
+        }
+        if saved.fileScopedImports != true {
+            // Prior imports cannot prove file-level identity. Rebuild them from the archive.
+            for week in Array(shards.keys) {
+                guard var shard = shards[week] else { continue }
+                let oldCount = shard.count
+                shard.rows = shard.rows.filter { !$0.value.imported }
+                shard.gaps.removeAll { $0.imported }
+                if shard.count != oldCount {
+                    totalCount += shard.count - oldCount
+                    shards[week] = shard
+                    dirty.insert(week)
+                }
+            }
+            manifest.imports.removeAll()
+            manifest.fileScopedImports = true
+            scheduleFlush()
         }
         prune(now: now)
         if changed { scheduleFlush() }

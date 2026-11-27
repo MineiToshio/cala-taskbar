@@ -14,10 +14,12 @@ struct UsageReading: Codable {
     var plan: String?
     var date: Date
     var apiDate: Date? = nil
+    var codexProfile: String? = nil
+    var codexRolloutIdentified: Bool? = nil
     // Capture metadata belongs only to the original payload. Display caches never replay it.
     var quota: Payload? = nil
 
-    private enum CodingKeys: String, CodingKey { case windows, plan, date, apiDate }
+    private enum CodingKeys: String, CodingKey { case windows, plan, date, apiDate, codexRolloutIdentified, codexProfile }
 
     struct Payload {
         var windows: [Meter] = []

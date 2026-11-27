@@ -139,7 +139,7 @@ enum UsageJSON {
             if let w = window(key, title, used, reset, durationMinutes: minutes) { windows.append(w) }
         }
         return UsageReading(windows: windows, plan: obj[format == "rpc" ? "planType" : "plan_type"] as? String,
-                            date: date, quota: quota)
+                            date: date, apiDate: format == "local" ? nil : date, quota: quota)
     }
 
     struct CodexRollout {
@@ -150,8 +150,12 @@ enum UsageJSON {
         let subjects: Set<String>
 
         func identity(for active: QuotaAccount?) -> Identity {
+            Self.identity(accounts: accounts, subjects: subjects, active: active)
+        }
+
+        static func identity(accounts: Set<String>, subjects: Set<String>, active: QuotaAccount?) -> Identity {
             if accounts.isEmpty && subjects.isEmpty { return .unlabeled }
-            guard let active, accounts == [active.account], subjects == Set([active.subject].compactMap { $0 }) else {
+            guard let active, accounts == [active.account], subjects.isEmpty || subjects == Set([active.subject].compactMap { $0 }) else {
                 return .foreign
             }
             return .matching
@@ -161,11 +165,21 @@ enum UsageJSON {
     /// Shared filter for realtime rollout reads and bounded history import.
     static func codexRollout(_ line: Data) -> CodexRollout? {
         guard line.range(of: Data("token_count".utf8)) != nil,
-              let object = object(line), object["type"] as? String == "event_msg",
+              let object = object(line) else { return nil }
+        return codexRollout(object)
+    }
+
+    static func codexRollout(_ object: [String: Any], ids: (accounts: Set<String>, subjects: Set<String>)? = nil) -> CodexRollout? {
+        guard object["type"] as? String == "event_msg",
               let payload = object["payload"] as? [String: Any], payload["type"] as? String == "token_count",
               let limits = payload["rate_limits"] as? [String: Any],
               limits["limit_id"] == nil || limits["limit_id"] is NSNull || limits["limit_id"] as? String == "codex",
               let time = date(object["timestamp"]) else { return nil }
+        let ids = ids ?? rolloutIDs(object)
+        return CodexRollout(reading: codex(limits, at: time, format: "local"), accounts: ids.accounts, subjects: ids.subjects)
+    }
+
+    static func rolloutIDs(_ object: [String: Any]) -> (accounts: Set<String>, subjects: Set<String>) {
         var accounts = Set<String>()
         var subjects = Set<String>()
         var nested: [Any] = [object]
@@ -182,8 +196,7 @@ enum UsageJSON {
                 nested.append(contentsOf: values)
             }
         }
-        return CodexRollout(reading: codex(limits, at: time, format: "local"),
-                            accounts: accounts, subjects: subjects)
+        return (accounts, subjects)
     }
 }
 

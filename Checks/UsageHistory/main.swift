@@ -218,9 +218,9 @@ do {
                 : .present(.active(used: 85, reset: date.addingTimeInterval(2 * hour)))
             observations.append(reading)
             if tick == 74 {
-                for (seconds, used) in [(15.0, 85.0), (45.0, 87.0)] {
+                for (seconds, used) in [(15.0, 85.0), (20.0, 85.0), (45.0, 87.0), (50.0, 88.0)] {
                     var followup = observation(date.addingTimeInterval(seconds), reading.used, reset: reset)
-                    followup.companion = companion(used, on: start)
+                    followup.companion = companion(used, on: start.addingTimeInterval(seconds >= 20 ? 7200 : 0))
                     observations.append(followup)
                 }
             }
@@ -241,9 +241,15 @@ do {
     var calendar = Calendar(identifier: .iso8601)
     calendar.timeZone = TimeZone(identifier: utc)!
     var current = observation(origin, 7.4, reset: monday.addingTimeInterval(week))
-    current.companion = companion(85, on: monday)
+    current.companion = companion(85, on: monday.addingTimeInterval(7200))
     let forecast = UsageForecast().forecast(snapshot: reopened.snapshot(), current: current, calendar: calendar, now: origin)
     check(forecast.readiness == .normal, "eight persisted weeks stay normal at :30:30 after a same-minute 80% crossing")
+    current = observation(origin, 99.9, reset: monday.addingTimeInterval(week))
+    current.companion = companion(85, on: monday.addingTimeInterval(7200))
+    let nearLimit = UsageForecast().forecast(snapshot: reopened.snapshot(), current: current, calendar: calendar, now: origin)
+    check(nearLimit.readiness == .likely && nearLimit.exhaustProbability == 1 && nearLimit.eta != nil,
+          "eight weeks retain :30:20 short-reset boundary and ETA at :30:30 after :30:45")
+
 }
 
 do {
@@ -387,18 +393,22 @@ do {
                                     limits: .init(files: 1, fileTailBytes: 4096, maxLineBytes: 1024))
     let first = scan(reader)
     let final = scan(reader)
-    check(first.candidates.count == 4 && first.moreFiles && first.truncated, "first-pass tail and per-line bounds")
-    check(final.candidates.count == 5 && final.candidates.filter(\.identified).count == 1,
+    check(first.candidates.isEmpty && first.moreFiles && first.truncated, "first-pass tail and per-line bounds")
+    check(final.candidates.count == 1 && final.candidates.filter(\.identified).count == 1,
           "round robin continues on older day and matches both account and user")
     let anchor = observation(date(17), 5)
     let current = date(17)
-    let attributed = UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [anchor], switchedAt: nil, now: current)
+    let bounded = UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [anchor], switchedAt: nil, now: current)
+    check(bounded.map(\.attribution) == [.verifiedArchive], "truncated scan cannot establish clean files for unlabeled rows")
+    let complete = scan(UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendar,
+                                          account: .init(account: "account", subject: "person")))
+    let attributed = UsageCodexBackfill.attributed(complete.candidates, key: key, anchors: [anchor], switchedAt: nil, now: current)
     check(attributed.count == 5 && attributed.filter { $0.attribution == .provisional }.count == 4,
           "same-cycle anchor admits provisional data including a missing plan")
-    check(UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [anchor],
+    check(UsageCodexBackfill.attributed(complete.candidates, key: key, anchors: [anchor],
                                       switchedAt: date(15), now: current).map(\.attribution) == [.verifiedArchive],
           "account switch limits unlabeled provenance")
-    check(UsageCodexBackfill.attributed(final.candidates, key: key, anchors: [], switchedAt: nil, now: current).count == 1,
+    check(UsageCodexBackfill.attributed(complete.candidates, key: key, anchors: [], switchedAt: nil, now: current).count == 1,
           "unlabeled archive needs fresh evidence")
     let imported = store("archive-order")
     imported.replaceImport(attributed.filter { $0.attribution == .provisional }, for: key, complete: true, now: current)
@@ -425,8 +435,8 @@ do {
                                     account: .init(account: "account", subject: "person"))
     let attributed = UsageCodexBackfill.attributed(scan(reader).candidates, key: key, anchors: [observation(date(17), 7)],
                                                    switchedAt: nil, now: date(17))
-    check(attributed.map(\.date).sorted() == [date(2), date(12), date(14)]
-          && attributed.filter { $0.attribution == .provisional }.map(\.date) == [date(14)],
+    check(attributed.map(\.date).sorted() == [date(2), date(12)]
+          && attributed.allSatisfy { $0.attribution == .verifiedArchive },
           "shared rollout home rejects unlabeled rows across explicit other-account or user evidence")
 }
 
@@ -443,13 +453,18 @@ do {
     try lines.write(to: day.appendingPathComponent("rollout-null-identity.jsonl"))
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(identifier: utc)!
+    var concurrent = Data()
+    appendLine(try rollout(date(8), 6, account: "account-a"), to: &concurrent)
+    appendLine(try rollout(date(10), 94), to: &concurrent)
+    appendLine(try rollout(date(15), 7), to: &concurrent)
+    try concurrent.write(to: day.appendingPathComponent("rollout-concurrent.jsonl"))
     let reader = UsageCodexBackfill(sessionsRoot: sessions, now: now, calendar: calendar,
-                                    account: .init(account: "account-a", subject: nil))
+                                    account: .init(account: "account-a", subject: "person"))
     let attributed = UsageCodexBackfill.attributed(scan(reader).candidates, key: key, anchors: [observation(date(17), 7)],
                                                    switchedAt: nil, now: date(17))
-    check(attributed.map(\.date).sorted() == [date(2), date(12), date(14)]
-          && attributed.filter { $0.attribution == .provisional }.map(\.date) == [date(14)],
-          "null rate-limits identity imports neither payload account B at minute 5 nor its unlabeled row at minute 10")
+    check(attributed.map(\.date).sorted() == [date(2), date(8), date(12), date(15)]
+          && attributed.filter { $0.attribution == .provisional }.map(\.date) == [date(15)],
+          "concurrent A at minute 8 cannot authorize either unlabeled row at minute 10; clean minute 15 survives")
 }
 
 do {

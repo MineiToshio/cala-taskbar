@@ -39,10 +39,11 @@ private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey
     }
     let result = pass!
     var unsupported = 0
-    let rows = result.candidates.flatMap { candidate -> [ArchiveRow] in
+    let rows = result.replayCandidates.flatMap { candidate -> [ArchiveRow] in
         // There is no live anchor in a replay. Admit only directly parseable, unlabeled rows,
         // with no inferred identity, plan, duration, or future same-cycle anchor.
-        guard case .reading(let reading, false) = candidate else { return [] }
+        guard !candidate.identified else { return [] }
+        let reading = candidate.reading
         return UsageQuotaCapture.observations(reading, provider: .codex, profile: key.profile,
                                         timeZoneID: key.timeZoneID, source: .rollout, attribution: .provisional,
                                         now: asOf).compactMap { quota -> ArchiveRow? in
@@ -54,7 +55,7 @@ private func scan(root: URL, asOf: Date, calendar: Calendar, key: QuotaImportKey
             return available <= asOf ? ArchiveRow(quota: quota, available: available) : nil
         }
     }
-    return Scan(rows: rows, candidates: result.candidates.count, truncated: result.truncated, unsupported: unsupported)
+    return Scan(rows: rows, candidates: result.replayCandidates.count, truncated: result.truncated, unsupported: unsupported)
 }
 
 private enum Horizon: String, CaseIterable {
