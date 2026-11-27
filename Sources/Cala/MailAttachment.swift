@@ -397,6 +397,14 @@ enum MailAttachmentFiles {
 
     static let quickLookPrefix = "Cala-QuickLook-"
 
+    private static let liveLock = NSLock()
+    nonisolated(unsafe) private static var live: String?
+    /// Folder name of the copy a Quick Look preview shows right now (sweeps keep it), nil when none.
+    static var livePreviewFolder: String? {
+        get { liveLock.withLock { live } }
+        set { liveLock.withLock { live = newValue } }
+    }
+
     /// A private copy for Quick Look: its own temporary folder (0700), the file created exclusively (0600) and
     /// quarantined before any byte is written. Delete the folder when the preview ends (or with sweepQuickLook).
     static func quickLookCopy(_ data: Data, named name: String, in temporary: URL = FileManager.default.temporaryDirectory) throws -> URL {
@@ -410,10 +418,13 @@ enum MailAttachmentFiles {
         }
     }
 
-    /// Removes every Quick Look copy left in `temporary` (at launch and at quit).
-    static func sweepQuickLook(in temporary: URL = FileManager.default.temporaryDirectory) {
+    /// Removes every Quick Look copy left in `temporary` except `keeping` (the one a preview shows right now).
+    /// Call it off the main thread.
+    static func sweepQuickLook(in temporary: URL = FileManager.default.temporaryDirectory, keeping: String? = nil) {
         let items = (try? FileManager.default.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)) ?? []
-        for item in items where item.lastPathComponent.hasPrefix(quickLookPrefix) { try? FileManager.default.removeItem(at: item) }
+        for item in items where item.lastPathComponent.hasPrefix(quickLookPrefix) && item.lastPathComponent != keeping {
+            try? FileManager.default.removeItem(at: item)
+        }
     }
 
     static var downloads: URL {

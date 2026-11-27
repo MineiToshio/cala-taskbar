@@ -335,6 +335,10 @@ final class MailService: ObservableObject {
     @Published private(set) var olderLoading: Set<String> = []
     /// Accounts with no older messages left to load (this epoch).
     @Published private(set) var olderExhausted: Set<String> = []
+    /// Accounts whose last load-older attempt failed (offline, say): the list shows a retry; reconnecting retries.
+    @Published private(set) var olderFailed: Set<String> = []
+    /// Accounts that reached `olderLimit` loaded rows: the list says to open the web inbox for older mail.
+    @Published private(set) var olderCapped: Set<String> = []
 
     private enum Operation {
         case content(MailMessage)
@@ -396,7 +400,8 @@ final class MailService: ObservableObject {
         /// Something the person is looking at and waiting for: goes ahead of actions, and syncs step aside for it.
         var isContent: Bool {
             switch self {
-            case .content, .loadOlder, .structure: true
+            case let .loadOlder(_, _, above, _): above == 0   // paging the person scrolled to; gap fills are background
+            case .content, .structure: true
             default: false
             }
         }
@@ -444,6 +449,7 @@ final class MailService: ObservableObject {
         var isBackground: Bool {
             switch self {
             case .attachment, .attachmentChunk, .olderFlags: true
+            case let .loadOlder(_, _, above, _): above > 0
             default: false
             }
         }
@@ -685,9 +691,11 @@ final class MailService: ObservableObject {
     /// loadedRows per account and their ids, rebuilt only after snapshots or older pages change.
     private var loadedCache: [String: (rows: [MailMessage], ids: Set<String>)] = [:]
     /// Older rows kept per account at most (the oldest go first; paging starts over below the kept ones).
-    static let olderLimit = 500
+    static var olderLimit = 500
     /// Accounts filling the gap between the window and the older pages right now.
     private var olderFilling: Set<String> = []
+    /// The last gap range searched successfully per account (newest older UID, lowest window UID).
+    private var gapSearched: [String: (above: UInt32, below: UInt32)] = [:]
     /// Overlay entries pruned recently, re-applied to older rows that arrive afterwards (a page fetched while the
     /// server was confirming).
     private var prunedLog: [String: [MailOverlay.Effect]] = [:]
@@ -920,7 +928,8 @@ final class MailService: ObservableObject {
         guard running else { return }
         running = false
         releaseAttachments()
-        MailAttachmentFiles.sweepQuickLook()
+        let livePreview = MailAttachmentFiles.livePreviewFolder
+        Task.detached(priority: .utility) { MailAttachmentFiles.sweepQuickLook(keeping: livePreview) }
         for id in Array(runs.keys) { endRun(id) }
         snapshots.removeAll()
         overlays.removeAll()
@@ -938,11 +947,25 @@ final class MailService: ObservableObject {
     }
 
     /// The network came back: accounts waiting out a retry delay reconnect now.
-    private func networkChanged(satisfied: Bool) {
-        defer { pathSatisfied = satisfied }
-        guard satisfied, !pathSatisfied else { return }
+    /// The network path changed (NWPathMonitor; callable directly for checks). Lost: no account counts as live, and
+    /// queued deletes/archives come back at once with the "no connection" notice (later ones too, see enqueue). Back:
+    /// accounts waiting out a retry delay reconnect now.
+    func networkChanged(satisfied: Bool) {
+        let was = pathSatisfied
+        pathSatisfied = satisfied
+        if !satisfied {
+            guard was else { return }
+            MailTiming.line("network-lost runs=\(runs.count)")
+            for (id, run) in runs {
+                run.live = false
+                dropRowActions(in: run, id: id, reason: "no-network")
+            }
+            publishInbox()
+            return
+        }
+        guard !was else { return }
         MailTiming.line("network-back runs=\(runs.count)")
-        for run in runs.values where run.connection == nil { run.retryDelay?.cancel() }
+        for run in runs.values where run.connection == nil || !run.live { run.retryDelay?.cancel() }
     }
 
     func refresh() {
@@ -1074,10 +1097,12 @@ final class MailService: ObservableObject {
         notices.removeAll { $0.id == id }
     }
 
-    private func notify(_ accountID: String, _ text: String) {
+    /// `kind`: for the debug log only (the text never goes there).
+    private func notify(_ accountID: String, _ text: String, kind: String = "other") {
         nextNotice += 1
         notices.append(MailNotice(id: nextNotice, accountID: accountID, text: text))
         if notices.count > 3 { notices.removeFirst(notices.count - 3) }
+        MailTiming.line("notice kind=\(kind) acct=\(logName(accountID)) shown=\(notices.count)")
     }
 
     /// The body of a message already in memory, so the reader can show it in the first frame.
@@ -1162,7 +1187,7 @@ final class MailService: ObservableObject {
             return try await withCheckedThrowingContinuation { continuation in
                 var timing = MailTiming.Op(id: timingID, kind: operation.kind, tapped: requestedAt)
                 timing.enqueued = MailTiming.now()
-                MailTiming.line("enqueue op=\(timingID) kind=\(operation.kind) acct=\(logName(id)) since_request_ms=\(MailTiming.ms(from: requestedAt, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil)")
+                MailTiming.line("enqueue op=\(timingID) kind=\(operation.kind) acct=\(logName(id)) since_request_ms=\(MailTiming.ms(from: requestedAt, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.live)")
                 insert(PendingOperation(id: operationID, operation: operation, contentResult: continuation, timing: timing), into: run)
                 wake(run, cause: "operation")
             }
@@ -1389,7 +1414,15 @@ final class MailService: ObservableObject {
             guard downloads[key] === download, case let .data(chunk) = outcome else { return nil }
             download.encoded.append(chunk)
             attachmentStates[key] = .downloading(min(0.99, Double(download.encoded.count) / Double(max(1, download.part.size))))
-            if chunk.count < MailIMAP.attachmentChunk { break }
+            if chunk.count < MailIMAP.attachmentChunk {
+                // The part ended. Fewer bytes than BODYSTRUCTURE declared (1% slack for line-ending differences) means
+                // the server cut it short: an error, never a silently truncated file.
+                guard download.encoded.count >= download.part.size - download.part.size / 100 else {
+                    MailTiming.line("attachment-short acct=\(logName(id)) got=\(download.encoded.count) declared=\(download.part.size)")
+                    throw MailFailure.incomplete
+                }
+                break
+            }
             guard download.encoded.count <= MailAttachment.downloadLimit * 3 / 2 else { throw MailFailure.messageTooLarge }
         }
         let encoded = download.encoded
@@ -1440,6 +1473,9 @@ final class MailService: ObservableObject {
         older.removeAll()
         olderCandidates.removeAll()
         olderExhausted.removeAll()
+        olderCapped.removeAll()
+        olderFailed.removeAll()
+        gapSearched.removeAll()
         publishInbox()
     }
 
@@ -1506,9 +1542,16 @@ final class MailService: ObservableObject {
             let id = account.id
             guard let snapshot = snapshots[id], !olderLoading.contains(id), !olderExhausted.contains(id),
                   let lowest = (snapshot.messages + (older[id] ?? [])).map(\.uid).min() else { continue }
+            if (older[id]?.count ?? 0) >= Self.olderLimit {
+                // Enough rows in memory: no more fetching (and nothing fetched gets thrown away).
+                olderExhausted.insert(id)
+                olderCapped.insert(id)
+                continue
+            }
             if runs[id] == nil { launch(id) }
             guard let run = runs[id] else { continue }
             olderLoading.insert(id)
+            olderFailed.remove(id)
             MailTiming.line("older-request acct=\(logName(id)) below=\(lowest)")
             let operation = Operation.loadOlder(account: id, below: lowest, above: 0, candidates: olderCandidates[id])
             Task { @MainActor [weak self] in
@@ -1517,33 +1560,40 @@ final class MailService: ObservableObject {
                 do {
                     let outcome = try await self.request(operation, run: run, id: id)
                     guard case let .older(page, remaining) = outcome, self.snapshots[id]?.validity == snapshot.validity else { return }
-                    self.addOlder(page, for: id)
+                    let capped = self.addOlder(page, for: id, paging: true)
                     self.olderCandidates[id] = remaining
-                    if remaining.isEmpty { self.olderExhausted.insert(id) }
+                    if remaining.isEmpty || capped { self.olderExhausted.insert(id) }
+                    if capped && !remaining.isEmpty { self.olderCapped.insert(id) }
                     self.publishInbox()
                 } catch {
-                    MailTiming.line("older-failed acct=\(self.logName(id)) err=\(MailTiming.describe(error))")
+                    MailTiming.line("older-failed acct=\(self.logName(id)) err=\(MailTiming.describe(error)) retry=on-reconnect")
+                    // The list offers a retry, and the next connection retries by itself.
+                    if !(error is CancellationError) { self.olderFailed.insert(id) }
                 }
             }
         }
     }
 
-    /// Adds a page of older rows: what the server confirmed meanwhile is applied to them, duplicates and rows now in
-    /// the window are left out, and at most `olderLimit` rows are kept.
-    private func addOlder(_ page: [MailMessage], for id: String) {
+    /// Adds older rows: what the server confirmed meanwhile is applied to them; duplicates and rows now in the window
+    /// are left out. `paging`: a page the person scrolled to; it stops at `olderLimit` rows (returns true then). A gap
+    /// fill (rows between the window and the older pages) is always added whole, so it never pushes scrolled rows out.
+    @discardableResult
+    private func addOlder(_ page: [MailMessage], for id: String, paging: Bool = false) -> Bool {
         var fresh = page
         for effect in prunedLog[id] ?? [] { fresh = effect.applied(to: fresh) }
         var rows = older[id] ?? []
         let have = Set(rows.map(\.uid))
         let lowest = snapshots[id]?.messages.map(\.uid).min() ?? UInt32.max
-        rows += fresh.filter { !have.contains($0.uid) && $0.uid < lowest }
-        rows.sort { $0.uid > $1.uid }
-        if rows.count > Self.olderLimit {
-            rows = Array(rows.prefix(Self.olderLimit))
-            olderCandidates[id] = nil      // paging starts over below the kept rows
-            olderExhausted.remove(id)
+        var added = fresh.filter { !have.contains($0.uid) && $0.uid < lowest }.sorted { $0.uid > $1.uid }
+        var capped = false
+        if paging, rows.count + added.count >= Self.olderLimit {
+            added = Array(added.prefix(max(0, Self.olderLimit - rows.count)))
+            capped = true
         }
+        rows += added
+        rows.sort { $0.uid > $1.uid }
         older[id] = rows
+        return capped
     }
 
     /// Rows of an account the list shows: the synced window plus older pages below it (cached until either changes).
@@ -1574,6 +1624,8 @@ final class MailService: ObservableObject {
         older[id] = rows
         guard let newestOlder = rows.map(\.uid).max(), lowest != UInt32.max, lowest > newestOlder + 1,
               !olderFilling.contains(id) else { return }
+        // UIDs are rarely contiguous: a range already searched with success is not searched again.
+        if let done = gapSearched[id], done.above == newestOlder, done.below == lowest { return }
         fillOlderGap(id, run: run, above: newestOlder, below: lowest)
     }
 
@@ -1583,26 +1635,36 @@ final class MailService: ObservableObject {
         let validity = snapshots[id]?.validity
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.olderFilling.remove(id) }   // a failed fill is tried again after the next sync
+            defer { self.olderFilling.remove(id) }   // a failed fill adds nothing and is tried again after the next sync
             var candidates: [UInt32]?
+            var filled: [MailMessage] = []
             for pageNumber in 0..<2 {
                 guard let outcome = try? await self.request(.loadOlder(account: id, below: below, above: above, candidates: candidates),
                                                             run: run, id: id),
-                      case let .older(page, rest) = outcome, self.snapshots[id]?.validity == validity else { return }
+                      case let .older(page, rest) = outcome, self.snapshots[id]?.validity == validity else {
+                    MailTiming.line("older-gap acct=\(self.logName(id)) failed=true retry=next-sync")
+                    return
+                }
                 if pageNumber == 0 && rest.count > MailLink.window {
                     // More than two pages missing: start the older pages over instead.
                     MailTiming.line("older-gap acct=\(self.logName(id)) reset=true missing=\(page.count + rest.count)")
                     self.older[id] = nil
                     self.olderCandidates[id] = nil
                     self.olderExhausted.remove(id)
+                    self.olderCapped.remove(id)
+                    self.gapSearched[id] = nil
                     self.publishInbox()
                     return
                 }
-                self.addOlder(page, for: id)
-                self.publishInbox()
-                if rest.isEmpty { return }
+                filled += page
+                if rest.isEmpty { break }
+                guard pageNumber == 0 else { return }   // cannot happen with ≤ 2 pages; never leave a hole behind
                 candidates = rest
             }
+            // Only a complete fill is added, so no hole can stay between the window and the older pages.
+            self.addOlder(filled, for: id)
+            self.gapSearched[id] = (above, below)
+            self.publishInbox()
         }
     }
 
@@ -1614,7 +1676,10 @@ final class MailService: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, let outcome = try? await self.request(.olderFlags(account: id, rows), run: run, id: id),
                       case let .flags(flags) = outcome, self.snapshots[id]?.validity == validity else { return }
+                let asked = Set(rows.map(\.uid))
                 self.older[id] = (self.older[id] ?? []).compactMap { row in
+                    // Rows added while the request waited (a page, a gap fill) were not asked about: they stay.
+                    guard asked.contains(row.uid) else { return row }
                     guard let current = flags[row.uid], !current.contains("\\DELETED") else { return nil }
                     var row = row
                     row.unread = !current.contains("\\SEEN")
@@ -1683,7 +1748,15 @@ final class MailService: ObservableObject {
         } else if let effect {
             pending.effect = addEffect(effect, for: id, kind: operation.kind)
         }
-        MailTiming.line("enqueue op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) since_tap_ms=\(MailTiming.ms(from: tapped, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.connection != nil) effect=\(pending.effect.map(String.init) ?? "-")")
+        MailTiming.line("enqueue op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) since_tap_ms=\(MailTiming.ms(from: tapped, to: timing.enqueued)) queued=\(run.pending.count) connected=\(run.live) effect=\(pending.effect.map(String.init) ?? "-")")
+        if operation.hidesRow && !pathSatisfied {
+            // No network at all: say so now instead of waiting for a sign-in to time out.
+            if let effect = pending.effect { overlays[id]?.remove(effect) }
+            MailTiming.line("optimistic-revert op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) reason=no-network")
+            notify(id, operation.offline, kind: "offline")
+            publishInbox()
+            return
+        }
         insert(pending, into: run)
         if operation.hidesRow { expireIfOffline(pending.id, id: id, run: run) }
         if pending.effect != nil {
@@ -1732,8 +1805,8 @@ final class MailService: ObservableObject {
         }
         for operation in dropped {
             switch operation {
-            case .verifyMove, .verifyMany: notify(id, operation.unconfirmed)
-            default: notify(id, operation.offline)
+            case .verifyMove, .verifyMany: notify(id, operation.unconfirmed, kind: "unconfirmed")
+            default: notify(id, operation.offline, kind: "offline")
             }
         }
     }
@@ -1749,8 +1822,8 @@ final class MailService: ObservableObject {
             if let effect = pending.effect { self.overlays[id]?.remove(effect) }
             MailTiming.line("optimistic-revert op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(self.logName(id)) reason=offline")
             switch pending.operation {
-            case .verifyMove, .verifyMany: self.notify(id, pending.operation.unconfirmed)
-            default: self.notify(id, pending.operation.offline)
+            case .verifyMove, .verifyMany: self.notify(id, pending.operation.unconfirmed, kind: "unconfirmed")
+            default: self.notify(id, pending.operation.offline, kind: "offline")
             }
             self.publishInbox()
         }
@@ -1839,6 +1912,10 @@ final class MailService: ObservableObject {
                             status[id] = .connected
                             if firstSync {
                                 firstSync = false
+                                if olderFailed.contains(id) {
+                                    MailTiming.line("older-retry acct=\(logName(id)) reason=reconnected")
+                                    loadOlder(accountID: id)
+                                }
                                 log("mail: \(logName(id)) synced messages=\(snapshot.messages.count) unread=\(snapshot.unread)")
                             }
                         }
@@ -1956,6 +2033,8 @@ final class MailService: ObservableObject {
             older[id] = nil
             olderCandidates[id] = nil
             olderExhausted.remove(id)
+            olderCapped.remove(id)
+            gapSearched[id] = nil
             for (messageID, read) in deferredReads where read.message.accountID == id && read.message.uidValidity != snapshot.validity {
                 dropDeferredRead(messageID)
             }
@@ -2151,7 +2230,7 @@ final class MailService: ObservableObject {
                     if let effect = pending.effect, overlays[id]?.remove(effect) != nil {
                         MailTiming.line("optimistic-revert op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) reason=\(error.logCode)")
                     }
-                    notify(id, refusalText(pending.operation, error, stage: connection.lastMoveStage, run: run, id: id))
+                    notify(id, refusalText(pending.operation, error, stage: connection.lastMoveStage, run: run, id: id), kind: "refused")
                 }
                 pending.contentResult?.resume(throwing: error)
             }
@@ -2370,8 +2449,8 @@ final class MailService: ObservableObject {
             return true
         }
         guard announce else { return }
-        for operation in unknown { notify(id, operation.unconfirmed) }
-        if !dropped.isEmpty { notify(id, Self.stoppedNotice) }
+        for operation in unknown { notify(id, operation.unconfirmed, kind: "unconfirmed") }
+        if !dropped.isEmpty { notify(id, Self.stoppedNotice, kind: "stopped") }
     }
 
     private func publishInbox() {
@@ -2534,6 +2613,8 @@ enum MailFailure: LocalizedError {
     case accountsFile, keychain, keychainDenied, unavailable, staleMessage, missingMailbox, moveUnsupported, rejected, responseTooLarge, messageTooLarge, cancelled
     /// An attachment's bytes could not be decoded.
     case undecodable
+    /// An attachment arrived shorter than the server said it was.
+    case incomplete
 
     static func from(_ error: Error) -> Self {
         if let failure = error as? Self { return failure }
@@ -2633,6 +2714,8 @@ enum MailFailure: LocalizedError {
             return tx("The mail operation was cancelled.", "Se canceló la operación de correo.")
         case .undecodable:
             return tx("Its contents couldn’t be decoded.", "Su contenido no se pudo decodificar.")
+        case .incomplete:
+            return tx("The server sent only part of it. Try again.", "El servidor envió solo una parte. Vuelve a intentarlo.")
         }
     }
 }

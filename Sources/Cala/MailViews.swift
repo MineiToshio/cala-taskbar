@@ -167,7 +167,9 @@ struct MailPane: View {
             }
         }
         .onAppear {
-            MailAttachmentFiles.sweepQuickLook()
+            // Leftovers only: the copy a preview still shows is kept. Off the main thread.
+            let livePreview = MailAttachmentFiles.livePreviewFolder
+            Task.detached(priority: .utility) { MailAttachmentFiles.sweepQuickLook(keeping: livePreview) }
             service.refresh()
         }
         .onDisappear {
@@ -220,6 +222,7 @@ struct MailPane: View {
         let selected = messages.filter { selection.contains($0.id) }
         let canLoadOlder = !messages.isEmpty && service.canLoadOlder(accountID: accountID)
         let loadingOlder = visibleAccountIDs(accountID).contains { service.olderLoading.contains($0) }
+        let olderFailed = visibleAccountIDs(accountID).contains { service.olderFailed.contains($0) }
         let listViewport = max(90, availableHeight - 132)
         let listHeight = CGFloat(problemCount(accountID) * 42) + MailMessageList.height(messages.count)
             + (canLoadOlder ? MailLoadOlderRow.height : 0)
@@ -276,10 +279,11 @@ struct MailPane: View {
                         }, footer: canLoadOlder ? AnyView(
                             // Last row of the lazy list: it only appears once scrolled to; it loads by itself only when
                             // the list is taller than the panel (otherwise it is a button).
-                            MailLoadOlderRow(loading: loadingOlder, autoLoad: listHeight > listViewport) {
+                            MailLoadOlderRow(loading: loadingOlder, failed: olderFailed,
+                                             autoLoad: listHeight > listViewport && !olderFailed) {
                                 service.loadOlder(accountID: accountID)
                             }
-                        ) : nil) { message in
+                        ) : capHint(accountID)) { message in
                             reading = message
                             // Shown as read now; the server hears about it after the body has loaded.
                             service.open(message)
@@ -336,6 +340,16 @@ struct MailPane: View {
             Color.clear.contentShape(Rectangle()).onTapGesture { selection = [] }
         }
         .onExitCommand { selection = [] }
+    }
+
+    /// At the older-row limit: a hint instead of more loading.
+    private func capHint(_ accountID: String?) -> AnyView? {
+        guard visibleAccountIDs(accountID).contains(where: service.olderCapped.contains) else { return nil }
+        return AnyView(
+            Text(tx("For older mail, open your inbox in the browser.", "Para correo más antiguo, abre tu bandeja en el navegador."))
+                .font(.system(size: 11.5)).flyoutSecondary()
+                .frame(maxWidth: .infinity, minHeight: MailLoadOlderRow.height)
+        )
     }
 
     private func problemCount(_ accountID: String?) -> Int {
@@ -543,6 +557,8 @@ private struct MailMessageList: View {
 private struct MailLoadOlderRow: View {
     static let height: CGFloat = 36
     let loading: Bool
+    /// The last attempt failed: the row becomes a retry button.
+    var failed = false
     /// Load on appearing (the list scrolls); when everything fits, only the button loads.
     let autoLoad: Bool
     let load: () -> Void
@@ -552,6 +568,11 @@ private struct MailLoadOlderRow: View {
             if loading {
                 ProgressView().controlSize(.small)
                 Text(tx("Loading older messages…", "Cargando mensajes anteriores…"))
+            } else if failed {
+                Image(systemName: "exclamationmark.circle").accessibilityHidden(true)
+                Button(tx("Couldn’t load older messages. Retry", "No se pudieron cargar los anteriores. Reintentar"), action: load)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
             } else {
                 Button(tx("Load older messages", "Cargar mensajes anteriores"), action: load)
                     .buttonStyle(.plain)
@@ -1697,7 +1718,7 @@ private struct MailAttachmentChip: View {
 @MainActor
 final class MailQuickLook: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     static let shared = MailQuickLook()
-    private var file: URL?
+    private var file: URL? { didSet { MailAttachmentFiles.livePreviewFolder = file?.deletingLastPathComponent().lastPathComponent } }
     private var closeObserver: NSObjectProtocol?
     private var request = 0
 
