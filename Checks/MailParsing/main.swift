@@ -5,14 +5,19 @@ func log(_ s: String) {}
 
 var passes = 0
 var failures = 0
+/// Appended to every check name while a block of checks is re-run under another configuration (e.g. " [.fast]").
+var checkSuffix = ""
+/// Debug aid (MAIL_DEBUG=1): called with the name of each failing check.
+var failureHook: ((String) -> Void)?
 
 func expect(_ name: String, _ condition: Bool) {
     if condition {
         passes += 1
-        print("PASS \(name)")
+        print("PASS \(name)\(checkSuffix)")
     } else {
         failures += 1
-        print("FAIL \(name)")
+        print("FAIL \(name)\(checkSuffix)")
+        failureHook?(name)
     }
 }
 
@@ -804,7 +809,7 @@ private final class MailActionServer: MailIMAPTransport {
 /// - no plain EXPUNGE / CLOSE / DELETE, and no non-UID STORE, COPY, MOVE, EXPUNGE
 /// - STORE \Deleted only for a UID set whose UID COPY the server already accepted
 /// - UID EXPUNGE only for a UID set whose STORE \Deleted the server already accepted
-private func wireIsSafe(_ log: [(command: String, status: String)]) -> Bool {
+func wireIsSafe(_ log: [(command: String, status: String)]) -> Bool {
     var copied: Set<String> = [], flagged: Set<String> = []
     for (command, status) in log {
         let words = command.split(separator: " ").map(String.init)
@@ -844,7 +849,9 @@ private func errorKind(_ error: Error?) -> String {
     }
 }
 
-private func checkMailActions() async throws {
+/// Run once with the conservative stream the transcripts pin and once with `.fast` (production): delete, archive and
+/// the flag writes must be the same commands, and every wire-safety invariant must hold, under both.
+private func checkMailActions(tuning: MailIMAPTuning = .conservative) async throws {
     let message = MailMessage(id: "unit@example.test#7#42", accountID: "unit@example.test", uid: 42, fromName: "A",
                               fromAddress: "a@example.test", subject: "S", snippet: "", date: .distantPast, unread: true,
                               gmailThreadID: nil, gmailMessageID: nil, uidValidity: 7)
@@ -855,7 +862,7 @@ private func checkMailActions() async throws {
              failing: [String: String] = [:], message: MailMessage = message,
              _ action: (MailIMAP, MailMessage) async throws -> Void) async -> (server: MailActionServer, error: Error?) {
         let server = MailActionServer(capabilities: capabilities, list: list, unseen: unseen, failing: failing)
-        let connection = MailIMAP(socket: server, provider: provider)
+        let connection = MailIMAP(socket: server, provider: provider, tuning: tuning)
         let email = provider == .gmail ? "unit@example.test" : provider == .yahoo ? "unit@yahoo.es" : "unit@me.com"
         do {
             try await connection.open(email: email, password: "pw")
@@ -874,6 +881,7 @@ private func checkMailActions() async throws {
     }
 
     // The checker itself must be able to fail: synthetic logs that purge more than they should.
+    if tuning == .conservative {
     let good = [("UID COPY 42 \"T\"", "OK"), ("UID STORE 42 +FLAGS.SILENT (\\Deleted)", "OK"), ("UID EXPUNGE 42", "OK")]
     expect("Wire safety accepts COPY, STORE \\Deleted, UID EXPUNGE of the same UID", wireIsSafe(good))
     expect("Wire safety accepts UID MOVE alone", wireIsSafe([("UID MOVE 42 \"T\"", "OK")]))
@@ -887,6 +895,7 @@ private func checkMailActions() async throws {
            !wireIsSafe([good[0], ("UID STORE 42 +FLAGS.SILENT (\\Deleted)", "NO"), good[2]]))
     expect("Wire safety rejects UID EXPUNGE with no STORE at all", !wireIsSafe([good[0], good[2]]))
     expect("Wire safety rejects sequence-number STORE \\Deleted", !wireIsSafe([good[0], ("STORE 42 +FLAGS (\\Deleted)", "OK")]))
+    }
 
     // 1. Delete with MOVE.
     let gmailMove = await run("IDLE MOVE X-GM-EXT-1", gmailList, trash)
@@ -1044,6 +1053,9 @@ private func checkMailActions() async throws {
 }
 
 do { try await checkMailActions() } catch { expect("Mail action wire checks ran", false) }
+checkSuffix = " [.fast]"
+do { try await checkMailActions(tuning: .fast) } catch { expect("Mail action wire checks ran", false) }
+checkSuffix = ""
 
 expect("Preview tolerates a truncated Base64 padding pair",
        MailMIME.snippet(wire("TQ="), headers: ["content-transfer-encoding": "base64"]) == "M")
@@ -1437,6 +1449,8 @@ private func checkCredentialMigration() {
     expect("Migration: a different helper identity means the account must be moved again",
            !MailKeychainGate(identity: "helper-B", defaults: defaults).isMigrated(fresh))
 }
+
+await runFastMailChecks()
 
 print("\(passes) PASS, \(failures) FAIL")
 exit(failures == 0 ? 0 : 1)
