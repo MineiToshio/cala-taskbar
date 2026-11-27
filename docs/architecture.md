@@ -27,10 +27,16 @@ Swift 5 language mode (`swift-tools-version: 5.9`), macOS 14+. SwiftPM executabl
 | `TrayLayout.swift` | Tray item catalog, defaults, and the bar / ^ / hidden placement and ordering stored in `Config` |
 | `Overflow.swift` | "^" panel, Downloads panel, Trash (through Finder AppleScript) and the `flyoutRefit` notification |
 | `MailMIME.swift` | Pure Foundation mail parsing: providers, accounts, MIME decoding, IMAP response framing, avatars |
-| `MailIMAP.swift` | IMAP client per account: login, inbox snapshot, IDLE, mark read, archive, delete |
-| `MailService.swift` | Account store (`mail-accounts.json`), Keychain passwords (service "Cala Mail"), sync state and inbox phases |
-| `MailViews.swift` | Tray envelope, inbox panel, Settings → Integrations → Mail detail and the Keychain notice window |
-| `MailWebBody.swift` | Message body web view (no JavaScript, links to the browser, optional remote images) |
+| `MailIMAP.swift` | IMAP client for one persistent connection per account: login, incremental sync, IDLE with a DONE-acknowledgement link check, moves and flag writes, partial bodies, prefetch, attachment chunks, older pages; `MailIMAPTuning` (`.fast` in production, `.conservative` for injected transports). See [mail.md](mail.md) |
+| `MailService.swift` | Account store (`mail-accounts.json`), Keychain passwords (service "Cala Mail"), one worker and priority queue per account, reconnects and the network path, optimistic actions with rollback and notices, body-cache, attachment and older-page wiring, `mail-timing` log lines |
+| `MailSyncPlan.swift` | Pure: link constants (`MailLink`), known rows, sync window and plan, UID sets, prefetch and older-page planners, queue signal |
+| `MailOverlay.swift` | Pure: the optimistic overlay (effects, states, reconciliation by sync sequence) |
+| `MailBodyCache.swift` | Parsed-body cache: memory LRU plus a private disk store under `~/Library/Caches/<bundle id>/Mail` |
+| `MailBodyStructure.swift` | Pure: BODYSTRUCTURE parser, the readable-part plan and the MIME reassembly used by partial fetch |
+| `MailAttachment.swift` | Attachment list, transfer decoding, file-name sanitizing, save to Downloads with quarantine, Quick Look copies |
+| `MailKeychainAccess.swift` | Reads Keychain access lists (never passwords) to predict the macOS windows |
+| `MailViews.swift` | Tray envelope, inbox panel with selection and older pages, reader with attachments and Quick Look, Settings → Integrations → Mail detail and the Keychain notice window |
+| `MailWebBody.swift` | Message body web view (no JavaScript, links to the browser, optional remote images, one shared non-persistent data store, prewarmed) |
 | `PanelPolicy.swift` | Pure rules for open tray panels vs. the auto-hiding bar (click outside / Esc closes; the owning bar stays visible) |
 | `Telemetry.swift` | Sentry envelope transport (no SDK): DSN from Info.plist, feedback and crash events with attachments |
 | `CrashSummary.swift` | Parses a macOS `.ips` crash report into a Sentry exception, stack frames and a grouping fingerprint |
@@ -199,7 +205,7 @@ The check executables live outside the SwiftPM app target. `scripts/release.sh` 
 | Script | Coverage |
 |---|---|
 | `scripts/check-rules.sh` | System and restart rules, formatting and panel policy (`Checks/SystemRules`, `Checks/PanelDismiss`) |
-| `scripts/check-mail.sh` | Foundation-only MIME parser, IMAP, account and calendar text helpers (`Checks/MailParsing`) |
+| `scripts/check-mail.sh` | Foundation-only MIME parser, IMAP client against scripted servers (wire pins for delete, archive and mark read; `.fast` transcripts), optimistic overlay and `MailService`, body cache, BODYSTRUCTURE, attachments, bulk actions, older pages, account and Keychain migration, calendar text helpers (`Checks/MailParsing`; about 660 checks, see [mail.md](mail.md#checks-limits-and-risks)) |
 | `scripts/check-modules.sh` | Foundation-only module plan, migration, ordering, permissions and welcome choices (`Checks/Modules`) |
 | `scripts/check-settings.sh` | 57 serialized keys (42 Settings, 3 elsewhere in the UI, 12 internal), plus tray moves including first slots and empty groups (`Checks/SettingsTray`) |
 | `scripts/check-statusline.sh` | Claude settings ownership, backups and concurrent edit handling (`Checks/ClaudeStatusLine`) |

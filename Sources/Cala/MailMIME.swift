@@ -1086,10 +1086,18 @@ struct MailIMAPFramer {
 struct MailIMAPFetch {
     let uid: UInt32?
     let flags: Set<String>
+    /// The response carried a FLAGS item (possibly empty).
+    let hasFlags: Bool
+    /// How many items the response carried (UID counts).
+    let attributeCount: Int
+    /// The response carried message data (a BODY[...] section).
+    let hasBodyData: Bool
     let threadID: UInt64?
     let messageID: UInt64?
     let internalDate: Date?
     let messageSize: UInt64?
+    /// The BODYSTRUCTURE value's tokens, from its opening parenthesis (see MailBodyStructure.parse).
+    let structureTokens: [MailIMAPToken]?
     private let attributes: [String: MailIMAPToken]
 
     init?(_ tokens: [MailIMAPToken]) {
@@ -1097,13 +1105,17 @@ struct MailIMAPFetch {
               tokens[3] == .openList else { return nil }
         var attributes: [String: MailIMAPToken] = [:]
         var flags: Set<String> = []
+        var structure: [MailIMAPToken]?
+        var sawFlags = false
         var index = 4
         while index + 1 < tokens.count, case let .atom(key) = tokens[index] {
             let name = key.uppercased()
             index += 1
             let value = tokens[index]
             index += 1
+            if name == "FLAGS" { sawFlags = true }
             if value == .openList {
+                let listStart = index - 1
                 var depth = 1
                 while index < tokens.count, depth > 0 {
                     let element = tokens[index]
@@ -1112,12 +1124,17 @@ struct MailIMAPFetch {
                     if name == "FLAGS", depth == 1, let flag = element.string { flags.insert(flag.uppercased()) }
                     index += 1
                 }
+                if name == "BODYSTRUCTURE", depth == 0 { structure = Array(tokens[listStart..<index]) }
             } else {
                 attributes[Self.sectionKey(name)] = value
             }
         }
         self.attributes = attributes
         self.flags = flags
+        hasFlags = sawFlags
+        attributeCount = attributes.count + (sawFlags ? 1 : 0)
+        hasBodyData = attributes.keys.contains { $0.hasPrefix("BODY[") }
+        structureTokens = structure
         uid = attributes["UID"]?.string.flatMap(UInt32.init)
         threadID = attributes["X-GM-THRID"]?.string.flatMap(UInt64.init)
         messageID = attributes["X-GM-MSGID"]?.string.flatMap(UInt64.init)
@@ -1128,6 +1145,11 @@ struct MailIMAPFetch {
     func body(_ section: String, partial: Bool = false) -> Data? {
         let key = "BODY[\(section.uppercased())]"
         return attributes[Self.sectionKey(partial ? key + "<0>" : key)]?.bytes
+    }
+
+    /// A partial section returned for <origin.length>: the server labels it BODY[section]<origin>.
+    func body(_ section: String, origin: Int) -> Data? {
+        attributes["BODY[\(section.uppercased())]<\(origin)>"]?.bytes
     }
 
     private static func sectionKey(_ key: String) -> String {

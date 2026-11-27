@@ -57,7 +57,8 @@ final class TrayModule: CalaModule {
             UsagePace.shared.stop()
             UsageService.shared.stop()
             MainActor.assumeIsolated {
-                MailService.shared.stop()
+                // Turning the tray off deletes mail's cached bodies; quitting (or an update relaunch) keeps them.
+                MailService.shared.stop(purgingCache: !ModuleRegistry.shared.isShuttingDown)
                 MailKeychainNoticeController.shared.dismiss()
             }
         }
@@ -81,6 +82,8 @@ final class TrayModule: CalaModule {
         UsagePace.shared.start(store: store)
         if visible { UsageService.shared.refresh() }
         MainActor.assumeIsolated {
+            // Warm the message web view (rule list, data store, WebContent process) only when mail is set up.
+            if !MailService.shared.accounts.isEmpty { MailWebBody.prewarm() }
             MailService.shared.start(explainingKeychain: MailKeychainNoticeController.shared.show,
                                      dismissing: MailKeychainNoticeController.shared.dismiss)
         }

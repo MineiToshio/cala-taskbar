@@ -11,10 +11,27 @@ struct MailWebBody: View {
     let onError: (String) -> Void
     @State private var localOnlyRule: WKContentRuleList?
 
+    init(content: MailContent, loadsRemoteImages: Bool, timingID: Int = 0, deliveredAt: UInt64 = 0,
+         onError: @escaping (String) -> Void) {
+        self.content = content
+        self.loadsRemoteImages = loadsRemoteImages
+        self.timingID = timingID
+        self.deliveredAt = deliveredAt
+        self.onError = onError
+        // Only the remote-images-off path uses the block rule. After prewarm() it is already compiled:
+        // render on the first pass, no spinner frame. With remote images on it stays nil.
+        _localOnlyRule = State(initialValue: loadsRemoteImages ? nil : MailWebShared.cachedLocalOnly)
+    }
+
+    /// Call once early (mail service start / mail panel appears) so the first message doesn't pay for
+    /// the content-rule compile, the data store, the cookie policy or the first WebContent process.
+    /// Safe to call repeatedly.
+    @MainActor static func prewarm() { MailWebShared.prewarm() }
+
     var body: some View {
         if loadsRemoteImages || localOnlyRule != nil {
             MailWebPage(document: MailWebDocument(content: content, loadsRemoteImages: loadsRemoteImages),
-                        rule: localOnlyRule, timingID: timingID, deliveredAt: deliveredAt, onError: onError)
+                        rule: loadsRemoteImages ? nil : localOnlyRule, timingID: timingID, deliveredAt: deliveredAt, onError: onError)
         } else {
             ProgressView().controlSize(.small)
                 .accessibilityLabel(tx("Preparing message", "Preparando mensaje"))
@@ -22,7 +39,7 @@ struct MailWebBody: View {
                 .task {
                     do {
                         let rulesStart = MailTiming.now()
-                        let rule = try await MailWebRules.localOnly()
+                        let rule = try await MailWebShared.localOnly()
                         MailTiming.line("webview-rules op=\(timingID) ms=\(MailTiming.ms(since: rulesStart)) since_delivered_ms=\(MailTiming.ms(since: deliveredAt))")
                         if !Task.isCancelled { localOnlyRule = rule }
                     } catch {
@@ -100,20 +117,78 @@ private struct MailWebDocument {
     }
 }
 
+/// Process-wide state shared by every message view: one in-memory data store with cookies
+/// disallowed (applied once), the compiled remote-block rule and one warm-up web view.
 @MainActor
-private enum MailWebRules {
-    private static var cachedLocalOnly: WKContentRuleList?
+enum MailWebShared {
+    private(set) static var cachedLocalOnly: WKContentRuleList?
+    private static var rulesTask: Task<WKContentRuleList, Error>?
+    private static var warmView: WKWebView?
+    private static var cookiePolicyRequested = false
+    private static var cookiePolicyApplied = false
+    private static var cookieWaiters: [@MainActor () -> Void] = []
+
+    /// One non-persistent store for all message views: nothing is ever written to disk and
+    /// cookies are refused. Only its in-memory cache outlives a message, and it dies with the process.
+    static let dataStore: WKWebsiteDataStore = .nonPersistent()
+
+    static func prewarm() {
+        applyCookiePolicy()
+        guard warmView == nil else { return }
+        // Claim the slot now so repeated calls don't build several warm views.
+        let config = WKWebViewConfiguration()
+        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        config.websiteDataStore = dataStore
+        let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: config)
+        warmView = view
+        // Spins up the WebContent process. The page is static, JavaScript is off, nothing is fetched.
+        view.loadHTMLString("<!doctype html><meta charset=\"utf-8\"><body></body>", baseURL: nil)
+        Task { _ = try? await localOnly() }
+    }
+
+    /// Runs `body` once the cookie policy is in place: immediately when it already is.
+    static func whenCookiePolicyApplied(_ body: @escaping @MainActor () -> Void) {
+        if cookiePolicyApplied { body(); return }
+        cookieWaiters.append(body)
+        applyCookiePolicy()
+    }
+
+    private static func applyCookiePolicy() {
+        guard !cookiePolicyRequested else { return }
+        cookiePolicyRequested = true
+        dataStore.httpCookieStore.setCookiePolicy(.disallow) {
+            Task { @MainActor in
+                cookiePolicyApplied = true
+                let waiters = cookieWaiters
+                cookieWaiters = []
+                for waiter in waiters { waiter() }
+            }
+        }
+    }
 
     static func localOnly() async throws -> WKContentRuleList {
         if let cachedLocalOnly { return cachedLocalOnly }
-        let rules = #"[{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}}]"#
-        guard let list = try await WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: "cala-mail-block-remote-v1", encodedContentRuleList: rules
-        ) else {
-            throw CocoaError(.fileReadUnknown)
+        if let rulesTask { return try await rulesTask.value }
+        let task = Task { @MainActor () throws -> WKContentRuleList in
+            let id = "cala-mail-block-remote-v1"
+            let store = WKContentRuleListStore.default()!
+            // Looking up the already-compiled list is far cheaper than compiling it again.
+            if let found = try? await store.contentRuleList(forIdentifier: id) { return found }
+            let rules = #"[{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}}]"#
+            guard let list = try await store.compileContentRuleList(forIdentifier: id, encodedContentRuleList: rules) else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            return list
         }
-        cachedLocalOnly = list
-        return list
+        rulesTask = task
+        do {
+            let list = try await task.value
+            cachedLocalOnly = list
+            return list
+        } catch {
+            rulesTask = nil
+            throw error
+        }
     }
 }
 
@@ -140,7 +215,7 @@ private struct MailWebPage: NSViewRepresentable {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
-        config.websiteDataStore = .nonPersistent()
+        config.websiteDataStore = MailWebShared.dataStore
         if let rule { config.userContentController.add(rule) }
         if !document.loadsRemoteImages {
             // The rule and CSP block requests. Render the sender's alt text in the flow
@@ -172,7 +247,7 @@ private struct MailWebPage: NSViewRepresentable {
         let sourceStart = MailTiming.now()
         let source = document.source
         let sourceMS = MailTiming.ms(since: sourceStart)
-        config.websiteDataStore.httpCookieStore.setCookiePolicy(.disallow) { [weak view, weak coordinator] in
+        MailWebShared.whenCookiePolicyApplied { [weak view, weak coordinator] in
             guard let view, let coordinator, view.navigationDelegate != nil else { return }
             coordinator.loadStarted = MailTiming.now()
             coordinator.documentNavigation = view.loadHTMLString(source, baseURL: nil)

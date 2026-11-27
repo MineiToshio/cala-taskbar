@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 import SwiftUI
 
 func mailTrayTitle(_ unread: Int) -> String {
@@ -144,6 +145,8 @@ struct MailPane: View {
     @Binding var reading: MailMessage?
     @ObservedObject private var service = MailService.shared
     @State private var filter: String?
+    /// Rows picked with their avatar, by message id.
+    @State private var selection: Set<String> = []
 
     private var enabledAccounts: [MailAccount] { service.accounts.filter(\.enabled) }
     private var selectedAccount: MailAccount? {
@@ -163,12 +166,27 @@ struct MailPane: View {
                 inbox
             }
         }
-        .onAppear { service.refresh() }
+        .onAppear {
+            // Leftovers only: the copy a preview still shows is kept. Off the main thread.
+            let livePreview = MailAttachmentFiles.livePreviewFolder
+            Task.detached(priority: .utility) { MailAttachmentFiles.sweepQuickLook(keeping: livePreview) }
+            service.refresh()
+        }
+        .onDisappear {
+            // The panel closed: downloaded attachment bytes and older pages are let go.
+            MailQuickLook.shared.panelClosed()
+            service.panelClosed()
+        }
         .onChange(of: service.messages) { _, messages in
             if let reading, !messages.contains(where: { $0.id == reading.id }) {
                 self.reading = nil
             }
+            if !selection.isEmpty {
+                let ids = Set(messages.map(\.id))
+                selection = selection.filter(ids.contains)
+            }
         }
+        .onChange(of: filter) { _, _ in selection = [] }
         .onChange(of: service.accounts) { previous, accounts in
             if let reading {
                 let oldProvider = previous.first { $0.id == reading.accountID }?.provider
@@ -199,7 +217,15 @@ struct MailPane: View {
     private var inbox: some View {
         let accountID = selectedAccount?.id
         let unread = accountID.map { service.unread(for: $0) } ?? service.unreadCount
-        let messages = Array(service.messages.lazy.filter { accountID == nil || $0.accountID == accountID }.prefix(8))
+        // Every loaded row (the synced window and older pages); the list scrolls.
+        let messages = service.messages.filter { accountID == nil || $0.accountID == accountID }
+        let selected = messages.filter { selection.contains($0.id) }
+        let canLoadOlder = !messages.isEmpty && service.canLoadOlder(accountID: accountID)
+        let loadingOlder = visibleAccountIDs(accountID).contains { service.olderLoading.contains($0) }
+        let olderFailed = visibleAccountIDs(accountID).contains { service.olderFailed.contains($0) }
+        let listViewport = max(90, availableHeight - 132)
+        let listHeight = CGFloat(problemCount(accountID) * 42) + MailMessageList.height(messages.count)
+            + (canLoadOlder ? MailLoadOlderRow.height : 0)
         let visibleAccounts = enabledAccounts.filter { accountID == nil || $0.id == accountID }
         let problems = visibleAccounts.filter { mailProblem(service.status[$0.id]) != nil }
         let phase = MailInboxPhase.of(accounts: visibleAccounts.map(\.id), status: service.status,
@@ -226,6 +252,8 @@ struct MailPane: View {
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
             Divider()
+            MailNoticeList(notices: service.notices.filter { notice in visibleAccounts.contains { $0.id == notice.accountID } },
+                           dismiss: service.dismissNotice)
             if !messages.isEmpty || !problems.isEmpty {
                 ScrollView {
                     VStack(spacing: 0) {
@@ -237,17 +265,32 @@ struct MailPane: View {
                                     .help(problem)
                             }
                         }
-                        MailMessageList(messages: messages, accountColor: { message in
+                        MailMessageList(messages: messages, selection: selection, accountColor: { message in
                             guard colorsAccounts else { return nil }
                             return enabledAccounts.first { $0.id == message.accountID }.map { mailColor($0.colorIndex) }
-                        }) { message in
+                        }, canArchive: service.canArchive, actions: { action, message in
+                            switch action {
+                            case .toggleRead: message.unread ? service.markRead(message) : service.markUnread(message)
+                            case .archive: service.archive(message)
+                            case .delete: service.trash(message)
+                            }
+                        }, toggleSelection: { message in
+                            if selection.remove(message.id) == nil { selection.insert(message.id) }
+                        }, footer: canLoadOlder ? AnyView(
+                            // Last row of the lazy list: it only appears once scrolled to; it loads by itself only when
+                            // the list is taller than the panel (otherwise it is a button).
+                            MailLoadOlderRow(loading: loadingOlder, failed: olderFailed,
+                                             autoLoad: listHeight > listViewport && !olderFailed) {
+                                service.loadOlder(accountID: accountID)
+                            }
+                        ) : capHint(accountID)) { message in
                             reading = message
-                            if message.unread { service.markRead(message) }
+                            // Shown as read now; the server hears about it after the body has loaded.
+                            service.open(message)
                         }
                     }
                 }
-                .frame(height: min(max(90, availableHeight - 132),
-                                   CGFloat(problems.count * 42) + MailMessageList.height(messages.count)))
+                .frame(height: min(listViewport, listHeight))
             }
             switch phase {
             case .messages, .problem:
@@ -265,20 +308,56 @@ struct MailPane: View {
                 MailInboxNote(phase: phase, text: emptyText(phase))
             }
             Divider()
-            HStack(spacing: 6) {
-                MailToolbarButton(title: tx("Mark all as read", "Marcar todo como leído"), symbol: "envelope.open") {
-                    service.markAllRead(accountID: accountID)
-                }
-                .disabled(unread == 0)
-                Spacer(minLength: 4)
-                MailToolbarButton(title: tx("Open \(providerName)", "Abrir \(providerName)"), symbol: "arrow.up.right") {
-                    if let webAccount {
-                        NSWorkspace.shared.open(webAccount.provider.webInboxURL(accountID: webAccount.id))
+            if !selected.isEmpty {
+                let archivable = selected.filter(service.canArchive).count
+                MailSelectionBar(count: selected.count, canArchive: archivable > 0,
+                                 archiveBlocked: archivable == selected.count ? nil
+                                     : tx("Some selected messages can’t be archived. Deselect them to archive the rest.",
+                                          "Algunos mensajes seleccionados no se pueden archivar. Quítalos de la selección para archivar el resto."),
+                                 archive: { service.archive(selected); selection = [] },
+                                 delete: { service.trash(selected); selection = [] },
+                                 markRead: { service.markRead(selected); selection = [] },
+                                 markUnread: { service.markUnread(selected); selection = [] },
+                                 clear: { selection = [] })
+            } else {
+                HStack(spacing: 6) {
+                    MailToolbarButton(title: tx("Mark all as read", "Marcar todo como leído"), symbol: "envelope.open") {
+                        service.markAllRead(accountID: accountID)
                     }
+                    .disabled(unread == 0)
+                    Spacer(minLength: 4)
+                    MailToolbarButton(title: tx("Open \(providerName)", "Abrir \(providerName)"), symbol: "arrow.up.right") {
+                        if let webAccount {
+                            NSWorkspace.shared.open(webAccount.provider.webInboxURL(accountID: webAccount.id))
+                        }
+                    }
+                    .disabled(webAccount == nil)
                 }
-                .disabled(webAccount == nil)
             }
         }
+        // A click on empty space, or Esc, clears the selection.
+        .background {
+            Color.clear.contentShape(Rectangle()).onTapGesture { selection = [] }
+        }
+        .onExitCommand { selection = [] }
+    }
+
+    /// At the older-row limit: a hint instead of more loading.
+    private func capHint(_ accountID: String?) -> AnyView? {
+        guard visibleAccountIDs(accountID).contains(where: service.olderCapped.contains) else { return nil }
+        return AnyView(
+            Text(tx("For older mail, open your inbox in the browser.", "Para correo más antiguo, abre tu bandeja en el navegador."))
+                .font(.system(size: 11.5)).flyoutSecondary()
+                .frame(maxWidth: .infinity, minHeight: MailLoadOlderRow.height)
+        )
+    }
+
+    private func problemCount(_ accountID: String?) -> Int {
+        enabledAccounts.filter { (accountID == nil || $0.id == accountID) && mailProblem(service.status[$0.id]) != nil }.count
+    }
+
+    private func visibleAccountIDs(_ accountID: String?) -> [String] {
+        enabledAccounts.map(\.id).filter { accountID == nil || $0 == accountID }
     }
 
     private func filterChip(_ title: String, count: Int, account: MailAccount?) -> some View {
@@ -425,10 +504,18 @@ private struct MailSenderAvatar: View {
 }
 
 /// The inbox rows. Unread rows sit on a soft accent card, so dividers are drawn only between two read rows.
+private enum MailRowAction { case toggleRead, archive, delete }
+
 private struct MailMessageList: View {
     static let spacing: CGFloat = 2
     let messages: [MailMessage]
+    var selection: Set<String> = []
     let accountColor: (MailMessage) -> Color?
+    let canArchive: (MailMessage) -> Bool
+    let actions: (MailRowAction, MailMessage) -> Void
+    var toggleSelection: (MailMessage) -> Void = { _ in }
+    /// The load-older row, last in the lazy stack so it only appears when scrolled to.
+    var footer: AnyView? = nil
     let open: (MailMessage) -> Void
 
     static func height(_ count: Int) -> CGFloat {
@@ -436,13 +523,137 @@ private struct MailMessageList: View {
     }
 
     var body: some View {
-        VStack(spacing: Self.spacing) {
+        LazyVStack(spacing: Self.spacing) {
             ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
                 let next = messages.indices.contains(index + 1) ? messages[index + 1] : nil
                 MailMessageRow(message: message, accountColor: accountColor(message),
-                               showsDivider: next.map { !$0.unread && !message.unread } ?? false) {
+                               showsDivider: next.map { !$0.unread && !message.unread } ?? false,
+                               selected: selection.contains(message.id), toggleSelection: { toggleSelection(message) }) {
                     open(message)
                 }
+                .contextMenu {
+                    Button {
+                        actions(.toggleRead, message)
+                    } label: {
+                        Label(message.unread ? tx("Mark as read", "Marcar como leído") : tx("Mark as unread", "Marcar como no leído"),
+                              systemImage: message.unread ? "envelope.open" : "envelope.badge")
+                    }
+                    if canArchive(message) {
+                        Button { actions(.archive, message) } label: {
+                            Label(tx("Archive", "Archivar"), systemImage: "archivebox")
+                        }
+                    }
+                    Button(role: .destructive) { actions(.delete, message) } label: {
+                        Label(tx("Delete", "Eliminar"), systemImage: "trash")
+                    }
+                }
+            }
+            if let footer { footer }
+        }
+    }
+}
+
+/// The last row while scrolling: asks for the next older page when it appears.
+private struct MailLoadOlderRow: View {
+    static let height: CGFloat = 36
+    let loading: Bool
+    /// The last attempt failed: the row becomes a retry button.
+    var failed = false
+    /// Load on appearing (the list scrolls); when everything fits, only the button loads.
+    let autoLoad: Bool
+    let load: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if loading {
+                ProgressView().controlSize(.small)
+                Text(tx("Loading older messages…", "Cargando mensajes anteriores…"))
+            } else if failed {
+                Image(systemName: "exclamationmark.circle").accessibilityHidden(true)
+                Button(tx("Couldn’t load older messages. Retry", "No se pudieron cargar los anteriores. Reintentar"), action: load)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            } else {
+                Button(tx("Load older messages", "Cargar mensajes anteriores"), action: load)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.system(size: 11.5))
+        .flyoutSecondary()
+        .frame(maxWidth: .infinity, minHeight: Self.height)
+        .onAppear { if autoLoad { load() } }
+    }
+}
+
+/// Shown instead of the bottom toolbar while rows are selected.
+private struct MailSelectionBar: View {
+    let count: Int
+    let canArchive: Bool
+    /// Why Archive is off for a mixed selection (shown as its tooltip), nil when it applies to every selected row.
+    var archiveBlocked: String? = nil
+    let archive: () -> Void
+    let delete: () -> Void
+    let markRead: () -> Void
+    let markUnread: () -> Void
+    let clear: () -> Void
+    @Environment(\.themeAccent) private var accent
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(count == 1 ? tx("1 selected", "1 seleccionado") : tx("\(count) selected", "\(count) seleccionados"))
+                .font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                .padding(.horizontal, 8).frame(height: 22)
+                .background(Capsule().fill(accent.opacity(0.16)))
+                .fixedSize()
+            Spacer(minLength: 4)
+            if canArchive {
+                MailToolbarButton(title: archiveBlocked ?? tx("Archive", "Archivar"), symbol: "archivebox", iconOnly: true,
+                                  action: archive)
+                    .disabled(archiveBlocked != nil)
+            }
+            MailToolbarButton(title: tx("Delete", "Eliminar"), symbol: "trash", iconOnly: true, role: .destructive, action: delete)
+            MailToolbarButton(title: tx("Mark as read", "Marcar como leído"), symbol: "envelope.open", iconOnly: true, action: markRead)
+            MailToolbarButton(title: tx("Mark as unread", "Marcar como no leído"), symbol: "envelope.badge", iconOnly: true,
+                              action: markUnread)
+            MailToolbarButton(title: tx("Clear selection", "Quitar selección"), symbol: "xmark", iconOnly: true, action: clear)
+                .keyboardShortcut(.cancelAction)
+        }
+    }
+}
+
+/// Actions the server refused or could not confirm. Each stays until it is dismissed.
+private struct MailNoticeList: View {
+    let notices: [MailNotice]
+    let dismiss: (Int) -> Void
+
+    var body: some View {
+        if !notices.isEmpty {
+            VStack(spacing: 6) {
+                ForEach(notices) { notice in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(StatusColor.color(.attention))
+                            .padding(.top, 1)
+                            .accessibilityHidden(true)
+                        Text(notice.text)
+                            .font(.system(size: 11.5))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                        MailToolbarButton(title: tx("Dismiss", "Descartar"), symbol: "xmark", iconOnly: true) {
+                            dismiss(notice.id)
+                        }
+                        .frame(height: 20)
+                    }
+                    .padding(.leading, 10).padding(.trailing, 2).padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { _ in
+                NotificationCenter.default.post(name: .flyoutRefit, object: nil)
             }
         }
     }
@@ -453,6 +664,8 @@ private struct MailMessageRow: View {
     let message: MailMessage
     var accountColor: Color? = nil
     let showsDivider: Bool
+    var selected = false
+    var toggleSelection: () -> Void = {}
     let action: () -> Void
     @Environment(\.themeAccent) private var accent
     @Environment(\.colorScheme) private var scheme
@@ -467,7 +680,8 @@ private struct MailMessageRow: View {
                     .frame(width: 7, height: 7).padding(.top, 15)
                     .frame(width: 15, alignment: .leading)
                     .accessibilityHidden(true)
-                MailSenderAvatar(name: message.fromName, address: message.fromAddress, accountColor: accountColor)
+                // The avatar itself is the selection button drawn on top (see overlay); this keeps its place.
+                Color.clear.frame(width: 34, height: 34)
                     .padding(.top, 1)
                     .padding(.trailing, 10)
                 VStack(alignment: .leading, spacing: 2) {
@@ -489,13 +703,36 @@ private struct MailMessageRow: View {
             .padding(.leading, 4).padding(.trailing, 9).padding(.vertical, 7)
             .frame(height: CGFloat(Self.height), alignment: .top)
             .background {
-                if unread {
+                if selected {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(accent.opacity(contrast == .increased ? 0.32 : (dark ? 0.26 : 0.18)))
+                } else if unread {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(accent.opacity(contrast == .increased ? (dark ? 0.24 : 0.16) : (dark ? 0.13 : 0.075)))
                 }
             }
         }
         .buttonStyle(MailHoverStyle(radius: 9))
+        .overlay(alignment: .topLeading) {
+            // Clicking the avatar selects the row (a checkmark replaces the initials); the rest of the row opens it.
+            Button(action: toggleSelection) {
+                ZStack {
+                    if selected {
+                        Circle().fill(accent)
+                        Image(systemName: "checkmark").font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                    } else {
+                        MailSenderAvatar(name: message.fromName, address: message.fromAddress, accountColor: accountColor)
+                    }
+                }
+                .frame(width: 34, height: 34)
+                .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 19).padding(.top, 8)
+            .help(selected ? tx("Deselect", "Quitar de la selección") : tx("Select", "Seleccionar"))
+            .accessibilityLabel(selected ? tx("Deselect", "Quitar de la selección") : tx("Select", "Seleccionar"))
+            .accessibilityAddTraits(selected ? .isSelected : [])
+        }
         .overlay(alignment: .bottom) {
             if showsDivider {
                 Divider().padding(.leading, 63).padding(.trailing, 9).offset(y: MailMessageList.spacing / 2)
@@ -632,7 +869,7 @@ private struct MailReader: View {
     let close: () -> Void
     @ObservedObject private var service = MailService.shared
     @ObservedObject private var store = ConfigStore.shared
-    @State private var state = LoadState.loading
+    @State private var state: LoadState
     @State private var attempt = 0
     /// Timing only: the operation id and the monotonic stamp of the moment the content reached the view.
     @State private var openTiming: (id: Int, delivered: UInt64) = (0, 0)
@@ -643,14 +880,25 @@ private struct MailReader: View {
         case failed(String)
     }
 
+    init(message: MailMessage, account: MailAccount, showAccount: Bool, height: CGFloat, close: @escaping () -> Void) {
+        self.message = message
+        self.account = account
+        self.showAccount = showAccount
+        self.height = height
+        self.close = close
+        // A body already in memory is drawn in the first frame.
+        _state = State(initialValue: MailService.shared.cachedContent(for: message).map { .loaded($0) } ?? .loading)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             toolbar
             Divider()
             messageHeader
-            if case let .operationFailed(problem) = service.status[message.accountID] {
-                Label(problem, systemImage: "exclamationmark.circle")
-                    .font(.system(size: 11)).flyoutSecondary().lineLimit(2).help(problem)
+            MailNoticeList(notices: service.notices.filter { $0.accountID == message.accountID },
+                           dismiss: service.dismissNotice)
+            if let attachments = service.attachments(for: message), !attachments.isEmpty {
+                MailAttachmentStrip(message: message, attachments: attachments)
             }
             GeometryReader { _ in
                 messageBody
@@ -665,20 +913,28 @@ private struct MailReader: View {
         }
         .frame(height: height, alignment: .top)
         .task(id: attempt) {
-            state = .loading
             let timingID = MailTiming.nextID()
             let requested = MailTiming.now()
-            MailTiming.line("ui-request op=\(timingID) kind=open attempt=\(attempt)")
+            var shownFromCache = false
+            if attempt == 0, case .loaded = state {
+                shownFromCache = true
+                openTiming = (timingID, requested)
+                MailTiming.line("ui-request op=\(timingID) kind=open attempt=0 first_frame=cache")
+            } else {
+                state = .loading
+                MailTiming.line("ui-request op=\(timingID) kind=open attempt=\(attempt)")
+            }
             do {
+                // Also when the body was drawn from memory: this is what sends the deferred STORE \Seen.
                 let content = try await service.content(of: message, timingID: timingID, requestedAt: requested)
                 MailTiming.line("ui-content-delivered op=\(timingID) since_request_ms=\(MailTiming.ms(since: requested)) cancelled=\(Task.isCancelled)")
-                if !Task.isCancelled {
+                if !Task.isCancelled && !shownFromCache {
                     openTiming = (timingID, MailTiming.now())
                     state = .loaded(content)
                 }
             } catch {
                 MailTiming.line("ui-content-failed op=\(timingID) since_request_ms=\(MailTiming.ms(since: requested)) err=\(MailTiming.describe(error))")
-                if !Task.isCancelled { state = .failed(error.localizedDescription) }
+                if !Task.isCancelled && !shownFromCache { state = .failed(error.localizedDescription) }
             }
         }
     }
@@ -687,6 +943,10 @@ private struct MailReader: View {
         HStack(spacing: 4) {
             MailToolbarButton(title: tx("Back", "Volver"), symbol: "chevron.left", action: close)
             Spacer(minLength: 8)
+            MailToolbarButton(title: tx("Mark as unread", "Marcar como no leído"), symbol: "envelope.badge", iconOnly: true) {
+                service.markUnread(message)
+                close()
+            }
             if service.canArchive(message) {
                 MailToolbarButton(title: tx("Archive", "Archivar"), symbol: "archivebox") {
                     service.archive(message)
@@ -729,11 +989,25 @@ private struct MailReader: View {
     @ViewBuilder private var messageBody: some View {
         switch state {
         case .loading:
-            VStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text(tx("Loading message…", "Cargando mensaje…")).font(.system(size: 12))
+            // The preview the list already had, while the rest arrives.
+            let preview = message.snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+            VStack(alignment: .leading, spacing: 12) {
+                if !preview.isEmpty {
+                    Text(preview)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color(white: 0.25))
+                        .lineLimit(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(tx("Loading message…", "Cargando mensaje…")).font(.system(size: 12))
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: preview.isEmpty ? .center : .leading)
             }
-            .foregroundStyle(.secondary)
+            .padding(preview.isEmpty ? 0 : 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: preview.isEmpty ? .center : .topLeading)
             .environment(\.colorScheme, .light)
         case let .loaded(content):
             MailWebBody(content: content, loadsRemoteImages: store.config.mailLoadsRemoteImages,
@@ -1333,5 +1607,168 @@ private struct MailAccountEditor: View {
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
+    }
+}
+
+/// The reader's attachments: name, kind and size; nothing is downloaded until a chip is clicked.
+private struct MailAttachmentStrip: View {
+    let message: MailMessage
+    let attachments: [MailAttachment]
+    @ObservedObject private var service = MailService.shared
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(attachments) { attachment in
+                    MailAttachmentChip(message: message, attachment: attachment,
+                                       state: service.attachmentState(message, attachment))
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+        .frame(height: 40)
+        .accessibilityLabel(attachments.count == 1 ? tx("1 attachment", "1 adjunto")
+                            : tx("\(attachments.count) attachments", "\(attachments.count) adjuntos"))
+    }
+}
+
+private struct MailAttachmentChip: View {
+    let message: MailMessage
+    let attachment: MailAttachment
+    let state: MailAttachmentState
+    @ObservedObject private var service = MailService.shared
+    @State private var saved: URL?
+
+    private var size: String {
+        ByteCountFormatter.string(fromByteCount: Int64(attachment.approximateBytes), countStyle: .file)
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: attachment.symbol)
+                .font(.system(size: 15)).foregroundStyle(.secondary)
+                .frame(width: 20)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(attachment.displayName).font(.system(size: 11.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .frame(maxWidth: 150, alignment: .leading)
+            controls
+        }
+        .padding(.leading, 8).padding(.trailing, 4)
+        .frame(height: 36)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+        .contentShape(Rectangle())
+        .onTapGesture { if state == .idle || state == .failed { service.fetchAttachment(attachment, of: message) } }
+        .help(attachment.displayName)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(attachment.displayName)
+    }
+
+    private var detail: String {
+        switch state {
+        case let .downloading(fraction): tx("Downloading… \(Int(fraction * 100))%", "Descargando… \(Int(fraction * 100)) %")
+        case .failed: tx("Couldn’t download", "No se pudo descargar")
+        case .ready where saved != nil: tx("Saved to Downloads", "Guardado en Descargas")
+        default: attachment.isTooLarge ? tx("\(size) · too large", "\(size) · demasiado grande") : size
+        }
+    }
+
+    @ViewBuilder private var controls: some View {
+        switch state {
+        case .idle, .failed:
+            MailToolbarButton(title: tx("Download \(attachment.displayName)", "Descargar \(attachment.displayName)"),
+                              symbol: state == .failed ? "arrow.clockwise" : "arrow.down.circle", iconOnly: true) {
+                service.fetchAttachment(attachment, of: message)
+            }
+            .disabled(attachment.isTooLarge)
+        case let .downloading(fraction):
+            ProgressView(value: fraction).progressViewStyle(.circular).controlSize(.small)
+                .accessibilityLabel(tx("Downloading", "Descargando"))
+            MailToolbarButton(title: tx("Cancel download", "Cancelar descarga"), symbol: "xmark", iconOnly: true) {
+                service.cancelAttachment(attachment, of: message)
+            }
+        case .ready:
+            if attachment.allowsQuickLook {
+                MailToolbarButton(title: tx("Quick Look", "Vista rápida"), symbol: "eye", iconOnly: true) {
+                    if let data = service.attachmentData(message, attachment) {
+                        MailQuickLook.shared.preview(data, named: attachment.displayName)
+                    }
+                }
+            }
+            if let saved {
+                MailToolbarButton(title: tx("Show in Finder", "Mostrar en el Finder"), symbol: "magnifyingglass", iconOnly: true) {
+                    NSWorkspace.shared.activateFileViewerSelecting([saved])
+                }
+            } else {
+                MailToolbarButton(title: tx("Save to Downloads", "Guardar en Descargas"), symbol: "square.and.arrow.down",
+                                  iconOnly: true) {
+                    Task { saved = await service.saveAttachmentInBackground(attachment, of: message) }
+                }
+            }
+        }
+    }
+}
+
+/// Quick Look for a downloaded attachment. The panel needs a file: MailAttachmentFiles.quickLookCopy writes it into its
+/// own temporary folder (0700, file 0600 created exclusively, quarantined before any byte). The folder goes when the
+/// panel closes, when the next preview starts, when the Mail panel closes with no preview showing, and at launch/quit
+/// (MailAttachmentFiles.sweepQuickLook). Nothing is opened or run.
+@MainActor
+final class MailQuickLook: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
+    static let shared = MailQuickLook()
+    private var file: URL? { didSet { MailAttachmentFiles.livePreviewFolder = file?.deletingLastPathComponent().lastPathComponent } }
+    private var closeObserver: NSObjectProtocol?
+    private var request = 0
+
+    func preview(_ data: Data, named name: String) {
+        cleanUp()
+        request += 1
+        let current = request
+        Task { @MainActor [weak self] in
+            let url = await Task.detached(priority: .userInitiated) { try? MailAttachmentFiles.quickLookCopy(data, named: name) }.value
+            guard let self, let url else { return }
+            guard current == self.request else { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()); return }
+            self.file = url
+            self.show()
+        }
+    }
+
+    private func show() {
+        guard let panel = QLPreviewPanel.shared() else { return }
+        panel.dataSource = self
+        panel.delegate = self
+        // Above the flyout, so a click in the preview does not count as a click elsewhere and close it.
+        panel.level = .popUpMenu
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: panel,
+                                                               queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.cleanUp() }
+        }
+        panel.reloadData()
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// The Mail panel closed: drop the copy unless the preview is still on screen.
+    func panelClosed() {
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared()?.isVisible == true { return }
+        cleanUp()
+    }
+
+    private func cleanUp() {
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        closeObserver = nil
+        if let file { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        file = nil
+    }
+
+    nonisolated func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        MainActor.assumeIsolated { file == nil ? 0 : 1 }
+    }
+
+    nonisolated func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        MainActor.assumeIsolated { file.map { $0 as NSURL } }
     }
 }
