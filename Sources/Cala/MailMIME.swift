@@ -1090,6 +1090,8 @@ struct MailIMAPFetch {
     let hasFlags: Bool
     /// How many items the response carried (UID counts).
     let attributeCount: Int
+    /// The response carried message data (a BODY[...] section).
+    let hasBodyData: Bool
     let threadID: UInt64?
     let messageID: UInt64?
     let internalDate: Date?
@@ -1131,6 +1133,7 @@ struct MailIMAPFetch {
         self.flags = flags
         hasFlags = sawFlags
         attributeCount = attributes.count + (sawFlags ? 1 : 0)
+        hasBodyData = attributes.keys.contains { $0.hasPrefix("BODY[") }
         structureTokens = structure
         uid = attributes["UID"]?.string.flatMap(UInt32.init)
         threadID = attributes["X-GM-THRID"]?.string.flatMap(UInt64.init)

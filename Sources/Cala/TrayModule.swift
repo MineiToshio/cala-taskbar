@@ -57,7 +57,8 @@ final class TrayModule: CalaModule {
             UsagePace.shared.stop()
             UsageService.shared.stop()
             MainActor.assumeIsolated {
-                MailService.shared.stop()
+                // Turning the tray off deletes mail's cached bodies; quitting (or an update relaunch) keeps them.
+                MailService.shared.stop(purgingCache: !ModuleRegistry.shared.isShuttingDown)
                 MailKeychainNoticeController.shared.dismiss()
             }
         }

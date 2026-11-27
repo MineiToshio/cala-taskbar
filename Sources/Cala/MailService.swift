@@ -337,7 +337,9 @@ final class MailService: ObservableObject {
         case archive(MailMessage)
         case trash(MailMessage)
         /// A move whose answer was lost with the connection: read-only check whether the message is still in the inbox.
-        case verifyMove(MailMessage, toTrash: Bool)
+        /// `copied`: a UIDPLUS move had copied the message already (the check also asks for FLAGS). `recheck`: the
+        /// answer was lost to a timeout, so the server may still finish it; a "still there" is checked once more later.
+        case verifyMove(MailMessage, toTrash: Bool, copied: Bool, recheck: Bool)
         /// A UIDPLUS move flagged the original \Deleted but its UID EXPUNGE was refused: take the flag off again.
         case clearDeleted(MailMessage)
 
@@ -383,7 +385,7 @@ final class MailService: ObservableObject {
         var message: MailMessage? {
             switch self {
             case let .content(message), let .markRead(message), let .markUnread(message), let .archive(message),
-                 let .trash(message), let .verifyMove(message, _), let .clearDeleted(message): message
+                 let .trash(message), let .verifyMove(message, _, _, _), let .clearDeleted(message): message
             case .markAllRead: nil
             }
         }
@@ -391,8 +393,8 @@ final class MailService: ObservableObject {
         enum Outcome {
             case content(MailContent)
             case done
-            /// verifyMove: whether the message is still in the inbox.
-            case stillInInbox(Bool)
+            /// verifyMove: where the lost move left the message.
+            case moveState(MailIMAP.MoveCheck)
         }
 
         func perform(on connection: MailIMAP) async throws -> Outcome {
@@ -403,7 +405,8 @@ final class MailService: ObservableObject {
             case let .markAllRead(through, validity): try await connection.markAllRead(through: through, validity: validity)
             case let .archive(message): try await connection.archive(message)
             case let .trash(message): try await connection.trash(message)
-            case let .verifyMove(message, _): return .stillInInbox(try await connection.isInInbox(message))
+            case let .verifyMove(message, _, copied, _):
+                return .moveState(try await connection.moveState(of: message, withFlags: copied))
             case let .clearDeleted(message): try await connection.clearDeleted(message)
             }
             return .done
@@ -412,7 +415,7 @@ final class MailService: ObservableObject {
         private var toTrash: Bool {
             switch self {
             case .trash: true
-            case let .verifyMove(_, toTrash): toTrash
+            case let .verifyMove(_, toTrash, _, _): toTrash
             default: false
             }
         }
@@ -452,11 +455,11 @@ final class MailService: ObservableObject {
         /// After reconnecting, the message was still in the inbox: the lost move did not happen.
         var notDone: String {
             if toTrash {
-                return tx("The connection dropped and the message wasn’t moved to the trash. It’s back in the list.",
-                          "Se cortó la conexión y el mensaje no se movió a la papelera. Volvió a la lista.")
+                return tx("The connection dropped and the message wasn’t moved to the trash. It’s still in Inbox.",
+                          "Se cortó la conexión y el mensaje no se movió a la papelera. Sigue en Recibidos.")
             }
-            return tx("The connection dropped and the message wasn’t archived. It’s back in the list.",
-                      "Se cortó la conexión y el mensaje no se archivó. Volvió a la lista.")
+            return tx("The connection dropped and the message wasn’t archived. It’s still in Inbox.",
+                      "Se cortó la conexión y el mensaje no se archivó. Sigue en Recibidos.")
         }
 
         /// No connection for a while: the action was dropped rather than run later behind the person's back.
@@ -736,7 +739,9 @@ final class MailService: ObservableObject {
         continueAfterKeychainNotice()
     }
 
-    func stop() {
+    /// `purgingCache`: Mail is being turned off while Cala keeps running, so cached bodies are deleted. At quit and for
+    /// an update relaunch it is false and the cache survives.
+    func stop(purgingCache: Bool = false) {
         runID = nil
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
@@ -754,7 +759,7 @@ final class MailService: ObservableObject {
         deferredReads.removeAll()
         for account in accounts { status[account.id] = .paused }
         publishInbox()
-        if let bodyCache {
+        if purgingCache, let bodyCache {
             let purge = DispatchWorkItem { bodyCache.purgeAll() }
             pendingPurge = purge
             cacheQueue.asyncAfter(deadline: .now() + 3, execute: purge)
@@ -1123,11 +1128,14 @@ final class MailService: ObservableObject {
         }
     }
 
-    /// Drops every queued (not sent) action that hides a row: the row comes back with a notice.
-    private func dropRowActions(in run: AccountRun, id: String, reason: String) {
+    /// Drops every queued (not sent) action that hides a row (only those queued at least `olderThan` ago, if given):
+    /// the row comes back with a notice.
+    private func dropRowActions(in run: AccountRun, id: String, reason: String, olderThan age: Duration? = nil) {
+        let minimumMS = age.map { Int($0.components.seconds) * 1000 + Int($0.components.attoseconds / 1_000_000_000_000_000) }
         var dropped: [Operation] = []
         run.pending.removeAll { pending in
             guard pending.operation.hidesRow, pending.id != run.inFlight else { return false }
+            if let minimumMS, MailTiming.ms(since: pending.timing.enqueued) < minimumMS { return false }
             if let effect = pending.effect { overlays[id]?.remove(effect) }
             MailTiming.line("optimistic-revert op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=\(reason)")
             dropped.append(pending.operation)
@@ -1312,6 +1320,8 @@ final class MailService: ObservableObject {
                 // Could not even connect: there is no connection to carry a delete or archive, so those come back now
                 // rather than running later behind the person's back (reads stay queued: they are harmless to send late).
                 if !signedIn && !failure.requiresUserAction { dropRowActions(in: run, id: id, reason: "connect-failed") }
+                // Waited past the grace already (its one-shot timer found the link up then): never sent minutes later.
+                dropRowActions(in: run, id: id, reason: "offline-too-long", olderThan: Self.offlineGrace)
                 publishInbox()
                 if failure.requiresUserAction { return }
 
@@ -1495,7 +1505,9 @@ final class MailService: ObservableObject {
             } catch {
                 MailTiming.line("end op=\(timing.id) kind=\(timing.kind) acct=\(logName(id)) err=\(MailTiming.describe(error)) perform_ms=\(MailTiming.ms(since: performStart)) since_tap_ms=\(MailTiming.ms(since: timing.tapped))")
                 // The answer is lost with the connection. Settle the list now, before the connection closes.
-                if runs[id] === run, !Task.isCancelled { lostAnswer(pending, id: id, run: run) }
+                if runs[id] === run, !Task.isCancelled {
+                    lostAnswer(pending, id: id, run: run, stage: connection.lastMoveStage, error: error)
+                }
                 throw error
             }
             let performed: String
@@ -1507,13 +1519,10 @@ final class MailService: ObservableObject {
 
             run.pending.remove(at: index)
             switch result {
-            case .success(.stillInInbox(true)):
-                // The lost move did not happen: the row comes back.
-                if let effect = pending.effect { overlays[id]?.remove(effect) }
-                MailTiming.line("move-verified op=\(timing.id) acct=\(logName(id)) moved=false")
-                notify(id, pending.operation.notDone)
+            case let .success(.moveState(state)) where state != .gone:
+                settleUnmoved(pending, state: state, id: id, run: run)
             case let .success(outcome):
-                if case .stillInInbox = outcome { MailTiming.line("move-verified op=\(timing.id) acct=\(logName(id)) moved=true") }
+                if case .moveState = outcome { MailTiming.line("move-verified op=\(timing.id) acct=\(logName(id)) moved=true") }
                 if let effect = pending.effect {
                     let sequence = syncStarted[id] ?? 0
                     overlays[id]?.confirm(effect, latestStartedSync: sequence)
@@ -1573,7 +1582,7 @@ final class MailService: ObservableObject {
     /// The connection failed while `pending` was on the wire. A repeatable action stops showing until it is sent again
     /// after reconnecting. A move is never resent (it could copy twice): the row stays hidden while Cala checks, after
     /// reconnecting, whether the message is still in the inbox (see Operation.verifyMove).
-    private func lostAnswer(_ pending: PendingOperation, id: String, run: AccountRun) {
+    private func lostAnswer(_ pending: PendingOperation, id: String, run: AccountRun, stage: MailIMAP.MoveStage, error: Error) {
         guard pending.contentResult == nil, let effect = pending.effect else { return }
         if case .verifyMove = pending.operation {
             overlays[id]?.set(.queued, for: effect)   // still checking: the row stays hidden
@@ -1593,11 +1602,54 @@ final class MailService: ObservableObject {
         overlays[id]?.set(.queued, for: effect)
         var timing = MailTiming.Op(id: MailTiming.nextID(), kind: "verify-move", tapped: pending.timing.tapped)
         timing.enqueued = MailTiming.now()
-        let verify = PendingOperation(id: UUID(), operation: .verifyMove(message, toTrash: toTrash), contentResult: nil,
-                                      timing: timing, effect: effect)
+        // A UIDPLUS move may have copied (and flagged) already; a timed-out command may still be finished by the server.
+        let copied = stage == .copied || stage == .flagged
+        let timedOut: Bool
+        if case MailIMAPError.timedOut = error { timedOut = true } else { timedOut = false }
+        let verify = PendingOperation(id: UUID(),
+                                      operation: .verifyMove(message, toTrash: toTrash, copied: copied, recheck: timedOut),
+                                      contentResult: nil, timing: timing, effect: effect)
         insert(verify, into: run)
         expireIfOffline(verify.id, id: id, run: run)
-        MailTiming.line("optimistic-verify op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=connection-lost")
+        MailTiming.line("optimistic-verify op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=connection-lost stage=\(stage) timed_out=\(timedOut)")
+    }
+
+    /// After a lost move answer is checked again later (timeouts only): the server may still have been finishing it.
+    static var recheckDelay: Duration = .seconds(15)
+
+    /// The check found the message still in the inbox.
+    private func settleUnmoved(_ pending: PendingOperation, state: MailIMAP.MoveCheck, id: String, run: AccountRun) {
+        guard case let .verifyMove(message, toTrash, copied, recheck) = pending.operation else { return }
+        if recheck, let effect = pending.effect {
+            // Timed out, so the server may still complete the move: keep the row hidden and look once more later.
+            MailTiming.line("move-verified op=\(pending.timing.id) acct=\(logName(id)) moved=false recheck=later")
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: Self.recheckDelay)
+                guard let self, self.runs[id] === run, self.overlays[id]?.entries.contains(where: { $0.id == effect }) == true else { return }
+                var timing = MailTiming.Op(id: MailTiming.nextID(), kind: "verify-move", tapped: pending.timing.tapped)
+                timing.enqueued = MailTiming.now()
+                let again = PendingOperation(id: UUID(),
+                                             operation: .verifyMove(message, toTrash: toTrash, copied: copied, recheck: false),
+                                             contentResult: nil, timing: timing, effect: effect)
+                self.insert(again, into: run)
+                self.expireIfOffline(again.id, id: id, run: run)
+                self.wake(run, cause: "operation")
+            }
+            return
+        }
+        if let effect = pending.effect { overlays[id]?.remove(effect) }
+        MailTiming.line("move-verified op=\(pending.timing.id) acct=\(logName(id)) moved=false copied=\(copied) deleted_flag=\(state == .flaggedDeleted)")
+        guard copied else {
+            notify(id, pending.operation.notDone)
+            return
+        }
+        // A copy is already in the target mailbox; the original stays. If it was flagged \Deleted, take that off.
+        if state == .flaggedDeleted {
+            var timing = MailTiming.Op(id: MailTiming.nextID(), kind: "clear-deleted", tapped: MailTiming.now())
+            timing.enqueued = timing.tapped
+            insert(PendingOperation(id: UUID(), operation: .clearDeleted(message), contentResult: nil, timing: timing), into: run)
+        }
+        notify(id, pending.operation.halfMoved)
     }
 
     /// `afterDisconnect`: actions not sent yet, and repeatable ones, survive the reconnect; a move that was on the wire
@@ -1607,6 +1659,8 @@ final class MailService: ObservableObject {
                                 keepContent: Bool = false, announce: Bool = false) {
         defer { run.inFlight = nil }
         var dropped: [Operation] = []
+        /// Moves the server may already have done (on the wire, or being checked): "check the inbox", not "not made".
+        var unknown: [Operation] = []
         run.pending.removeAll { pending in
             if afterDisconnect {
                 if pending.contentResult == nil {
@@ -1617,17 +1671,16 @@ final class MailService: ObservableObject {
             }
             if let effect = pending.effect, overlays[id]?.remove(effect) != nil {
                 MailTiming.line("optimistic-revert op=\(pending.timing.id) kind=\(pending.timing.kind) acct=\(logName(id)) reason=\(error.logCode)")
-                dropped.append(pending.operation)
+                var mayHaveHappened = pending.id == run.inFlight && !pending.operation.isRepeatable
+                if case .verifyMove = pending.operation { mayHaveHappened = true }
+                if mayHaveHappened { unknown.append(pending.operation) } else { dropped.append(pending.operation) }
             }
             pending.contentResult?.resume(throwing: error)
             return true
         }
-        guard announce, !dropped.isEmpty else { return }
-        if dropped.count == 1, case .verifyMove = dropped[0] {
-            notify(id, dropped[0].unconfirmed)
-        } else {
-            notify(id, Self.stoppedNotice)
-        }
+        guard announce else { return }
+        for operation in unknown { notify(id, operation.unconfirmed) }
+        if !dropped.isEmpty { notify(id, Self.stoppedNotice) }
     }
 
     private func publishInbox() {
