@@ -1147,6 +1147,11 @@ struct MailIMAPFetch {
         return attributes[Self.sectionKey(partial ? key + "<0>" : key)]?.bytes
     }
 
+    /// A partial section returned for <origin.length>: the server labels it BODY[section]<origin>.
+    func body(_ section: String, origin: Int) -> Data? {
+        attributes["BODY[\(section.uppercased())]<\(origin)>"]?.bytes
+    }
+
     private static func sectionKey(_ key: String) -> String {
         guard key.hasPrefix("BODY[HEADER.FIELDS ("), key.hasSuffix(")]") else { return key }
         let fields = key.dropFirst("BODY[HEADER.FIELDS (".count).dropLast(2)

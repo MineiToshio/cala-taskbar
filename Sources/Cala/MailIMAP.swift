@@ -7,6 +7,8 @@ enum MailIMAPError: Error {
     case disconnected, timedOut, invalidResponse, missingMailbox, staleMessage, moveUnsupported, rejected, responseTooLarge, messageTooLarge
     /// The server did not acknowledge DONE in time (see MailIMAP.doneAckTimeout): the connection is silently dead.
     case linkDead
+    /// An attachment's bytes could not be decoded from their transfer encoding.
+    case undecodable
 }
 
 struct MailInboxSnapshot {
@@ -762,8 +764,56 @@ final class MailIMAP {
         lastMoveStage = .done
     }
 
-    /// Downloads one attachment part (BODY.PEEK[section]) and undoes its transfer encoding. Waits as long as bytes keep
-    /// arriving; `shouldCancel` gives up between reads (the late reply is skipped); `progress` gets the bytes received.
+    /// The attachment list from BODYSTRUCTURE alone (for a body cached before lists were kept).
+    func attachmentList(of message: MailMessage) async throws -> [MailAttachment] {
+        try validate(message)
+        let responses = try await solicited(uids: [message.uid]) {
+            try await command("UID FETCH \(message.uid) (UID BODYSTRUCTURE)")
+        }
+        guard let structure = responses.lazy.compactMap(\.fetch).first(where: { $0.uid == message.uid && $0.structureTokens != nil })?
+            .bodyStructure else { throw MailIMAPError.staleMessage }
+        return MailAttachmentList.from(structure: structure)
+    }
+
+    /// Current flags by UID (UID FETCH set (UID FLAGS)); UIDs missing from the answer are gone from the mailbox.
+    func flags(of messages: [MailMessage]) async throws -> [UInt32: Set<String>] {
+        try validate(messages)
+        let uids = messages.map(\.uid)
+        let responses = try await solicited(uids: uids, flags: true) {
+            try await command("UID FETCH \(MailSyncPlanner.uidSet(uids)) (UID FLAGS)")
+        }
+        var result: [UInt32: Set<String>] = [:]
+        for fetch in responses.compactMap(\.fetch) where fetch.hasFlags && !fetch.hasBodyData {
+            if let uid = fetch.uid, uids.contains(uid) { result[uid] = fetch.flags }
+        }
+        return result
+    }
+
+    /// Parts larger than this are downloaded in chunks of this size, each its own command, so other commands run in
+    /// between and a cancel stops after the current chunk.
+    static let attachmentChunk = 1024 * 1024
+
+    /// One chunk of an attachment part as the server stores it (still transfer-encoded):
+    /// UID FETCH uid (UID BODY.PEEK[section]<offset.length>). Fewer than `length` bytes means the part ended.
+    func attachmentChunk(of message: MailMessage, part: MailAttachment, offset: Int,
+                         length: Int = attachmentChunk) async throws -> Data {
+        try validate(message)
+        guard !part.isTooLarge else { throw MailIMAPError.messageTooLarge }
+        let responses = try await solicited(uids: [message.uid]) {
+            try await command("UID FETCH \(message.uid) (UID BODY.PEEK[\(part.section)]<\(offset).\(length)>)", timeout: 120,
+                              stallMS: Self.bodyStallMS)
+        }
+        guard let chunk = responses.lazy.compactMap(\.fetch).compactMap({ $0.uid == message.uid ? $0.body(part.section, origin: offset) : nil })
+            .first else {
+            if offset > 0 { return Data() }   // past the end: an empty (or no) section
+            throw MailIMAPError.staleMessage
+        }
+        return chunk
+    }
+
+    /// Downloads one attachment part (UID FETCH uid (UID BODY.PEEK[section])) and undoes its transfer encoding. Waits
+    /// as long as bytes keep arriving; `shouldCancel` ends the wait within a read slice (the late reply is skipped and
+    /// its data is not kept, the connection stays); `progress` hears the bytes received.
     func attachmentData(of message: MailMessage, part: MailAttachment, shouldCancel: @escaping () -> Bool = { false },
                         progress: @escaping (Int) -> Void = { _ in }) async throws -> Data {
         try validate(message)
@@ -776,11 +826,13 @@ final class MailIMAP {
             try await command("UID FETCH \(message.uid) (UID BODY.PEEK[\(part.section)])", timeout: 600,
                               stallMS: Self.bodyStallMS, abandonOnTimeout: true)
         }
-        guard let raw = responses.lazy.compactMap(\.fetch).first(where: { $0.uid == message.uid })?.body(part.section) else {
+        // The answer that carries the section, not merely the first FETCH for that UID (a flag update, say).
+        guard let raw = responses.lazy.compactMap(\.fetch).compactMap({ $0.uid == message.uid ? $0.body(part.section) : nil }).first else {
             throw MailIMAPError.staleMessage
         }
-        guard let decoded = MailAttachment.decode(raw, encoding: part.encoding),
-              decoded.count <= MailAttachment.downloadLimit else { throw MailIMAPError.messageTooLarge }
+        guard raw.count <= MailAttachment.downloadLimit * 3 / 2 else { throw MailIMAPError.messageTooLarge }
+        guard let decoded = MailAttachment.decode(raw, encoding: part.encoding) else { throw MailIMAPError.undecodable }
+        guard decoded.count <= MailAttachment.downloadLimit else { throw MailIMAPError.messageTooLarge }
         return decoded
     }
 

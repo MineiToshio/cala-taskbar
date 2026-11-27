@@ -99,6 +99,11 @@ final class MailBodyCache: @unchecked Sendable {
         remember(content, attachments: attachments, for: key)
     }
 
+    /// The attachment list stored with a body in memory only (never touches the disk), nil when unknown.
+    func memoryAttachments(for key: MailBodyKey) -> [MailAttachment]? {
+        lock.withLock { memory[key]?.attachments }
+    }
+
     /// The attachment list stored with a body (memory, then disk), nil when none was stored.
     func attachments(for key: MailBodyKey) -> [MailAttachment]? {
         if let entry = lock.withLock({ memory[key] }) { return entry.attachments }

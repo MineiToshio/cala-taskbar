@@ -20,18 +20,50 @@ struct MailAttachment: Codable, Equatable, Hashable, Identifiable {
     /// Decoded size estimate for display (base64 carries 3 bytes in 4).
     var approximateBytes: Int { encoding == "base64" ? size * 3 / 4 : size }
 
-    /// The part's bytes as the server sent them, with the transfer encoding undone.
+    /// The part's bytes as the server sent them, with the transfer encoding undone. Base64 is read leniently (anything
+    /// outside the alphabet is ignored and missing padding is added); nil only when nothing decodable remains.
     static func decode(_ data: Data, encoding: String?) -> Data? {
         switch encoding?.lowercased() {
-        case "base64", "quoted-printable": return MailMIME.decodeTransfer(data, encoding: encoding)
+        case "base64": return lenientBase64(data)
+        case "quoted-printable": return MailMIME.decodeTransfer(data, encoding: encoding)
         default: return data
         }
+    }
+
+    static func lenientBase64(_ data: Data) -> Data? {
+        var clean = Data(capacity: data.count)
+        for byte in data {
+            switch byte {
+            case 65...90, 97...122, 48...57, 43, 47: clean.append(byte)            // A-Z a-z 0-9 + /
+            case 61: break                                                         // '=': the data ends here
+            default: continue                                                      // whitespace, stray bytes
+            }
+            if byte == 61 { break }
+        }
+        if clean.count % 4 == 1 { clean.removeLast() }                            // a lone trailing character carries no byte
+        clean.append(contentsOf: repeatElement(61, count: (4 - clean.count % 4) % 4))
+        if clean.isEmpty { return data.isEmpty ? Data() : nil }
+        return Data(base64Encoded: clean)
+    }
+
+    /// The name shown and used for files: sanitized (see MailAttachmentFiles.sanitize).
+    var displayName: String { MailAttachmentFiles.sanitize(filename) }
+
+    /// Quick Look is not offered for types whose preview may load remote content (web pages, SVG, web locations,
+    /// messages): those can only be saved.
+    var allowsQuickLook: Bool {
+        let ext = (displayName as NSString).pathExtension.lowercased()
+        let blockedTypes: Set<String> = ["text/html", "application/xhtml+xml", "image/svg+xml", "message/rfc822",
+                                         "message/global", "application/x-webloc", "text/xml", "application/xml"]
+        let blockedExtensions: Set<String> = ["html", "htm", "xhtml", "shtml", "svg", "svgz", "webloc", "url", "inetloc",
+                                              "eml", "emlx", "mht", "mhtml", "webarchive", "xml", "xsl"]
+        return !blockedTypes.contains(mime) && !blockedExtensions.contains(ext)
     }
 
     /// A broad category for the row's symbol.
     var symbol: String {
         let type = mime.split(separator: "/").first.map(String.init) ?? ""
-        let ext = (filename as NSString).pathExtension.lowercased()
+        let ext = (displayName as NSString).pathExtension.lowercased()
         if mime == "application/pdf" || ext == "pdf" { return "doc.richtext" }
         switch type {
         case "image": return "photo"
@@ -138,7 +170,6 @@ enum MailAttachmentList {
     /// `name*=utf-8''caf%C3%A9.pdf`, or `name*0*=…; name*1*=…` / `name*0=…`.
     private static func rfc2231(_ source: [String: String], name: String) -> String? {
         var pieces: [(Int, String, Bool)] = []
-        if let whole = source[name + "*"] { pieces.append((0, whole, true)) }
         for (key, value) in source where key.hasPrefix(name + "*") && key != name + "*" {
             var rest = key.dropFirst(name.count + 1)
             let encoded = rest.hasSuffix("*")
@@ -146,6 +177,8 @@ enum MailAttachmentList {
             guard let index = Int(rest) else { continue }
             pieces.append((index, value, encoded))
         }
+        // A continuation set (name*0, name*1*…) wins over a whole `name*`; the two are never merged.
+        if pieces.isEmpty, let whole = source[name + "*"] { pieces.append((0, whole, true)) }
         guard !pieces.isEmpty else { return nil }
         pieces.sort { $0.0 < $1.0 }
         var charset = "utf-8"
@@ -260,26 +293,42 @@ enum MailAttachmentList {
 
 /// Saving an attachment the person asked for (pure helpers plus the write itself).
 enum MailAttachmentFiles {
-    /// A file name that is safe to create: no path separators or control characters, no leading dots, not empty,
-    /// at most 200 characters (the extension is kept).
+    /// Longest name kept, in UTF-8 bytes (APFS allows 255).
+    static let maxNameBytes = 230
+
+    /// A file name that is safe to create and to show: path separators become "_", control, format (bidi overrides,
+    /// zero-width) and line/paragraph separator characters go, no leading dots, never empty, at most `maxNameBytes`
+    /// UTF-8 bytes cut on a character boundary with the extension kept.
     static func sanitize(_ name: String) -> String {
-        var cleaned = String(name.unicodeScalars.map { scalar -> Character in
-            if scalar == "/" || scalar == "\\" || scalar == ":" || CharacterSet.controlCharacters.contains(scalar)
-                || scalar.properties.generalCategory == .format {
-                return "_"
+        var scalars = String.UnicodeScalarView()
+        for scalar in name.unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator, .surrogate, .unassigned, .privateUse:
+                continue
+            default:
+                scalars.append(scalar == "/" || scalar == "\\" || scalar == ":" ? "_" : scalar)
             }
-            return Character(scalar)
-        })
-        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var cleaned = String(scalars).trimmingCharacters(in: .whitespacesAndNewlines)
         while cleaned.hasPrefix(".") { cleaned.removeFirst() }
         cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.isEmpty || cleaned == "_" { cleaned = tx("Attachment", "Adjunto") }
-        if cleaned.count > 200 {
-            let ext = (cleaned as NSString).pathExtension
-            let keep = ext.isEmpty || ext.count > 16 ? 200 : 200 - ext.count - 1
-            cleaned = String(cleaned.prefix(keep)) + (ext.isEmpty || ext.count > 16 ? "" : "." + ext)
+        if cleaned.isEmpty || cleaned.allSatisfy({ $0 == "_" }) { cleaned = tx("Attachment", "Adjunto") }
+        // Measured as the file system stores it (decomposed: "é" is two code points, three bytes).
+        func bytes(_ text: String) -> Int { text.decomposedStringWithCanonicalMapping.utf8.count }
+        guard bytes(cleaned) > maxNameBytes else { return cleaned }
+        let ext = (cleaned as NSString).pathExtension
+        let keepExtension = !ext.isEmpty && bytes(ext) <= 16
+        let stem = keepExtension ? (cleaned as NSString).deletingPathExtension : cleaned
+        let budget = maxNameBytes - (keepExtension ? bytes(ext) + 1 : 0)
+        var kept = ""
+        var used = 0
+        for character in stem {
+            let size = bytes(String(character))
+            guard used + size <= budget else { break }
+            kept.append(character)
+            used += size
         }
-        return cleaned
+        return keepExtension ? kept + "." + ext : kept
     }
 
     /// `name` in `directory`, or "name 2.ext", "name 3.ext"… when taken.
@@ -307,19 +356,19 @@ enum MailAttachmentFiles {
 
     /// Writes `data` under a unique, sanitized name in `directory` (never replacing a file) and quarantines it. The file
     /// is never opened or run.
-    static func save(_ data: Data, named name: String, in directory: URL) throws -> URL {
+    static func save(_ data: Data, named name: String, in directory: URL, permissions: mode_t = 0o644) throws -> URL {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for _ in 0..<20 {
             let url = uniqueURL(for: name, in: directory)
             // O_EXCL: never replace a file, even one that appeared since uniqueURL looked.
-            let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
+            let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, permissions)
             if descriptor < 0 {
                 if errno == EEXIST { continue }
                 throw CocoaError(.fileWriteNoPermission)
             }
             let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
             do {
-                try quarantine(url)   // before any byte is in place
+                try quarantine(descriptor: descriptor)   // on the open file, before any byte is in place
                 try handle.write(contentsOf: data)
                 try handle.close()
             } catch {
@@ -332,12 +381,39 @@ enum MailAttachmentFiles {
         throw CocoaError(.fileWriteFileExists)
     }
 
+    static func quarantine(descriptor: Int32) throws {
+        let value = quarantineValue()
+        let result = value.withCString { pointer in fsetxattr(descriptor, "com.apple.quarantine", pointer, strlen(pointer), 0, 0) }
+        guard result == 0 else { throw CocoaError(.fileWriteUnknown) }
+    }
+
     static func quarantine(_ url: URL) throws {
         let value = quarantineValue()
         let result = value.withCString { pointer in
             setxattr(url.path, "com.apple.quarantine", pointer, strlen(pointer), 0, 0)
         }
         guard result == 0 else { throw CocoaError(.fileWriteUnknown) }
+    }
+
+    static let quickLookPrefix = "Cala-QuickLook-"
+
+    /// A private copy for Quick Look: its own temporary folder (0700), the file created exclusively (0600) and
+    /// quarantined before any byte is written. Delete the folder when the preview ends (or with sweepQuickLook).
+    static func quickLookCopy(_ data: Data, named name: String, in temporary: URL = FileManager.default.temporaryDirectory) throws -> URL {
+        let folder = temporary.appendingPathComponent(quickLookPrefix + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            return try save(data, named: name, in: folder, permissions: 0o600)
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
+    }
+
+    /// Removes every Quick Look copy left in `temporary` (at launch and at quit).
+    static func sweepQuickLook(in temporary: URL = FileManager.default.temporaryDirectory) {
+        let items = (try? FileManager.default.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)) ?? []
+        for item in items where item.lastPathComponent.hasPrefix(quickLookPrefix) { try? FileManager.default.removeItem(at: item) }
     }
 
     static var downloads: URL {
