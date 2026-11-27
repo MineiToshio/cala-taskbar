@@ -61,7 +61,7 @@ struct BarView: View {
             HStack(spacing: 2) {
                 if !centered { icons }
                 Spacer(minLength: 8)
-                if let version = updates.available?.version { UpdateButton(version: version).reportFrame(updateID) }
+                if let version = updates.available?.version { UpdateButton(version: version, hovering: model.updateHover).reportFrame(updateID) }
                 if model.trayVisible {
                     JoinPill(model: model)
                     TrayView(model: model, screenKey: screenKey)
@@ -89,19 +89,34 @@ struct BarView: View {
     }
 }
 
+/// Shown while a Cala update is available and not skipped. It is drawn like a tray cell (14 pt monochrome glyph over
+/// 9.5 pt text, the tray's hover highlight) so it weighs no more than the clock or the battery. The only color is a
+/// small dot in the theme accent, the same signal as the Settings sidebar, and nothing moves, so it stays calm however
+/// long the update waits. Glyph and version say "new version" without relying on the dot's color.
 struct UpdateButton: View {
     @Environment(\.themeAccent) private var accent
     let version: String
+    var hovering = false
 
     var body: some View {
-        Image(systemName: "arrow.down.circle.fill")
-            .font(.system(size: 26))
-            .foregroundStyle(accent)
-            .frame(width: 40)
-            .frame(maxHeight: .infinity)
-            .accessibilityLabel(tx("Cala \(version) update available", "Actualización de Cala \(version) disponible"))
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { UpdateWindowController.shared.show() }
+        VStack(spacing: 3) {
+            Image(systemName: "arrow.down.app").font(.system(size: 14))
+                .overlay(alignment: .topTrailing) {
+                    Circle().fill(accent).frame(width: 6, height: 6).offset(x: 4, y: -2).accessibilityHidden(true)
+                }
+            Text(version).font(.system(size: 9.5, weight: .medium)).monospacedDigit().lineLimit(1).fixedSize()
+        }
+        .foregroundStyle(.primary.opacity(0.85))
+        .padding(.horizontal, 8)
+        .frame(maxHeight: .infinity)
+        .background(TrayHighlight(hovering: hovering))
+        .contentShape(Rectangle())
+        .help(tx("Cala \(version) is available. Click to see what's new and install it.",
+                 "Cala \(version) está disponible. Haz clic para ver las novedades e instalarla."))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(tx("Cala \(version) update available", "Actualización de Cala \(version) disponible"))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { UpdateWindowController.shared.show() }
     }
 }
 

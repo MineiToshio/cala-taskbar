@@ -19,6 +19,7 @@ final class TaskbarModel: ObservableObject {
     @Published var hovered: AppItem?
     @Published var startHover = false
     @Published var deskHover = false
+    @Published var updateHover = false
     @Published var badges: [String: String] = [:]
     @Published var usage: [UsageState] = []
     @Published var trayHover: String?
