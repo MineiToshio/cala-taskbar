@@ -283,7 +283,8 @@ final class FakeIMAPWorld: @unchecked Sendable {
                 let upper = item.uppercased()
                 if upper == "UID" || upper == "INTERNALDATE" || upper.hasPrefix("X-GM-") { continue }
                 if upper == "FLAGS" {
-                    line.append(Data(" FLAGS (\(message.unread ? "" : "\\Seen"))".utf8))
+                    let flags = [message.unread ? nil : "\\Seen", message.deleted ? "\\Deleted" : nil].compactMap { $0 }
+                    line.append(Data(" FLAGS (\(flags.joined(separator: " ")))".utf8))
                 } else if upper == "RFC822.SIZE" {
                     line.append(Data(" RFC822.SIZE \(message.raw.count)".utf8))
                 } else if upper == "BODYSTRUCTURE" {
@@ -339,6 +340,10 @@ final class FakeIMAPWorld: @unchecked Sendable {
             return ok("* SEARCH" + messages.filter(\.unread).map { " \($0.uid)" }.joined() + "\r\n")
         }
         let words = command.split(separator: " ", maxSplits: 3).map(String.init)
+        if upper.hasPrefix("UID SEARCH UID "), words.count >= 4 {
+            let set = uidSet(words[3])
+            return ok("* SEARCH" + messages.filter { set.contains($0.uid) }.map { " \($0.uid)" }.joined() + "\r\n")
+        }
         if upper.hasPrefix("UID STORE"), words.count == 4 {
             let set = uidSet(words[2])
             for index in messages.indices where set.contains(messages[index].uid) {
@@ -424,15 +429,21 @@ final class MailHarness {
     var publishedUnread: [Int] = []
     private var sinks: [AnyCancellable] = []
 
-    init(world: FakeIMAPWorld, cache: MailBodyCache? = nil, tuning: MailIMAPTuning = .fast) throws {
+    static let secondAccount = "unit@yahoo.es"
+    let second: FakeIMAPWorld?
+
+    /// `second`: a Yahoo account served by its own world (worlds are picked by provider).
+    init(world: FakeIMAPWorld, cache: MailBodyCache? = nil, tuning: MailIMAPTuning = .fast, second: FakeIMAPWorld? = nil) throws {
         self.world = world
+        self.second = second
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("cala-mail-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("mail-accounts.json")
-        try JSONEncoder().encode([MailAccount(id: Self.account, label: "A", colorIndex: 0, enabled: true, provider: .gmail)])
-            .write(to: url)
+        var accounts = [MailAccount(id: Self.account, label: "A", colorIndex: 0, enabled: true, provider: .gmail)]
+        if second != nil { accounts.append(MailAccount(id: Self.secondAccount, label: "B", colorIndex: 1, enabled: true, provider: .yahoo)) }
+        try JSONEncoder().encode(accounts).write(to: url)
         service = MailService(accountsURL: url, makeConnection: { provider in
-            MailIMAP(socket: world.connect(), provider: provider, tuning: tuning)
+            MailIMAP(socket: (provider == .yahoo ? second ?? world : world).connect(), provider: provider, tuning: tuning)
         }, readCredential: { _ in "AbcdEfghIjklMnop" }, writeCredential: { _, _ in }, bodyCache: cache)
     }
 
@@ -443,7 +454,7 @@ final class MailHarness {
     }
 
     func settle(_ seconds: Double = 5, _ condition: () -> Bool = { true }) async -> Bool {
-        await waitFor(seconds) { condition() && world.isIdle }
+        await waitFor(seconds) { condition() && world.isIdle && (second?.isIdle ?? true) }
     }
 
     /// Records every value the list and the unread badge publish from now on.
@@ -1881,4 +1892,5 @@ func runFastMailChecks() async {
     do { try await checkDeadLinkReconnect() } catch { expect("F dead link reconnect check ran (\(error))", false) }
     do { try await checkReviewFindings() } catch { expect("Review finding checks ran (\(error))", false) }
     do { try await checkFixFollowUps() } catch { expect("Fix follow-up checks ran (\(error))", false) }
+    await runFeatureChecks()
 }
