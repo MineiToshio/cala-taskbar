@@ -105,6 +105,18 @@ struct QuotaObservation: Equatable, Codable, Sendable {
     var hardBlockUntil: Date? = nil
 }
 
+extension QuotaObservation {
+    /// Providers report a reset per reading, and the same window drifts by seconds (fractional resets) to a few
+    /// minutes (Codex) between readings. Explicit resets this close belong to one cycle; real cycles of one meter are
+    /// at least 5 h apart. Shared by the history, the forecast, the card coordinator and alerts.
+    static let explicitResetJitter: TimeInterval = 600
+
+    /// Whether two resets of one meter name the same cycle.
+    static func sameCycle(_ first: Date, _ second: Date) -> Bool {
+        abs(first.timeIntervalSince(second)) <= explicitResetJitter
+    }
+}
+
 /// One continuous segment within an advertised reset. Manual resets can change either component.
 struct QuotaCycle: Hashable, Codable, Sendable {
     let reset: Date

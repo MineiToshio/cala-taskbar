@@ -700,5 +700,80 @@ do {
     check(cancelled.flush() && cancelled.snapshot().series.isEmpty && !cancelled.importComplete(key),
           "cancelled generation leaves no import data")
 }
+
+// An unidentified login (no account metadata) keeps one profile while API resets wobble by a second.
+do {
+    let history = store("wobble-login")
+    let directory = "/private/home/claude"
+    guard let first = history.login(provider: .claude, directory: directory, account: nil, signedIn: true, now: t) else {
+        fatalError("Missing login")
+    }
+    let series = QuotaSeries(provider: .claude, profile: first.profile, plan: "max", meter: weekly, timeZoneID: utc)
+    let key = QuotaImportKey(profile: first.profile, timeZoneID: utc)
+    var profiles: Set<QuotaProfileID> = [first.profile]
+    var rotations = 0
+    for step in 0..<12 {
+        guard let login = history.login(provider: .claude, directory: directory, account: nil, signedIn: true,
+                                        now: date(Double(step) * 15)) else { fatalError("Missing login") }
+        // Fractional resets on both sides of the second, then whole seconds 03:00:00 and 02:59:59.
+        let wobble = [0.2, -0.819, 0, -1][step % 4]
+        let reading = observation(date(Double(step) * 15), 10 + Double(step) / 4,
+                                  QuotaSeries(provider: .claude, profile: login.profile, plan: "max", meter: weekly, timeZoneID: utc),
+                                  reset: reset.addingTimeInterval(wobble)).normalized(now: now)
+        guard let reading else { fatalError("Missing reading") }
+        let rotate = UsageQuotaCapture.contradicts(previous: history.liveAnchors(for: key), with: [reading])
+        if rotate { rotations += 1 }
+        profiles.insert(history.login(provider: .claude, directory: directory, account: nil, signedIn: true,
+                                      now: date(Double(step) * 15), rotate: rotate)!.profile)
+        history.ingest([reading], now: now)
+        _ = history.liveAnchors(for: key)  // waits for the ingest
+    }
+    check(rotations == 0 && profiles == [first.profile], "±1 s resets keep an unidentified login on one profile")
+    let rows = buckets(history, series)
+    check(Set(rows.map(\.cycle)).count == 1 && rows.reduce(0) { $0 + $1.deltaHundredths } == 275,
+          "the wobbling readings stay one cycle and keep their debit")
+    let earlier = observation(date(200), 12, series, reset: reset.addingTimeInterval(-12 * 3_600))
+    check(UsageQuotaCapture.contradicts(previous: history.liveAnchors(for: key), with: [earlier]),
+          "a reset hours earlier still rotates an unidentified login")
+}
+
+// A login stored without its account (stale metadata) keeps its profile and history when the account becomes known.
+do {
+    let history = store("adopt-login")
+    let directory = "/private/home/adopt"
+    let account = QuotaAccount(account: "adopted-account", subject: nil)
+    guard let unidentified = history.login(provider: .claude, directory: directory, account: nil, signedIn: true, now: t) else {
+        fatalError("Missing login")
+    }
+    let series = QuotaSeries(provider: .claude, profile: unidentified.profile, plan: "max", meter: weekly, timeZoneID: utc)
+    history.ingest([observation(t, 10, series), observation(date(15), 12, series)], now: now)
+    guard let identified = history.login(provider: .claude, directory: directory, account: account, signedIn: true, now: date(20)) else {
+        fatalError("Missing login")
+    }
+    check(identified.profile == unidentified.profile && identified.identified && identified.adopted
+          && identified.switchedAt == unidentified.switchedAt,
+          "an account read for the first time keeps the unidentified profile")
+    check(buckets(history, series).reduce(0) { $0 + $1.deltaHundredths } == 200, "the adopted login keeps its history")
+    check(history.flush(), "flush the adopted login")
+    let reopened = store("adopt-login")
+    check(reopened.login(provider: .claude, directory: directory, account: account, signedIn: true, now: date(30))?.profile
+          == unidentified.profile, "the adopted profile survives a restart")
+    let other = reopened.login(provider: .claude, directory: directory, account: QuotaAccount(account: "other-account", subject: nil),
+                               signedIn: true, now: date(40))
+    check(other?.profile != unidentified.profile && other?.adopted == false && other?.switchedAt == date(40),
+          "another account after adoption is a new login")
+    let fresh = store("adopt-rotate")
+    let first = fresh.login(provider: .claude, directory: directory, account: nil, signedIn: true, now: t)!
+    let kept = fresh.login(provider: .claude, directory: directory, account: account, signedIn: true, now: date(1))!
+    let rotated = fresh.login(provider: .claude, directory: directory, account: account, signedIn: true, now: date(2), rotate: true)!
+    check(kept.profile == first.profile && rotated.profile != first.profile && !rotated.adopted,
+          "a contradiction after adoption still rotates to a new profile")
+    let signedOut = store("adopt-signout")
+    let before = signedOut.login(provider: .claude, directory: directory, account: nil, signedIn: true, now: t)!
+    _ = signedOut.login(provider: .claude, directory: directory, account: nil, signedIn: false, now: date(1))
+    let after = signedOut.login(provider: .claude, directory: directory, account: account, signedIn: true, now: date(2))!
+    check(after.profile != before.profile && !after.adopted, "an account after a sign-out is not adopted")
+}
+
 try checkArchiveAccounts()
 print("Usage history checks passed (\(assertions) assertions).")

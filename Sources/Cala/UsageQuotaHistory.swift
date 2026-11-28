@@ -4,9 +4,12 @@ import Darwin
 
 extension QuotaObservation {
     fileprivate static let calculatedResetTolerance: TimeInterval = 2
-    /// Codex reports `resets_at` per reading, and the same window drifts by seconds to a few minutes between
-    /// readings. Explicit resets this close belong to one cycle; real cycles of one meter are at least 5 h apart.
-    static let explicitResetJitter: TimeInterval = 600
+
+    /// The whole second a cycle is keyed by. Providers send fractional resets (02:59:59.819) that land on either side
+    /// of a second between readings, so the nearest second is steadier than truncation.
+    static func resetAnchor(_ reset: Date) -> Date {
+        Date(timeIntervalSince1970: reset.timeIntervalSince1970.rounded())
+    }
 
     func normalized(now: Date) -> Self? {
         let seconds = series.meter.durationSeconds
@@ -15,7 +18,7 @@ extension QuotaObservation {
               UsageJSON.boundedDate(date) != nil, UsageJSON.boundedDate(reset) != nil,
               date <= now.addingTimeInterval(5), date < reset,
               reset.timeIntervalSince(date) <= Double(seconds) + (resetKind == .calculated ? Self.calculatedResetTolerance : 0) else { return nil }
-        let anchor = Date(timeIntervalSince1970: reset.timeIntervalSince1970.rounded(.down))
+        let anchor = Self.resetAnchor(reset)
         guard date < anchor else { return nil }
         return Self(series: series, date: date, used: used, reset: anchor, source: source, resetKind: resetKind,
                     attribution: attribution, companion: companion, bindingWeekly: bindingWeekly, hardBlockUntil: hardBlockUntil)
@@ -42,6 +45,9 @@ struct QuotaLogin: Equatable {
     let profile: QuotaProfileID
     let identified: Bool
     let switchedAt: Date?
+    /// The login kept the profile it had before its account became known, so its readings are still checked for
+    /// signs of another account, as for an unidentified login.
+    var adopted = false
 }
 
 struct QuotaImportKey: Hashable, Codable {
@@ -296,6 +302,9 @@ final class UsageQuotaHistory {
         var signedIn: Bool
         var switchedAt: Date?
         var lastSeen: Date
+        /// The unidentified profile this login kept when its account became known (older versions could miss the
+        /// account metadata). Cleared by any later switch.
+        var adoptedProfile: String?
     }
 
     private struct ShardFile: Codable {
@@ -355,7 +364,11 @@ final class UsageQuotaHistory {
             if rotate || knownSwitch || (record.signedIn && !signedIn) {
                 record.switchedAt = now
                 record.generation = UUID().uuidString
+                record.adoptedProfile = nil
                 addBoundary(at: now, profile: previousProfile, breaksQuiet: true)
+            } else if identity != nil, record.identity == nil, record.signedIn, signedIn {
+                // An account read for the first time on a signed-in login is the same login: keep its history.
+                record.adoptedProfile = previousProfile.rawValue
             }
             // A transient metadata read failure must not assign a second profile to token renewal.
             if let identity { record.identity = identity }
@@ -363,6 +376,7 @@ final class UsageQuotaHistory {
             record.signedIn = signedIn
             let previous = manifest.logins[key]
             if previous?.generation != record.generation || previous?.identity != record.identity
+                || previous?.adoptedProfile != record.adoptedProfile
                 || previous?.signedIn != signedIn || now.timeIntervalSince(record.lastSeen) >= 86_400 {
                 record.lastSeen = now
                 manifest.logins[key] = record
@@ -375,7 +389,8 @@ final class UsageQuotaHistory {
             }
             let id = profileID(key, record)
             activeProfiles[key] = id
-            return QuotaLogin(directory: key, profile: id, identified: record.identity != nil, switchedAt: record.switchedAt)
+            return QuotaLogin(directory: key, profile: id, identified: record.identity != nil, switchedAt: record.switchedAt,
+                              adopted: record.adoptedProfile != nil)
         }
     }
 
@@ -495,7 +510,8 @@ final class UsageQuotaHistory {
     }
 
     private func profileID(_ key: String, _ record: LoginRecord) -> QuotaProfileID {
-        QuotaProfileID(rawValue: digest([key, record.identity ?? "", record.generation]))
+        if let adopted = record.adoptedProfile { return QuotaProfileID(rawValue: adopted) }
+        return QuotaProfileID(rawValue: digest([key, record.identity ?? "", record.generation]))
     }
 
     private func ingestOne(_ raw: QuotaObservation, now: Date) -> QuotaObservation? {

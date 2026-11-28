@@ -31,7 +31,7 @@ struct UsageWindowObservation: Codable {
     }
 
     static func cycleReset(_ reset: Date?) -> Date? {
-        UsageJSON.boundedDate(reset).map { Date(timeIntervalSince1970: floor($0.timeIntervalSince1970)) }
+        UsageJSON.boundedDate(reset).map(QuotaObservation.resetAnchor)
     }
 
     private static func meter(id: String, minutes: Double?, provider: UsageProvider) -> QuotaMeter? {
@@ -142,10 +142,12 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         }
 
         /// The entry after a live reading. A different series, a different reset or a counter that drops
-        /// (a reset) starts a fresh entry with nothing carried, so no pre-reset number is shown.
+        /// (a reset) starts a fresh entry with nothing carried, so no pre-reset number is shown. A reset that
+        /// wobbles by seconds between readings, as the provider's fractional resets do, is the same cycle.
         static func advanced(_ previous: Entry?, with observation: QuotaObservation) -> Entry {
             if var entry = previous, entry.current.series == observation.series,
-               entry.key.cycle.reset == observation.reset, observation.used >= entry.highWater - 1 {
+               QuotaObservation.sameCycle(entry.key.cycle.reset, observation.reset),
+               observation.used >= entry.highWater - 1 {
                 entry.update(observation)
                 return entry
             }
@@ -195,11 +197,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         let service = UsageService.shared
         service.quotaEvents.receive(on: DispatchQueue.main).sink { [weak self] event in
             guard let self, !run.isCancelled else { return }
-            switch event {
-            case .observations(let readings): self.accept(readings)
-            case .discontinuity: self.entries.removeAll()
-            case .importUpdated: break
-            }
+            self.apply(event)
             self.refreshForecasts()
         }.store(in: &bag)
         service.$providers.receive(on: DispatchQueue.main).sink { [weak self] states in
@@ -264,6 +262,39 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         refreshForecasts()
     }
 
+    /// Applies a quota event to the forecast entries; scheduling stays with the caller.
+    func apply(_ event: UsageQuotaEvent) {
+        switch event {
+        case .observations(let readings): accept(readings)
+        case .discontinuity(let provider?):
+            // Only the provider whose readings broke loses its entries; the other cards keep theirs.
+            entries = entries.filter { $0.key.provider != provider }
+            nextAllowed = nextAllowed.filter { $0.key.provider != provider }
+        case .discontinuity(nil): entries.removeAll()
+        case .importUpdated: break
+        }
+    }
+
+    /// The entry kept for a provider's meter, for checks and diagnostics.
+    func entry(_ provider: UsageProvider, _ meter: QuotaMeter) -> Entry? {
+        entries[MeterKey(provider: provider, meter: meter)]
+    }
+
+    /// Whether a recompute of the meter waits for its throttle.
+    func throttled(_ provider: UsageProvider, _ meter: QuotaMeter) -> Bool {
+        nextAllowed[MeterKey(provider: provider, meter: meter)].map { $0 > ProcessInfo.processInfo.systemUptime } ?? false
+    }
+
+    /// Records a finished computation and throttles the next one of its meter. A computation that finished after its
+    /// entry was replaced (a discontinuity, a new cycle or login) throttles nothing, so the new entry computes now.
+    func record(_ forecast: CachedForecast, for key: ForecastKey, started: TimeInterval) {
+        let series = key.observation.series
+        let meter = MeterKey(provider: series.provider, meter: series.meter)
+        guard let entry = entries[meter], entry.key.cycle == key.cycle, entry.current.series == series else { return }
+        nextAllowed[meter] = started + (meter.meter.durationSeconds == 18_000 ? 60 : 300)
+        entries[meter]?.cache(forecast, for: key)
+    }
+
     private func accept(_ readings: [QuotaObservation]) {
         guard !sleeping else { return }
         let now = Date()
@@ -276,7 +307,12 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
             if let old = previous?.current, old.date > current.date ||
                 (old.date == current.date && old.source.rawValue > current.source.rawValue) { continue }
 
-            entries[meter] = Entry.advanced(previous, with: current)
+            let next = Entry.advanced(previous, with: current)
+            // A new cycle or series has nothing to show, so it computes now instead of waiting for the throttle.
+            if previous.map({ $0.key.cycle != next.key.cycle || $0.current.series != next.current.series }) ?? true {
+                nextAllowed[meter] = nil
+            }
+            entries[meter] = next
         }
     }
 
@@ -304,8 +340,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         entries = entries.filter { $0.value.current.reset > now }
         let ready = Set(states.filter(\.available).flatMap { state in
             (state.reading?.windows ?? []).compactMap { window -> MeterKey? in
-                guard window.used < 100, let meter = state.observation(for: window)?.meter,
-                      meter.durationSeconds == 18_000 || meter.durationSeconds == 604_800 else { return nil }
+                guard window.used < 100, let meter = state.observation(for: window)?.meter, Self.plans(meter) else { return nil }
                 let meterKey = MeterKey(provider: state.provider, meter: meter)
                 guard let entry = entries[meterKey], matches(entry, state, window, now: now) else { return nil }
                 return meterKey
@@ -350,12 +385,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private func complete(_ results: [(ForecastKey, CachedForecast, TimeInterval)]) {
-        for (key, forecast, started) in results {
-            let series = key.observation.series
-            let meter = MeterKey(provider: series.provider, meter: series.meter)
-            nextAllowed[meter] = started + (meter.meter.durationSeconds == 18_000 ? 60 : 300)
-            entries[meter]?.cache(forecast, for: key)
-        }
+        for (key, forecast, started) in results { record(forecast, for: key, started: started) }
         let now = Date()
         for state in states where state.available {
             evaluatePrediction(state, now: now)
@@ -413,7 +443,9 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         if window.used == 100 { return Line(text: tx("Quota used up", "Cuota agotada")) }
         let short = observation?.meter?.durationSeconds == 18_000
         let result = observation == nil ? nil : forecast(state, window, now: now, display: true)
-        if let line = Self.coldLine(result, window: window, short: short) { return line }
+        if let line = Self.coldLine(result, window: window, short: short, pending: result == nil && pending(state, window, now: now)) {
+            return line
+        }
         guard let observation, let result else { return nil }
         let none = Line(text: tx("No estimate yet", "Sin estimación por ahora"))
         switch result.readiness {
@@ -434,10 +466,24 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// Whether forecasts are computed for the meter at all: the 5-hour and weekly windows.
+    static func plans(_ meter: QuotaMeter) -> Bool {
+        meter.durationSeconds == 18_000 || meter.durationSeconds == 604_800
+    }
+
+    /// A current reading whose forecast is still being computed.
+    private func pending(_ state: UsageState, _ window: UsageWindow, now: Date) -> Bool {
+        guard let meter = state.observation(for: window)?.meter, Self.plans(meter),
+              let entry = entries[MeterKey(provider: state.provider, meter: meter)] else { return false }
+        return matches(entry, state, window, now: now)
+    }
+
     /// Text for every state before the learned profile: no result yet, a hold, exhaustion or a quick estimate.
-    /// Returns nil for the learned readiness levels.
-    static func coldLine(_ result: ForecastResult?, window: UsageWindow, short: Bool) -> Line? {
-        guard let result else { return Line(text: tx("No estimate yet", "Sin estimación por ahora")) }
+    /// Returns nil for the learned readiness levels. `pending` means a current reading is being computed.
+    static func coldLine(_ result: ForecastResult?, window: UsageWindow, short: Bool, pending: Bool = false) -> Line? {
+        guard let result else {
+            return pending ? Line(text: tx("Calculating…", "Calculando…")) : Line(text: tx("No estimate yet", "Sin estimación por ahora"))
+        }
         switch result.readiness {
         case .exhausted: return Line(text: tx("Quota used up", "Cuota agotada"))
         case .learning:
@@ -540,12 +586,12 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         func id(_ kind: String) -> String { cycle.base + "|" + kind }
 
         func sameCycle(as other: AlertContext) -> Bool {
-            cycle.base == other.cycle.base && abs(cycle.reset.timeIntervalSince(other.cycle.reset)) <= 600
+            cycle.base == other.cycle.base && QuotaObservation.sameCycle(cycle.reset, other.cycle.reset)
         }
 
         func wasFired(_ kind: String, recorded: [String: Double]) -> Bool {
             let reset = cycle.reset.timeIntervalSince1970
-            if let last = recorded[id(kind)], abs(reset - last) <= 600 { return true }
+            if let last = recorded[id(kind)], abs(reset - last) <= QuotaObservation.explicitResetJitter { return true }
             // Old formats kept only a minute, with v2 adding two seconds before truncation.
             let aliases = ["legacy|" + id(kind) + "|", "legacy|" + cycle.legacySlot + "|" + kind + "|"]
             return recorded.contains { key, value in

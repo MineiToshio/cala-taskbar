@@ -38,8 +38,14 @@ struct UsageForecast: UsageForecasting {
             guard let anchor = snapshot.latestQuota(for: current.series, atOrBefore: now) else { return Self.learning }
             availableThrough = anchor.sample.date
         }
-        let rows = snapshot.buckets(for: current.series, in: earliest..<now)
-        let gaps = short ? snapshot.gaps(for: current.series, in: earliest..<now) : []
+        var rows = snapshot.buckets(for: current.series, in: earliest..<now)
+        var gaps = short ? snapshot.gaps(for: current.series, in: earliest..<now) : []
+        // A cycle that a provider restart cut short describes a different window than the meter's; it never trains.
+        let cut = Self.cutShortCycles(rows, current: current)
+        if !cut.isEmpty {
+            rows = ArraySlice(rows.filter { !cut.contains($0.cycle) })
+            gaps.removeAll { cut.contains($0.cycle) }
+        }
         let run = Run(current: current, now: now, start: start, grid: grid, short: short, band: band)
         if band == .unknown {
             let recent = snapshot.buckets(for: current.series, in: now.addingTimeInterval(-1_800)..<now.addingTimeInterval(1))
@@ -60,6 +66,72 @@ struct UsageForecast: UsageForecasting {
         let result = run.evaluate(combined, trusted: false)
         guard result.readiness == .learning else { return result }
         return run.quick(rows, through: availableThrough)
+    }
+
+    /// Past cycles of the series that a provider restart cut short: the next cycle began more than the reset jitter
+    /// before this one's reset, within half a window of its start. Their debit belongs to a much shorter window than
+    /// the meter's (a weekly allowance spent in a day and restarted), so it is left out of every profile and of the
+    /// quick rate, whether it was imported or read live. The current cycle is never cut. Rows come in time order.
+    static func cutShortCycles(_ rows: ArraySlice<QuotaBucket>, current: QuotaObservation) -> Set<QuotaCycle> {
+        struct Window {
+            let reset: Date
+            var start: Date
+        }
+        let jitter = QuotaObservation.explicitResetJitter
+        var windows: [Window] = []
+        // Windows by reset in jitter-wide slots: a match within the jitter is in the same or a neighbouring slot.
+        var slots: [Int: [Int]] = [:]
+        var membership: [(cycle: QuotaCycle, window: Int)] = []
+        var currentStart = current.date
+        var last: QuotaCycle?
+        // Only the cycle of each row is read; copying whole rows would retain their series and samples.
+        for position in rows.indices {
+            let cycle = rows[position].cycle
+            guard cycle != last else { continue }
+            last = cycle
+            if QuotaObservation.sameCycle(cycle.reset, current.reset) {
+                currentStart = min(currentStart, cycle.segmentStart)
+                continue
+            }
+            let slot = Int((cycle.reset.timeIntervalSince1970 / jitter).rounded(.down))
+            var match: Int?
+            if let previous = windows.indices.last, QuotaObservation.sameCycle(windows[previous].reset, cycle.reset) {
+                match = previous
+            } else {
+                for neighbour in slot - 1...slot + 1 {
+                    if let found = slots[neighbour]?.first(where: { QuotaObservation.sameCycle(windows[$0].reset, cycle.reset) }) {
+                        match = found
+                        break
+                    }
+                }
+            }
+            if let index = match {
+                windows[index].start = min(windows[index].start, cycle.segmentStart)
+                membership.append((cycle, index))
+            } else {
+                windows.append(Window(reset: cycle.reset, start: cycle.segmentStart))
+                slots[slot, default: []].append(windows.count - 1)
+                membership.append((cycle, windows.count - 1))
+            }
+        }
+        guard !windows.isEmpty else { return [] }
+        let order = windows.indices.sorted { windows[$0].start < windows[$1].start }
+        let starts = order.map { windows[$0].start } + [max(currentStart, windows[order[order.count - 1]].start)]
+        let half = Double(current.series.meter.durationSeconds) / 2
+        var cutWindows = Set<Int>()
+        var next = 0
+        for (position, index) in order.enumerated() {
+            let past = windows[index]
+            next = max(next, position + 1)
+            while next < starts.count - 1 && starts[next] <= past.start { next += 1 }
+            let begin = starts[next]
+            guard begin > past.start else { continue }
+            if begin < past.reset.addingTimeInterval(-jitter), begin.timeIntervalSince(past.start) < half {
+                cutWindows.insert(index)
+            }
+        }
+        guard !cutWindows.isEmpty else { return [] }
+        return Set(membership.lazy.filter { cutWindows.contains($0.window) }.map(\.cycle))
     }
 
     static let learning = ForecastResult(expectedUsed: nil, exhaustProbability: nil, eta: nil, etaRange: nil,
@@ -653,7 +725,7 @@ private extension UsageForecast {
                 exposure += seconds * Self.prior(slot, short: short) / hour
                 ownDebit[slot] += row.delta
                 ownSeconds[slot] += seconds
-                if abs(row.cycle.reset.timeIntervalSince(current.reset)) <= 600 {
+                if QuotaObservation.sameCycle(row.cycle.reset, current.reset) {
                     cycleStart = min(cycleStart ?? row.cycle.segmentStart, row.cycle.segmentStart)
                     cycleSeconds += seconds
                     cycleDirect += min(row.coveredSeconds, seconds)

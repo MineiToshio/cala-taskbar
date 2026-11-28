@@ -480,6 +480,133 @@ let quickTimed = engine.forecast(snapshot: quickSnapshot, current: current(quick
                                  calendar: calendar, now: now)
 let quickMS = Double(DispatchTime.now().uptimeNanoseconds - quickClock) / 1_000_000
 check(quickTimed.readiness == .quick && quickMS < 10, "quick estimate benchmark under 10 ms")
+
+// Provider resets arrive with fractional seconds, so one cycle's readings carry resets a second apart.
+do {
+    let wobbleReset = weeklyReset.addingTimeInterval(-1)
+    let early = liveCycle(from: mondayNine, to: mondayNine.addingTimeInterval(hour / 2), reset: weeklyReset) { _ in 1 }
+    let late = liveCycle(from: mondayNine.addingTimeInterval(hour / 2), to: mondayNine.addingTimeInterval(hour),
+                         reset: wobbleReset, start: early.used) { _ in 1 }
+    let end = mondayNine.addingTimeInterval(hour)
+    let wobbled = forecast(early.rows + late.rows, current(late.used, at: end, reset: wobbleReset), at: end)
+    check(wobbled.readiness == .quick && (wobbled.expectedUsed ?? 100) < 40, "±1 s resets reach the quick estimate after an hour")
+    let single = liveCycle(from: mondayNine, to: end, reset: weeklyReset) { _ in 1 }
+    for offset in [-1.0, 1.0] {
+        let result = forecast(single.rows, current(single.used, at: end, reset: weeklyReset.addingTimeInterval(offset)), at: end)
+        check(result.readiness == .quick && close(result.expectedUsed, firstHour.expectedUsed ?? .nan, within: 0.5),
+              "a reading 1 s off its cycle's reset gets the same quick estimate")
+    }
+}
+
+// Cycles a provider restart cut short (a weekly allowance spent in about a day, then restarted) never train a
+// profile or the quick rate, however much live history follows; regular weeks, imported or live, are unaffected.
+do {
+    /// Hourly rows of one cycle from `begin` to `end`, debiting `rate(date)` per hour, every hour resolved.
+    func hourly(from begin: Date, to end: Date, reset cycleReset: Date, attribution: QuotaAttribution,
+                rate: (Date) -> Double) -> (rows: [QuotaBucket], used: Double) {
+        let cycle = QuotaCycle(reset: cycleReset, segmentStart: begin)
+        var rows: [QuotaBucket] = []
+        var used = 0.0
+        var position = begin
+        while position < end {
+            let upper = min(position.addingTimeInterval(hour), end)
+            let seconds = upper.timeIntervalSince(position)
+            let delta = min(100 - used, rate(position) * seconds / hour)
+            used += delta
+            var flags: QuotaBucketFlags = attribution == .live ? [] : [.rollout]
+            if used >= 100 { flags.insert(.censored) }
+            rows.append(.init(series: weekly, cycle: cycle, start: position, deltaHundredths: Int((delta * 100).rounded()),
+                              coveredSeconds: delta > 0 ? seconds : 0, quietSeconds: delta > 0 ? 0 : seconds, flags: flags,
+                              latest: sample(upper.addingTimeInterval(-1), used, .absent, .absent, attribution)))
+            position = upper
+        }
+        return (rows, used)
+    }
+    /// `count` imported cycles of 36 hours before `end`, each spending 3% an hour for 30 hours.
+    func restarted(_ count: Int, before end: Date) -> [QuotaBucket] {
+        (1...count).flatMap { index -> [QuotaBucket] in
+            let begin = end.addingTimeInterval(-Double(index) * 36 * hour)
+            return hourly(from: begin, to: begin.addingTimeInterval(36 * hour), reset: begin.addingTimeInterval(week),
+                          attribution: .verifiedArchive) { $0.timeIntervalSince(begin) < 30 * hour ? 3 : 0 }.rows
+        }
+    }
+    /// `count` live weeks of light use (1% per 18 hours) ending at `end`.
+    func lightWeeks(_ count: Int, ending end: Date) -> [QuotaBucket] {
+        count == 0 ? [] : (1...count).flatMap { index -> [QuotaBucket] in
+            let begin = end.addingTimeInterval(-Double(index) * week)
+            return hourly(from: begin, to: begin.addingTimeInterval(week), reset: begin.addingTimeInterval(week),
+                          attribution: .live) { _ in 1.0 / 18 }.rows
+        }
+    }
+    func lightCycle(from begin: Date, at time: Date) -> ForecastResult {
+        let live = hourly(from: begin, to: time, reset: begin.addingTimeInterval(week), attribution: .live) { _ in 1.0 / 18 }
+        return forecast(restartedRows + live.rows, current(live.used, at: time, reset: begin.addingTimeInterval(week)), at: time)
+    }
+    func calm(_ result: ForecastResult) -> Bool {
+        (result.expectedUsed ?? 100) < 20 && result.eta == nil && (result.exhaustProbability ?? 0) <= 0.05 && !result.quickWarning
+    }
+
+    // S1: 18 restarted cycles, then K live light weeks; 18 hours into the current week.
+    var restartedRows: [QuotaBucket] = []
+    for k in 0...4 {
+        let begin = monday.addingTimeInterval(Double(k) * week)
+        restartedRows = restarted(18, before: monday) + lightWeeks(k, ending: begin)
+        let result = lightCycle(from: begin, at: begin.addingTimeInterval(18 * hour))
+        check(calm(result) && (k > 0 || result.readiness == .quick),
+              "restarted archive + \(k) light live weeks is not a likely or risk forecast (S1)")
+    }
+    let archiveOnly = forecast(restarted(18, before: monday), current(0, at: now, reset: reset))
+    check(archiveOnly.readiness == .learning && archiveOnly.hold == .warmingUp,
+          "a restarted archive alone waits for the quick estimate instead of a learned ~100%")
+    // S1b: the archive fills the retention and live weeks follow it, at 18 hours and 3.5 days into the week.
+    for k in [0, 2, 4, 6] {
+        restartedRows = restarted(70, before: monday.addingTimeInterval(-Double(k) * week)) + lightWeeks(k, ending: monday)
+        for offset in [18.0, 84] {
+            check(calm(lightCycle(from: monday, at: monday.addingTimeInterval(offset * hour))),
+                  "a full restarted archive never yields risk once \(k) light live weeks follow it (S1b)")
+        }
+    }
+    // S6: too little restarted archive for a profile goes straight to the quick estimate, without its debit.
+    for n in [6, 9, 18] {
+        restartedRows = restarted(n, before: monday)
+        let result = lightCycle(from: monday, at: monday.addingTimeInterval(18 * hour))
+        check(result.readiness == .quick && calm(result), "\(n) restarted cycles do not push the quick estimate to 100% (S6)")
+    }
+
+    /// Weekday working hours (09–17 UTC), Monday excluded when `fromTuesday`, at `rate` per hour.
+    func routine(_ rate: Double, fromTuesday: Bool) -> (Date) -> Double {
+        { date in
+            let weekday = (calendar.component(.weekday, from: date) + 5) % 7
+            return weekday < 5 && (!fromTuesday || weekday > 0) && (9..<17).contains(calendar.component(.hour, from: date)) ? rate : 0
+        }
+    }
+    /// Eight regular imported weeks starting at `anchor`, then an idle start of the live week evaluated at `offsets`.
+    func regular(anchor: Date, rate: Double, fromTuesday: Bool, offsets: [Double]) -> [ForecastResult] {
+        let debit = routine(rate, fromTuesday: fromTuesday)
+        let archive = (1...8).flatMap { index -> [QuotaBucket] in
+            let begin = anchor.addingTimeInterval(-Double(index) * week)
+            return hourly(from: begin, to: begin.addingTimeInterval(week), reset: begin.addingTimeInterval(week),
+                          attribution: .verifiedArchive, rate: debit).rows
+        }
+        return offsets.map { offset in
+            let time = anchor.addingTimeInterval(offset * hour)
+            let live = hourly(from: anchor, to: time, reset: anchor.addingTimeInterval(week), attribution: .live, rate: debit)
+            return forecast(archive + live.rows, current(live.used, at: time, reset: anchor.addingTimeInterval(week)), at: time)
+        }
+    }
+    // S3: a week that starts on Saturday opens with an idle weekend; the learned ~100% holds through it.
+    for result in regular(anchor: monday.addingTimeInterval(5 * day), rate: 3, fromTuesday: false, offsets: [13, 36, 56]) {
+        check(result.readiness == .provisional && (result.expectedUsed ?? 0) >= 95, "an idle weekend start keeps the learned forecast (S3)")
+    }
+    // S4: the heavy routine idle on Monday keeps its normal ~96% through Tuesday morning.
+    for result in regular(anchor: monday, rate: 3, fromTuesday: true, offsets: [18, 27, 30, 33]) {
+        check(result.readiness == .normal && close(result.expectedUsed, 96, within: 3), "an idle Monday keeps the normal forecast (S4)")
+    }
+    // S5: the same routine at 4% an hour keeps its provisional ~100%.
+    for result in regular(anchor: monday, rate: 4, fromTuesday: true, offsets: [18, 26, 30, 33]) {
+        check(result.readiness == .provisional && (result.expectedUsed ?? 0) >= 95, "a heavier idle Monday keeps its forecast (S5)")
+    }
+}
 print("Quick first hour (weekly): " + scenarioText.joined(separator: "; ") + String(format: "; 10%% Mon 09:00 → %.1f%%", tenPercent.expectedUsed ?? .nan))
 print(String(format: "Quick estimate: 1%% at 1 h Monday 09:00 weekly → %.1f%% (day %d); 30%% after 1 day weekly → %.1f%% (warning %@); 20%% after 1 h on 5-hour → %.1f%%; DST weeks → %.1f%% / %.1f%%; benchmark %.3f ms",
              firstHour.expectedUsed ?? .nan, firstHour.learningDays, firstDay.expectedUsed ?? .nan,

@@ -54,7 +54,7 @@ enum UsageQuotaCapture {
             var attributedPlan = plan
             if (seconds == nil || attributedPlan == nil), let reset = window.reset, let used = window.used,
                (0...100).contains(used), !window.calculated {
-                let epoch = Date(timeIntervalSince1970: reset.timeIntervalSince1970.rounded(.down))
+                let epoch = QuotaObservation.resetAnchor(reset)
                 let matching = Set((anchors[AnchorKey(scope: scope, reset: epoch)] ?? []).filter { anchor in
                     anchor.series.profile == profile && anchor.series.provider == provider && anchor.series.timeZoneID == timeZoneID
                         && anchor.series.meter.scope == scope && (seconds == nil || seconds == anchor.series.meter.durationSeconds)
@@ -103,6 +103,20 @@ enum UsageQuotaCapture {
                                     companion: short ? .unknown : cap(duration: 18_000, for: candidate, applicability: payload.short),
                                     bindingWeekly: short ? cap(duration: 604_800, for: candidate, applicability: payload.weekly) : .unknown,
                                     hardBlockUntil: payload.hardBlockUntil.flatMap { $0 > candidate.date ? $0 : nil }).normalized(now: now)
+        }
+    }
+
+    /// Whether an unidentified login's new API readings must belong to another account than its latest ones.
+    ///
+    /// Only a counter that moves back proves it: a reset earlier than the previous one by more than the provider's
+    /// jitter, or a lower counter within the same cycle. A reset that wobbles by a second between readings is the
+    /// same window.
+    static func contradicts(previous: [QuotaObservation], with observations: [QuotaObservation]) -> Bool {
+        observations.contains { observation in
+            guard let prior = previous.first(where: { $0.series == observation.series }),
+                  observation.date > prior.date else { return false }
+            if QuotaObservation.sameCycle(prior.reset, observation.reset) { return observation.used < prior.used - 1 }
+            return observation.reset < prior.reset
         }
     }
 

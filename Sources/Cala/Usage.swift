@@ -233,7 +233,8 @@ final class UsageFileWatcher {
 
 enum UsageQuotaEvent {
     case observations([QuotaObservation])
-    case discontinuity
+    /// The provider's earlier readings no longer continue, or every provider's when nil (sleep, wake, stop).
+    case discontinuity(UsageProvider?)
     case importUpdated
 }
 
@@ -377,7 +378,7 @@ final class UsageService: ObservableObject {
             }
             self.active.removeAll()
         }
-        quotaFeed.send(.discontinuity)
+        quotaFeed.send(.discontinuity(nil))
         subscription?.cancel()
         subscription = nil
         resourceQueue.sync {
@@ -840,10 +841,56 @@ final class UsageService: ObservableObject {
         let reading = UsageJSON.codex(limits, at: Date(), format: "http")
         return FetchResult(reading: reading, status: status, error: reading.windows.isEmpty ? tx("n/a — unrecognized usage data", "n/d: datos de uso no reconocidos") : nil)
     }
-    private static func readJSON(_ url: URL) -> [String: Any]? {
-        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= 1_048_576,
+    private static func readJSON(_ url: URL, limit: Int = 1_048_576) -> [String: Any]? {
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= limit,
               let data = try? Data(contentsOf: url) else { return nil }
         return UsageJSON.object(data)
+    }
+
+    private struct ClaudeAccountFile {
+        let size: Int
+        let modified: Date
+        let account: QuotaAccount?
+    }
+    private static let claudeAccountLock = NSLock()
+    private static var claudeAccountFiles: [String: ClaudeAccountFile] = [:]
+    private static var claudeAccountOversized = Set<String>()
+    static let claudeAccountLimit = 16 * 1_048_576
+
+    /// The Claude Code login named by `oauthAccount`. A configuration directory can hold its own `.claude.json`, and
+    /// the standard `~/.claude` also has `~/.claude.json`. Older Claude Code versions leave a stale nested file without
+    /// the account, so of the files that name a valid account the most recently modified wins. `~/.claude.json` keeps
+    /// every project's history and grows well past a megabyte, and this runs on every status-line event, so each file
+    /// is parsed again only when its size or modification date changes.
+    static func claudeAccount(directory: String, home: URL) -> QuotaAccount? {
+        let standard = UsageWatcher.resolvedPath(home.appendingPathComponent(".claude").path)
+        var files = [URL(fileURLWithPath: directory).appendingPathComponent(".claude.json")]
+        if directory == standard { files.append(home.appendingPathComponent(".claude.json")) }
+        var newest: (modified: Date, account: QuotaAccount)?
+        for file in files {
+            guard let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+                  let size = values.fileSize, let modified = values.contentModificationDate,
+                  let account = claudeAccount(in: file, size: size, modified: modified),
+                  modified > (newest?.modified ?? .distantPast) else { continue }
+            newest = (modified, account)
+        }
+        return newest?.account
+    }
+
+    private static func claudeAccount(in file: URL, size: Int, modified: Date) -> QuotaAccount? {
+        claudeAccountLock.lock()
+        defer { claudeAccountLock.unlock() }
+        if let cached = claudeAccountFiles[file.path], cached.size == size, cached.modified == modified { return cached.account }
+        var account: QuotaAccount?
+        if size > claudeAccountLimit {
+            if claudeAccountOversized.insert(file.path).inserted { log("usage: a .claude.json is over 16 MiB; its account is not read") }
+        } else if let oauth = readJSON(file, limit: claudeAccountLimit)?["oauthAccount"] as? [String: Any],
+                  let user = quotaIdentifier(oauth["accountUuid"]).flatMap(UUID.init(uuidString:)) {
+            let org = quotaIdentifier(oauth["organizationUuid"]).flatMap(UUID.init(uuidString:))
+            account = QuotaAccount(account: user.uuidString, subject: org?.uuidString)
+        }
+        claudeAccountFiles[file.path] = ClaudeAccountFile(size: size, modified: modified, account: account)
+        return account
     }
     private func readJSON(_ url: URL) -> [String: Any]? { Self.readJSON(url) }
 
@@ -861,7 +908,7 @@ final class UsageService: ObservableObject {
         guard state.enabled else {
             if let previous {
                 quotaHistory.deactivate(previous, at: now)
-                quotaFeed.send(.discontinuity)
+                quotaFeed.send(.discontinuity(provider))
             }
             quotaLogins[provider] = nil
             quotaAccounts[provider] = nil
@@ -881,15 +928,7 @@ final class UsageService: ObservableObject {
                 signedIn = false
             }
         } else if signedIn {
-            let home = FileManager.default.homeDirectoryForCurrentUser
-            let configHome = URL(fileURLWithPath: directory).appendingPathComponent(".claude.json")
-            let standard = UsageWatcher.resolvedPath(home.appendingPathComponent(".claude").path)
-            let metadata = readJSON(configHome) ?? (directory == standard ? readJSON(home.appendingPathComponent(".claude.json")) : nil)
-            if let oauth = metadata?["oauthAccount"] as? [String: Any],
-               let user = Self.quotaIdentifier(oauth["accountUuid"]).flatMap(UUID.init(uuidString:)) {
-                let org = Self.quotaIdentifier(oauth["organizationUuid"]).flatMap(UUID.init(uuidString:))
-                account = QuotaAccount(account: user.uuidString, subject: org?.uuidString)
-            }
+            account = Self.claudeAccount(directory: directory, home: FileManager.default.homeDirectoryForCurrentUser)
         }
         let login = quotaHistory.login(provider: provider, directory: directory, account: account, signedIn: signedIn, now: now, rotate: rotate)
         quotaLogins[provider] = login
@@ -905,7 +944,7 @@ final class UsageService: ObservableObject {
         if (previous != nil && previous?.profile != login?.profile) || login?.switchedAt != previous?.switchedAt {
             quotaLocalSince[provider] = now
             if provider == .codex { cancelBackfill() }
-            quotaFeed.send(.discontinuity)
+            quotaFeed.send(.discontinuity(provider))
         }
     }
 
@@ -931,12 +970,8 @@ final class UsageService: ObservableObject {
         if source != .api {
             observations.removeAll { $0.date < (quotaLocalSince[provider] ?? login.switchedAt ?? .distantPast) }
         }
-        let previousAPI = !login.identified && source == .api ? quotaHistory.liveAnchors(for: key) : []
-        if observations.contains(where: { observation in
-            guard let previous = previousAPI.first(where: { $0.series == observation.series }),
-                  observation.date > previous.date else { return false }
-            return (previous.reset == observation.reset && observation.used < previous.used - 1) || observation.reset < previous.reset
-        }) {
+        let previousAPI = (!login.identified || login.adopted) && source == .api ? quotaHistory.liveAnchors(for: key) : []
+        if UsageQuotaCapture.contradicts(previous: previousAPI, with: observations) {
             updateQuotaLogin(provider, signedIn: true, rotate: true)
             guard let rotated = quotaLogins[provider] else { return }
             observations = UsageQuotaCapture.observations(reading, provider: provider, profile: rotated.profile,
@@ -948,7 +983,7 @@ final class UsageService: ObservableObject {
             if let previous = quotaContext[provider],
                Set(previous.map(\.plan)) != Set(current.map(\.plan)) || Set(previous.map(\.timeZoneID)) != Set(current.map(\.timeZoneID)) {
                 quotaHistory.breakCoverage(for: login.profile, at: observations.map(\.date).min() ?? now)
-                quotaFeed.send(.discontinuity)
+                quotaFeed.send(.discontinuity(provider))
             }
             quotaContext[provider] = current
         }
@@ -970,7 +1005,7 @@ final class UsageService: ObservableObject {
             self.asleep = asleep
             self.quotaEpoch += 1
             self.quotaHistory.breakCoverage(at: date, allowsQuiet: true, flush: asleep)
-            self.quotaFeed.send(.discontinuity)
+            self.quotaFeed.send(.discontinuity(nil))
             if asleep { self.cancelBackfill() }
             else {
                 self.lastQuotaWake = date

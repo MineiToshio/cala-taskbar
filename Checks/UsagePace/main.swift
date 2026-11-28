@@ -475,5 +475,162 @@ do {
     expect("Learned readiness is not a cold line", UsagePace.coldLine(result(.normal, expected: 40), window: window, short: false) == nil)
 }
 
+// Claude's login identity: a stale nested .claude.json without oauthAccount must not hide ~/.claude.json.
+do {
+    let fm = FileManager.default
+    let home = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("claude-home")
+    let nested = home.appendingPathComponent(".claude")
+    try fm.createDirectory(at: nested, withIntermediateDirectories: true)
+    let user = UUID(), org = UUID(), other = UUID()
+    try Data(#"{"numStartups":3}"#.utf8).write(to: nested.appendingPathComponent(".claude.json"))
+    // The real file keeps every project's history and grows past the old 1 MiB cap.
+    let padding = String(repeating: "x", count: 2 * 1_048_576)
+    let top = ["oauthAccount": ["accountUuid": user.uuidString, "organizationUuid": org.uuidString], "projects": ["p": padding]] as [String: Any]
+    try JSONSerialization.data(withJSONObject: top).write(to: home.appendingPathComponent(".claude.json"))
+    let standard = UsageWatcher.resolvedPath(nested.path)
+    let account = UsageService.claudeAccount(directory: standard, home: home)
+    expect("A nested .claude.json without oauthAccount takes the identity from a large ~/.claude.json",
+           account?.account == user.uuidString && account?.subject == org.uuidString)
+    let nestedFile = nested.appendingPathComponent(".claude.json"), topFile = home.appendingPathComponent(".claude.json")
+    func touch(_ file: URL, _ offset: TimeInterval) throws {
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_800_000_000 + offset)], ofItemAtPath: file.path)
+    }
+    try Data(#"{"oauthAccount":{"accountUuid":"\#(other.uuidString)"}}"#.utf8).write(to: nestedFile)
+    try touch(nestedFile, 60)
+    try touch(topFile, 0)
+    expect("Of two files naming an account, the more recently modified wins",
+           UsageService.claudeAccount(directory: standard, home: home)?.account == other.uuidString)
+    try touch(topFile, 120)
+    expect("A newer ~/.claude.json wins over an older nested account",
+           UsageService.claudeAccount(directory: standard, home: home)?.account == user.uuidString)
+    // Same size and modification date: the cached account is reused without parsing the file again.
+    let size = (try fm.attributesOfItem(atPath: nestedFile.path)[.size] as? Int) ?? 0
+    try Data(#"{"oauthAccount":{"accountUuid":"\#(user.uuidString)"}}"#.utf8).write(to: nestedFile)
+    try touch(nestedFile, 600)
+    try touch(topFile, 0)
+    let resized = (try fm.attributesOfItem(atPath: nestedFile.path)[.size] as? Int) ?? 0
+    expect("A changed file is read again", size == resized
+           && UsageService.claudeAccount(directory: standard, home: home)?.account == user.uuidString)
+    let cachedHandle = try FileHandle(forWritingTo: nestedFile)
+    try cachedHandle.write(contentsOf: Data(#"{"oauthAccount":{"accountUuid":"\#(other.uuidString)"}}"#.utf8))
+    try cachedHandle.close()
+    try touch(nestedFile, 600)
+    expect("An unchanged size and date reuse the cached account",
+           UsageService.claudeAccount(directory: standard, home: home)?.account == user.uuidString)
+    let custom = home.appendingPathComponent("custom")
+    try fm.createDirectory(at: custom, withIntermediateDirectories: true)
+    expect("A custom configuration directory never borrows ~/.claude.json",
+           UsageService.claudeAccount(directory: UsageWatcher.resolvedPath(custom.path), home: home) == nil)
+}
+
+// Fractional resets wobble across a second between API readings; that is the same window and the same login.
+do {
+    let base = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 / 3600).rounded(.down) * 3600 + 3 * day)
+    let wobbleSeries = QuotaSeries(provider: .claude, profile: QuotaProfileID(rawValue: "wobble"), plan: "max",
+                                   meter: QuotaMeter(scope: .shared, durationSeconds: Int(week)), timeZoneID: "UTC")
+    func api(_ minutes: Double, _ used: Double, reset: Date) -> QuotaObservation {
+        QuotaObservation(series: wobbleSeries, date: base.addingTimeInterval(-2 * day + minutes * 60), used: used, reset: reset, source: .api)
+    }
+    let late = base.addingTimeInterval(0.2), early = base.addingTimeInterval(-0.181)
+    let anchors = [late, early].compactMap { api(0, 5, reset: $0).normalized(now: base)?.reset }
+    expect("Fractional resets on either side of a second share one anchor", anchors == [base, base])
+    expect("A reset 1 s earlier at the same use does not rotate an unidentified login",
+           !UsageQuotaCapture.contradicts(previous: [api(0, 5, reset: base)], with: [api(15, 5, reset: base.addingTimeInterval(-1))])
+           && !UsageQuotaCapture.contradicts(previous: [api(15, 5, reset: base.addingTimeInterval(-1))], with: [api(30, 6, reset: base)]))
+    expect("An earlier cycle or a lower counter still means another account",
+           UsageQuotaCapture.contradicts(previous: [api(0, 5, reset: base)], with: [api(15, 5, reset: base.addingTimeInterval(-day))])
+           && UsageQuotaCapture.contradicts(previous: [api(0, 20, reset: base)], with: [api(15, 5, reset: base.addingTimeInterval(-1))]))
+
+    let shown = ForecastResult(expectedUsed: 30, exhaustProbability: nil, eta: nil, etaRange: nil, readiness: .quick,
+                               hitWeeks: 0, effectiveWeeks: 0, learningDays: 1)
+    var wobble = UsagePace.Entry.advanced(nil, with: api(0, 5, reset: base))
+    wobble.cache(.init(result: shown, calculatedAt: base), for: wobble.key)
+    var kept = true
+    for step in 1...8 {
+        wobble = UsagePace.Entry.advanced(wobble, with: api(Double(step) * 15, 5 + Double(step) / 4,
+                                                            reset: base.addingTimeInterval(step % 2 == 0 ? 0 : -1)))
+        kept = kept && wobble.displayed?.result == shown && wobble.key.cycle.reset == base
+    }
+    expect("Readings alternating 03:00:00 and 02:59:59 keep the previous result on the card", kept)
+}
+
+// The coordinator: per-provider discontinuities, an immediate first computation and the pending line.
+do {
+    let saved = appLanguageOverride
+    appLanguageOverride = "en"
+    defer { appLanguageOverride = saved }
+    let pace = UsagePace.shared
+    let clock = Date()
+    let zone = TimeZone.current.identifier
+    let resetAt = Date(timeIntervalSince1970: (clock.timeIntervalSince1970 + 3 * day).rounded(.down) + 0.819)
+    func reading(_ used: Double, reset: Date, at date: Date) -> UsageReading {
+        UsageJSON.codex(["primary": ["used_percent": used, "window_minutes": 10080, "resets_at": reset.timeIntervalSince1970],
+                         "plan_type": "pro"], at: date, format: "local")
+    }
+    func observations(_ value: UsageReading, provider: UsageProvider = .codex) -> [QuotaObservation] {
+        UsageQuotaCapture.observations(value, provider: provider, profile: QuotaProfileID(rawValue: "coordinator"),
+                                       timeZoneID: zone, source: .api, attribution: .live, now: clock)
+    }
+    var state = UsageState(provider: .codex, signedIn: true)
+    let first = reading(10, reset: resetAt, at: clock.addingTimeInterval(-60))
+    state.acceptReading(first, original: nil)
+    let firstObservations = observations(first)
+    pace.apply(.observations(firstObservations))
+    let meter = QuotaMeter(scope: .shared, durationSeconds: Int(week))
+    guard let window = state.orderedWindows.first, let firstEntry = pace.entry(.codex, meter) else { fatalError("Missing Codex entry") }
+    expect("A current reading still being computed says calculating, not no estimate",
+           pace.line(state, window, now: clock)?.text == "Calculating…" && !pace.throttled(.codex, meter))
+    let shown = ForecastResult(expectedUsed: 30, exhaustProbability: nil, eta: nil, etaRange: nil, readiness: .quick,
+                               hitWeeks: 0, effectiveWeeks: 0, learningDays: 1)
+    pace.record(.init(result: shown, calculatedAt: clock), for: firstEntry.key, started: ProcessInfo.processInfo.systemUptime)
+    expect("The computed result is shown", pace.line(state, window, now: clock)?.text == "Quick estimate · ~30% used at reset")
+
+    let wobbled = reading(11, reset: resetAt.addingTimeInterval(-0.638), at: clock.addingTimeInterval(-30))
+    state.acceptReading(wobbled, original: nil)
+    pace.apply(.observations(observations(wobbled)))
+    expect("A reading whose reset wobbles by a second keeps the result visible while it recomputes",
+           state.orderedWindows.first.flatMap { pace.line(state, $0, now: clock)?.text } == "Quick estimate · ~30% used at reset"
+           && pace.throttled(.codex, meter))
+
+    let claudeSeries = QuotaSeries(provider: .claude, profile: QuotaProfileID(rawValue: "coordinator"), plan: "max",
+                                   meter: meter, timeZoneID: zone)
+    pace.apply(.observations([QuotaObservation(series: claudeSeries, date: clock.addingTimeInterval(-30), used: 40,
+                                               reset: QuotaObservation.resetAnchor(resetAt), source: .api)]))
+    pace.apply(.discontinuity(.claude))
+    expect("A Claude discontinuity clears only Claude's entry",
+           pace.entry(.claude, meter) == nil && pace.entry(.codex, meter)?.displayed?.result == shown)
+
+    let nextReset = clock.addingTimeInterval(week - hour)
+    let fresh = reading(0, reset: nextReset, at: clock.addingTimeInterval(-10))
+    pace.apply(.observations(observations(fresh)))
+    expect("A new cycle computes at once instead of waiting for the throttle",
+           !pace.throttled(.codex, meter) && pace.entry(.codex, meter)?.displayed == nil)
+    // A computation that started before a discontinuity and finished after it must not throttle the new login.
+    guard let stale = pace.entry(.codex, meter) else { fatalError("Missing Codex entry") }
+    pace.apply(.discontinuity(.codex))
+    let relogin = reading(1, reset: nextReset.addingTimeInterval(-2 * hour), at: clock.addingTimeInterval(-5))
+    pace.apply(.observations(UsageQuotaCapture.observations(relogin, provider: .codex, profile: QuotaProfileID(rawValue: "relogin"),
+                                                            timeZoneID: zone, source: .api, attribution: .live, now: clock)))
+    pace.record(.init(result: shown, calculatedAt: clock), for: stale.key, started: ProcessInfo.processInfo.systemUptime)
+    expect("A late result for a replaced entry neither throttles nor shows on the new one",
+           !pace.throttled(.codex, meter) && pace.entry(.codex, meter)?.displayed == nil)
+
+    pace.apply(.discontinuity(nil))
+    expect("A global discontinuity clears every provider", pace.entry(.codex, meter) == nil)
+
+    // A meter the forecast never plans (here a 24-hour window) has no pending computation to announce.
+    let daily = UsageJSON.codex(["primary": ["used_percent": 10, "window_minutes": 1440,
+                                             "resets_at": clock.addingTimeInterval(day / 2).timeIntervalSince1970],
+                                 "plan_type": "pro"], at: clock.addingTimeInterval(-60), format: "local")
+    var dailyState = UsageState(provider: .codex, signedIn: true)
+    dailyState.acceptReading(daily, original: nil)
+    pace.apply(.observations(observations(daily)))
+    let dailyMeter = QuotaMeter(scope: .shared, durationSeconds: 86_400)
+    expect("A 24-hour meter says no estimate instead of calculating forever",
+           pace.entry(.codex, dailyMeter) != nil && !UsagePace.plans(dailyMeter)
+           && dailyState.orderedWindows.first.flatMap { pace.line(dailyState, $0, now: clock)?.text } == "No estimate yet")
+    pace.apply(.discontinuity(nil))
+}
+
 print("\(passed) PASS, \(failed) FAIL")
 exit(failed == 0 ? 0 : 1)
