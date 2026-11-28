@@ -599,6 +599,14 @@ do {
     pace.record(.init(result: nearlyFull, calculatedAt: clock), for: firstEntry.key, started: ProcessInfo.processInfo.systemUptime)
     expect("A learned forecast with nothing left never shows ~0%",
            pace.line(state, window, now: clock)?.text == "High use · may run out before reset")
+    // The learned lines share the quick estimate's threshold: 10% or less left is "High use".
+    for (expected, text) in [(90.0, "High use · may run out before reset"), (85.0, "~15% left at reset · based on your usual use")] {
+        let boundary = ForecastResult(expectedUsed: expected, exhaustProbability: nil, eta: nil, etaRange: nil, readiness: .normal,
+                                      hitWeeks: 0, effectiveWeeks: 0, learningDays: 14)
+        pace.record(.init(result: boundary, calculatedAt: clock), for: firstEntry.key, started: ProcessInfo.processInfo.systemUptime)
+        expect("A learned forecast switches to high use at 10% left (expected \(Int(expected))% used)",
+               pace.line(state, window, now: clock)?.text == text)
+    }
     pace.record(.init(result: shown, calculatedAt: clock), for: firstEntry.key, started: ProcessInfo.processInfo.systemUptime)
 
     let wobbled = reading(11, reset: resetAt.addingTimeInterval(-0.638), at: clock.addingTimeInterval(-30))

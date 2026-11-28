@@ -460,13 +460,13 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         case .normal, .provisional:
             guard let expected = result.expectedUsed, expected.isFinite else { return none }
             let remaining = Self.displayedRemaining(expected, window: window)
-            if remaining <= 0 { return Self.highUse() }
+            if remaining <= 10 { return Self.highUse() }
             return Self.remainingLine(remaining, qualifier: result.readiness == .provisional
                 ? tx("early estimate", "estimación inicial") : tx("based on your usual use", "según tu uso habitual"))
         case .risk, .likely:
             if let eta = validETA(result, reset: window.resetsAt, observation: observation, now: now),
                let phrase = etaPhrase(eta, reset: window.resetsAt, observation: observation, now: now) {
-                return Line(text: tx("Likely to hit the limit \(phrase)", "Probablemente agotes la cuota \(phrase)"), tone: .attention)
+                return Line(text: tx("Likely to run out \(phrase)", "Probablemente se agote \(phrase)"), tone: .attention)
             }
             return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"), tone: .attention)
         }
@@ -552,7 +552,7 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
             let time = Date(timeIntervalSince1970: rounded)
             guard let reset, now < time, time < min(reset, observation.reset ?? reset) else { return nil }
             let clock = time.formatted(.dateTime.hour().minute())
-            return tx("around \(clock)", "alrededor de las \(clock)")
+            return tx("around \(clock)", "hacia las \(clock)")
         }
         var locale = Locale.Components(locale: .current)
         locale.languageComponents.languageCode = Locale.LanguageCode(tx("en", "es"))
