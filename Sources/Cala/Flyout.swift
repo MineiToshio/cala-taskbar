@@ -655,11 +655,12 @@ struct UsagePane: View {
     }
     private func resetLabel(_ window: UsageWindow, now: Date) -> String {
         guard let reset = window.resetsAt else { return tx("Reset time unavailable", "Hora de reinicio no disponible") }
-        if window.isResetting(now) { return tx("resetting…", "reiniciándose…") }
+        if window.isResetting(now) { return tx("Resetting…", "Reiniciándose…") }
         let formatter = DateFormatter(); formatter.locale = Locale.current; formatter.timeZone = .current
-        formatter.dateFormat = "EEE d, h:mm a"
+        // The template follows the locale and the user's 12/24-hour setting.
+        formatter.dateFormat = DateFormatter.dateFormat(fromTemplate: "EEEdjmm", options: 0, locale: formatter.locale)
         let relative = UsagePaceProjection.formatted(reset.timeIntervalSince(now))
-        return tx("resets ", "se reinicia ") + formatter.string(from: reset) + tx(" · in ", " · en ") + relative
+        return tx("Resets ", "Se reinicia ") + formatter.string(from: reset) + tx(" · in ", " · en ") + relative
     }
     private func provider(_ state: UsageState, now: Date) -> some View {
         let retry = UsagePaceProjection.wholeSeconds(ceil(state.cooldownUntil?.timeIntervalSince(now) ?? 0)) ?? 0
@@ -696,15 +697,13 @@ struct UsagePane: View {
                                 Capsule().fill(color).frame(width: g.size.width * max(0, min(1, Double(remaining) / 100)))
                             }
                     }.frame(height: 6)
-                    Text(resetLabel(window, now: now)).font(.system(size: 10.5)).flyoutSecondary()
+                    Text(resetLabel(window, now: now)).font(.system(size: 10.5)).monospacedDigit().flyoutSecondary()
                         .fixedSize(horizontal: false, vertical: true)
                     if let forecastLine {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(forecastLine.text).font(.system(size: 10.5, weight: forecastLine.warn ? .semibold : .regular))
-                                .foregroundStyle(forecastLine.warn ? StatusColor.color(.attention, dark: scheme == .dark) : Color.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            UsageForecastLine(line: forecastLine)
                             if let detail = forecastLine.detail {
-                                Text(detail).font(.system(size: 9.5)).flyoutSecondary()
+                                Text(detail).font(.system(size: 9.5)).flyoutTertiary()
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
@@ -715,7 +714,7 @@ struct UsagePane: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityValue(
-                    tx("\(remaining)% left, \(100 - remaining)% used", "\(remaining)% restante, \(100 - remaining)% usado")
+                    tx("\(remaining)% left", "\(remaining)% restante")
                     + (forecastLine.map { ". " + $0.text + ($0.detail.map { ". " + $0 } ?? "") } ?? "")
                 )
             }
@@ -744,6 +743,43 @@ struct UsagePane: View {
         }
         .padding(12)
         .flyoutSection()
+    }
+}
+
+/// The forecast under a quota bar: the figure carries the weight, the qualifier steps back,
+/// and a warning gets one tinted symbol while its words stay in primary text.
+private struct UsageForecastLine: View {
+    @Environment(\.colorScheme) private var scheme
+    let line: UsagePace.Line
+    var body: some View {
+        let dark = scheme == .dark
+        switch line.tone {
+        case .quiet:
+            Text(line.text).font(.system(size: 10.5)).flyoutSecondary()
+                .fixedSize(horizontal: false, vertical: true)
+        case .normal:
+            Text(styled(dark: dark)).font(.system(size: 11.5)).foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        case .attention, .critical:
+            let critical = line.tone == .critical
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Image(systemName: critical ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(StatusColor.color(critical ? .critical : .attention, dark: dark))
+                Text(line.text).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+    private func styled(dark: Bool) -> AttributedString {
+        var s = AttributedString(line.text)
+        if let figure = line.figure, let r = s.range(of: figure) {
+            s[r].font = Font.system(size: 11.5, weight: .semibold).monospacedDigit()
+        }
+        if let qualifier = line.qualifier, let r = s.range(of: qualifier, options: .backwards) {
+            s[r].foregroundColor = FlyoutStyle.secondary(dark: dark)
+        }
+        return s
     }
 }
 

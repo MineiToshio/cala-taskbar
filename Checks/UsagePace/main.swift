@@ -461,14 +461,24 @@ do {
            text(result(.learning, hold: .capLimited)) == "Limited by the 5-hour quota"
            && text(result(.learning, hold: .capLimited), short: true) == "Limited by the weekly quota")
     expect("Exhausted reads as used up", text(result(.exhausted, expected: 100)) == "Quota used up")
+    expect("Exhausted is the critical tone, quiet states are quiet",
+           UsagePace.coldLine(result(.exhausted, expected: 100), window: window, short: false)?.tone == .critical
+           && UsagePace.coldLine(result(.learning, hold: .warmingUp), window: window, short: false)?.tone == .quiet
+           && UsagePace.coldLine(nil, window: window, short: false)?.tone == .quiet)
     let quick = UsagePace.coldLine(result(.quick, expected: 23.9, days: 3), window: window, short: false)
     expect("Quick estimate shows its number and the learning day",
-           quick?.text == "Quick estimate · ~25% used at reset" && quick?.warn == false
-           && quick?.detail == "Still learning your pattern (day 3 of 14) · may change")
+           quick?.text == "~75% left at reset · quick estimate" && quick?.warn == false
+           && quick?.detail == "Still learning your pattern · day 3 of 14")
+    expect("The figure and qualifier split the quick line for the flyout",
+           quick?.figure == "~75%" && quick?.qualifier == " · quick estimate" && quick?.tone == .normal)
+    let ahead = quota("weekly", used: 27, duration: 604_800, elapsed: 3_600, minutes: 10_080)
+    expect("The forecast never shows more left than the bar",
+           UsagePace.coldLine(result(.quick, expected: 25, days: 3), window: ahead, short: false)?.text
+           == "~73% left at reset · quick estimate")
     expect("From day 14 the detail says it is still refining",
-           UsagePace.coldLine(result(.quick, expected: 30, days: 14), window: window, short: false)?.detail == "Still refining · may change")
+           UsagePace.coldLine(result(.quick, expected: 30, days: 14), window: window, short: false)?.detail == "Still refining the estimate")
     let high = UsagePace.coldLine(result(.quick, expected: 96, days: 1), window: window, short: false)
-    expect("A quick number of 90% or more without the warning is not shown as a number",
+    expect("A quick number with 10% or less left without the warning is not shown as a number",
            high?.text == "High use · may run out before reset" && high?.warn == false)
     let warned = UsagePace.coldLine(result(.quick, expected: 100, days: 1, warning: true), window: window, short: false)
     expect("The near-certain quick warning has no time", warned?.text == "You may hit the limit before reset" && warned?.warn == true)
@@ -583,13 +593,19 @@ do {
     let shown = ForecastResult(expectedUsed: 30, exhaustProbability: nil, eta: nil, etaRange: nil, readiness: .quick,
                                hitWeeks: 0, effectiveWeeks: 0, learningDays: 1)
     pace.record(.init(result: shown, calculatedAt: clock), for: firstEntry.key, started: ProcessInfo.processInfo.systemUptime)
-    expect("The computed result is shown", pace.line(state, window, now: clock)?.text == "Quick estimate · ~30% used at reset")
+    expect("The computed result is shown", pace.line(state, window, now: clock)?.text == "~70% left at reset · quick estimate")
+    let nearlyFull = ForecastResult(expectedUsed: 99, exhaustProbability: nil, eta: nil, etaRange: nil, readiness: .normal,
+                                    hitWeeks: 0, effectiveWeeks: 0, learningDays: 14)
+    pace.record(.init(result: nearlyFull, calculatedAt: clock), for: firstEntry.key, started: ProcessInfo.processInfo.systemUptime)
+    expect("A learned forecast with nothing left never shows ~0%",
+           pace.line(state, window, now: clock)?.text == "High use · may run out before reset")
+    pace.record(.init(result: shown, calculatedAt: clock), for: firstEntry.key, started: ProcessInfo.processInfo.systemUptime)
 
     let wobbled = reading(11, reset: resetAt.addingTimeInterval(-0.638), at: clock.addingTimeInterval(-30))
     state.acceptReading(wobbled, original: nil)
     pace.apply(.observations(observations(wobbled)))
     expect("A reading whose reset wobbles by a second keeps the result visible while it recomputes",
-           state.orderedWindows.first.flatMap { pace.line(state, $0, now: clock)?.text } == "Quick estimate · ~30% used at reset"
+           state.orderedWindows.first.flatMap { pace.line(state, $0, now: clock)?.text } == "~70% left at reset · quick estimate"
            && pace.throttled(.codex, meter))
 
     let claudeSeries = QuotaSeries(provider: .claude, profile: QuotaProfileID(rawValue: "coordinator"), plan: "max",

@@ -81,10 +81,17 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     static let shared = UsagePace()
 
     struct Line {
-        let text: String
-        var warn = false
+        /// How prominent the line is; the flyout maps it to font and colour.
+        enum Tone: Equatable { case quiet, normal, attention, critical }
+        let text: String                 // full sentence: VoiceOver and checks
+        var tone: Tone = .normal
         /// A smaller secondary line, e.g. the quick estimate's learning progress.
         var detail: String? = nil
+        /// Leading part of `text` drawn heavier ("~75%").
+        var figure: String? = nil
+        /// Trailing part of `text` drawn in secondary colour (" · quick estimate").
+        var qualifier: String? = nil
+        var warn: Bool { tone == .attention }
     }
 
     private struct MeterKey: Hashable {
@@ -440,29 +447,28 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
         let observation = state.observation(for: window)
         guard !window.isResetting(now), observation?.inactive != true,
               staleReadingDate(state, window, now: now) == nil else { return nil }
-        if window.used == 100 { return Line(text: tx("Quota used up", "Cuota agotada")) }
+        if window.used == 100 { return Line(text: tx("Quota used up", "Cuota agotada"), tone: .critical) }
         let short = observation?.meter?.durationSeconds == 18_000
         let result = observation == nil ? nil : forecast(state, window, now: now, display: true)
         if let line = Self.coldLine(result, window: window, short: short, pending: result == nil && pending(state, window, now: now)) {
             return line
         }
         guard let observation, let result else { return nil }
-        let none = Line(text: tx("No estimate yet", "Sin estimación por ahora"))
+        let none = Line(text: tx("No estimate yet", "Sin estimación por ahora"), tone: .quiet)
         switch result.readiness {
         case .learning, .exhausted, .quick: return none
         case .normal, .provisional:
             guard let expected = result.expectedUsed, expected.isFinite else { return none }
-            let used = Self.displayedUsed(expected, window: window)
-            if result.readiness == .provisional {
-                return Line(text: tx("Early estimate · ~\(used)% used at reset", "Estimación inicial · ~\(used)% usado al reinicio"))
-            }
-            return Line(text: tx("Usual use · ~\(used)% used at reset", "Uso habitual · ~\(used)% usado al reinicio"))
+            let remaining = Self.displayedRemaining(expected, window: window)
+            if remaining <= 0 { return Self.highUse() }
+            return Self.remainingLine(remaining, qualifier: result.readiness == .provisional
+                ? tx("early estimate", "estimación inicial") : tx("based on your usual use", "según tu uso habitual"))
         case .risk, .likely:
             if let eta = validETA(result, reset: window.resetsAt, observation: observation, now: now),
                let phrase = etaPhrase(eta, reset: window.resetsAt, observation: observation, now: now) {
-                return Line(text: tx("Likely to hit the limit \(phrase)", "Probablemente agotes la cuota \(phrase)"), warn: true)
+                return Line(text: tx("Likely to hit the limit \(phrase)", "Probablemente agotes la cuota \(phrase)"), tone: .attention)
             }
-            return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"), warn: true)
+            return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"), tone: .attention)
         }
     }
 
@@ -482,40 +488,50 @@ final class UsagePace: NSObject, UNUserNotificationCenterDelegate {
     /// Returns nil for the learned readiness levels. `pending` means a current reading is being computed.
     static func coldLine(_ result: ForecastResult?, window: UsageWindow, short: Bool, pending: Bool = false) -> Line? {
         guard let result else {
-            return pending ? Line(text: tx("Calculating…", "Calculando…")) : Line(text: tx("No estimate yet", "Sin estimación por ahora"))
+            return pending ? Line(text: tx("Calculating…", "Calculando…"), tone: .quiet)
+                : Line(text: tx("No estimate yet", "Sin estimación por ahora"), tone: .quiet)
         }
         switch result.readiness {
-        case .exhausted: return Line(text: tx("Quota used up", "Cuota agotada"))
+        case .exhausted: return Line(text: tx("Quota used up", "Cuota agotada"), tone: .critical)
         case .learning:
             switch result.hold {
-            case .warmingUp: return Line(text: tx("Calculating… a few minutes", "Calculando… unos minutos"))
+            case .warmingUp: return Line(text: tx("Calculating… a few minutes", "Calculando… unos minutos"), tone: .quiet)
             case .capLimited:
-                return short ? Line(text: tx("Limited by the weekly quota", "Limitado por la cuota semanal"))
-                    : Line(text: tx("Limited by the 5-hour quota", "Limitado por la cuota de 5 horas"))
-            case .none: return Line(text: tx("No estimate yet", "Sin estimación por ahora"))
+                return short ? Line(text: tx("Limited by the weekly quota", "Limitado por la cuota semanal"), tone: .quiet)
+                    : Line(text: tx("Limited by the 5-hour quota", "Limitado por la cuota de 5 horas"), tone: .quiet)
+            case .none: return Line(text: tx("No estimate yet", "Sin estimación por ahora"), tone: .quiet)
             }
         case .quick:
             guard let expected = result.expectedUsed, expected.isFinite else {
-                return Line(text: tx("No estimate yet", "Sin estimación por ahora"))
+                return Line(text: tx("No estimate yet", "Sin estimación por ahora"), tone: .quiet)
             }
             let day = result.learningDays
-            let detail = day >= 14 ? tx("Still refining · may change", "Aún afinando la estimación · puede variar")
-                : tx("Still learning your pattern (day \(max(1, day)) of 14) · may change",
-                     "Aún aprendiendo tu patrón (día \(max(1, day)) de 14) · puede variar")
+            let detail = day >= 14 ? tx("Still refining the estimate", "Aún afinando la estimación")
+                : tx("Still learning your pattern · day \(max(1, day)) of 14", "Aún aprendiendo tu patrón · día \(max(1, day)) de 14")
             if result.quickWarning {
                 return Line(text: tx("You may hit the limit before reset", "Podrías agotar la cuota antes del reinicio"),
-                            warn: true, detail: detail)
+                            tone: .attention, detail: detail)
             }
-            let used = displayedUsed(expected, window: window)
-            // A quick number this high is not trustworthy without the near-certain warning.
-            if used >= 90 {
-                return Line(text: tx("High use · may run out before reset", "Uso alto · podría agotarse antes del reinicio"),
-                            detail: detail)
-            }
-            return Line(text: tx("Quick estimate · ~\(used)% used at reset", "Estimación rápida · ~\(used)% usado al reinicio"),
-                        detail: detail)
+            let remaining = displayedRemaining(expected, window: window)
+            // A quick number this low is not trustworthy without the near-certain warning.
+            if remaining <= 10 { return highUse(detail: detail) }
+            return remainingLine(remaining, qualifier: tx("quick estimate", "estimación rápida"), detail: detail)
         default: return nil
         }
+    }
+
+    private static func displayedRemaining(_ expected: Double, window: UsageWindow) -> Int {
+        100 - displayedUsed(expected, window: window)
+    }
+
+    private static func highUse(detail: String? = nil) -> Line {
+        Line(text: tx("High use · may run out before reset", "Uso alto · podría agotarse antes del reinicio"), detail: detail)
+    }
+
+    private static func remainingLine(_ remaining: Int, qualifier: String, detail: String? = nil) -> Line {
+        let figure = "~\(remaining)%", tail = " · " + qualifier
+        return Line(text: tx("\(figure) left at reset", "\(figure) restante al reinicio") + tail,
+                    detail: detail, figure: figure, qualifier: tail)
     }
 
     private static func displayedUsed(_ expected: Double, window: UsageWindow) -> Int {

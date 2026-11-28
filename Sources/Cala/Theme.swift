@@ -43,6 +43,8 @@ enum FlyoutStyle {
     static func surface(dark: Bool) -> Color { BarTheme.hex(dark ? 0x25272D : 0xFFFFFF) }
     static func card(dark: Bool) -> Color { BarTheme.hex(dark ? 0x2D3037 : 0xF4F5F7) }
     static func secondary(dark: Bool) -> Color { BarTheme.hex(dark ? 0xB8BDC8 : 0x626570) }
+    /// Least prominent text that still reads on the card: at least 4.5:1 on `card` in both appearances.
+    static func tertiary(dark: Bool) -> Color { BarTheme.hex(dark ? 0x9A9EA8 : 0x6C6F7A) }
     static func controlAccent(dark: Bool) -> Color { BarTheme.hex(dark ? 0x0A84FF : 0x007AFF) }
     static func quotaText(_ remaining: Int, dark: Bool) -> Color {
         if remaining >= 25 { return StatusColor.color(.normal, dark: dark) }
@@ -214,6 +216,13 @@ struct FlyoutSecondary: ViewModifier {
     }
 }
 
+struct FlyoutTertiary: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+    func body(content: Content) -> some View {
+        content.foregroundStyle(FlyoutStyle.tertiary(dark: scheme == .dark))
+    }
+}
+
 /// Shared by every flyout and preview; theme colors tint an opaque neutral base.
 
 struct ThemedPanel: ViewModifier {
@@ -248,4 +257,5 @@ extension View {
     func flyoutSection() -> some View { modifier(FlyoutSection()) }
     func flyoutControls() -> some View { modifier(FlyoutControls()) }
     func flyoutSecondary() -> some View { modifier(FlyoutSecondary()) }
+    func flyoutTertiary() -> some View { modifier(FlyoutTertiary()) }
 }
