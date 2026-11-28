@@ -179,6 +179,7 @@ struct DockerPane: View {
 
     private var header: some View {
         let shown = service.endpoint
+        let contexts = service.selectableContexts
         return VStack(alignment: .leading, spacing: 5) {
             Header(title: tx("Docker", "Docker"))
                 .frame(minHeight: 22)
@@ -197,20 +198,13 @@ struct DockerPane: View {
                     }
                 }
             HStack(spacing: 4) {
-                if service.engines.count > 1 {
+                if !contexts.isEmpty {
                     Menu {
-                        ForEach(service.engines) { engine in
+                        ForEach(contexts) { engine in
                             let title = engine.runtime.displayName ?? tx("Docker engine", "Motor de Docker")
-                            Button {
+                            Button(tx("\(title) · \(engine.context)", "\(title) · \(engine.context)")) {
                                 service.useContext(engine)
-                            } label: {
-                                if engine.id == service.endpoint?.id {
-                                    Label(tx("\(title) · \(engine.context)", "\(title) · \(engine.context)"), systemImage: "checkmark")
-                                } else {
-                                    Text(tx("\(title) · \(engine.context)", "\(title) · \(engine.context)"))
-                                }
                             }
-                            .disabled(engine.id == service.endpoint?.id || !engine.isContext || service.dockerCLI == nil)
                         }
                     } label: {
                         Text(runtimeName).font(.system(size: 11.5))

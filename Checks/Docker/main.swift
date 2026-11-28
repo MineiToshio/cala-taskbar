@@ -104,6 +104,30 @@ func runChecks() throws {
     try expect("explicit current context stays selected while stopped", stopped.active?.context == "desktop-linux")
     let remote = resolve(bytes(#"{"currentContext":"remote"}"#), [defaultPath], [:], contexts)
     try expect("remote current context ignored", remote.active == nil && !remote.engines.contains { $0.context == "remote" })
+    let remoteConfig = bytes(#"{"currentContext":"remote"}"#)
+    let oneLocal = resolve(remoteConfig, [colima], [:], [context("remote", "ssh://engine"),
+                                                        context("colima-food", "unix://" + colima)])
+    try expect("a remote active context still offers the single local context", oneLocal.engines.count == 1 &&
+               DockerDiscovery.selectableContexts(oneLocal.engines, active: oneLocal.active, hasCLI: true).map(\.context) == ["colima-food"])
+    let socketOnly = home + "/.orbstack/run/docker.sock"
+    let withSocketOnly = DockerDiscovery.resolve(home: home, config: .read(remoteConfig),
+                                                  metadata: [context("remote", "ssh://engine"), context("colima-food", "unix://" + colima)],
+                                                  existing: [colima, socketOnly], resolved: [colima: colima, socketOnly: socketOnly],
+                                                  known: [("orbstack", socketOnly)])
+    try expect("socket-only engines do not appear in the switch menu", withSocketOnly.engines.count == 2 &&
+               DockerDiscovery.selectableContexts(withSocketOnly.engines, active: withSocketOnly.active, hasCLI: true).map(\.context) == ["colima-food"])
+    try expect("the active socket is not a switch option even under another context name",
+               DockerDiscovery.selectableContexts(local.engines, active: defaultEngine.active, hasCLI: true).map(\.context) == ["colima-food"])
+    try expect("the only active local context needs no switch menu",
+               DockerDiscovery.selectableContexts(oneLocal.engines, active: oneLocal.engines.first, hasCLI: true).isEmpty)
+    try expect("switching contexts requires the Docker CLI",
+               DockerDiscovery.selectableContexts(oneLocal.engines, active: oneLocal.active, hasCLI: false).isEmpty)
+    let beforeExternalStart = resolve(nil, [])
+    let afterExternalStart = resolve(bytes(#"{"currentContext":"colima-food"}"#), [colima], [:],
+                                     [context("colima-food", "unix://" + colima)])
+    try expect("rediscovery moves from a missing default socket to the externally started context",
+               beforeExternalStart.active?.path == defaultPath && !beforeExternalStart.hasSocket &&
+               afterExternalStart.active?.resolvedPath == colima && afterExternalStart.hasSocket)
     try expect("credential helpers are not login evidence", !resolve(bytes(#"{"credsStore":"desktop"}"#), []).signedIn)
     try expect("tilde expands for the supplied home", DockerDiscovery.socketPath("unix://~/.docker/run/docker.sock", home: home) == desktop)
     let known = DockerDiscovery.knownPaths(home: home, colimaProfiles: ["food"])

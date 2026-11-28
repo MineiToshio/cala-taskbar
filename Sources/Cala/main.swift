@@ -284,21 +284,22 @@ func openAppLauncher() {
     NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications", isDirectory: true))
 }
 
-#if DEBUG
-if let index = CommandLine.arguments.firstIndex(of: "--snapshot-docker") {
-    guard index + 1 < CommandLine.arguments.count else {
-        fputs("Usage: Cala --snapshot-docker <directory> [en|es]\n", stderr)
-        exit(1)
-    }
-    let language = index + 2 < CommandLine.arguments.count ? CommandLine.arguments[index + 2] : "en"
-    guard language == "en" || language == "es" else {
+if CommandLine.arguments.contains("--snapshot-docker") {
+    #if DEBUG
+    let options = CommandLine.arguments.drop(while: { $0 != "--snapshot-docker" }).dropFirst()
+    let language = options.dropFirst().first ?? "en"
+    guard let directory = options.first, language == "en" || language == "es" else {
         fputs("Usage: Cala --snapshot-docker <directory> [en|es]\n", stderr)
         exit(1)
     }
     // The fixture is independent of the live instance and exits before the application lifecycle.
-    MainActor.assumeIsolated { DockerFixtures.run(dir: CommandLine.arguments[index + 1], language: language) }
+    MainActor.assumeIsolated { DockerFixtures.run(dir: directory, language: language) }
+    #else
+    fputs(tx("--snapshot-docker is only available in Debug builds.\n",
+             "--snapshot-docker solo está disponible en compilaciones Debug.\n"), stderr)
+    exit(1)
+    #endif
 }
-#endif
 // Keep the raw descriptor open until kernel process teardown.
 guard CalaSessionLock.acquireForCurrentLogin() != nil else { exit(0) }
 let app = NSApplication.shared

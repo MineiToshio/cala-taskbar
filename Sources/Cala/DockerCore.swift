@@ -118,6 +118,11 @@ struct DockerResolution {
 enum DockerDiscovery {
     static let defaultPath = "/var/run/docker.sock"
 
+    static func selectableContexts(_ engines: [DockerEndpoint], active: DockerEndpoint?, hasCLI: Bool) -> [DockerEndpoint] {
+        guard hasCLI else { return [] }
+        return engines.filter { $0.isContext && $0.id != active?.id }
+    }
+
     struct Config: Equatable {
         let currentContext: String?
         let registryNames: Set<String>

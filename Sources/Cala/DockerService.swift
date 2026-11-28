@@ -306,6 +306,9 @@ final class DockerService: ObservableObject {
     private var panelVisible = false
 
     var available: Bool { state != .notInstalled }
+    var selectableContexts: [DockerEndpoint] {
+        DockerDiscovery.selectableContexts(engines, active: endpoint, hasCLI: dockerCLI != nil)
+    }
     var runningCount: Int { containers?.filter(\.isRunning).count ?? 0 }
     var glyph: DockerGlyphState { .resolve(state, running: runningCount, crashed: !crashed.isEmpty) }
 
@@ -431,7 +434,7 @@ final class DockerService: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    private func discover() {
+    private func discover(probeAfter: Bool = true) {
         guard let lifetime else { return }
         let app = DockerRuntime.appRuntimes.first {
             $0.appID.flatMap(NSWorkspace.shared.urlForApplication(withBundleIdentifier:)) != nil
@@ -445,23 +448,24 @@ final class DockerService: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.lifetime === lifetime, self.discoveryID == generation else { return }
                 self.discoveryID = nil
-                self.applyDiscovery(detected, cli: cli, app: app)
+                self.applyDiscovery(detected, cli: cli, app: app, probeAfter: probeAfter)
             }
         }
     }
 
-    private func applyDiscovery(_ detected: DockerResolution, cli: String?, app: DockerRuntime?) {
+    private func applyDiscovery(_ detected: DockerResolution, cli: String?, app: DockerRuntime?, probeAfter: Bool) {
         preferredApp = app
-        dockerCLI = cli
-        signedIn = detected.signedIn
-        engines = detected.engines
+        if dockerCLI != cli { dockerCLI = cli }
+        if signedIn != detected.signedIn { signedIn = detected.signedIn }
+        if engines != detected.engines { engines = detected.engines }
         let next = detected.active
-        runtime = next?.runtime ?? .unknown
+        let nextRuntime = next?.runtime ?? .unknown
+        if runtime != nextRuntime { runtime = nextRuntime }
         if next?.resolvedPath != endpoint?.resolvedPath {
             resetConnection()
             if state == .running { state = .stopped }
         }
-        endpoint = next
+        if endpoint != next { endpoint = next }
         if !detected.hasSocket && dockerCLI == nil && app == nil {
             if state != .starting && state != .stopping {
                 if state != .notInstalled { resetConnection() }
@@ -474,8 +478,9 @@ final class DockerService: ObservableObject {
         }
         if state == .notInstalled { state = .stopped }
         if state != .running {
-            if next == nil && deadline == nil { state = .unreachable(.context) }
-            watch(immediate: true)
+            if next == nil && deadline == nil && state != .unreachable(.context) { state = .unreachable(.context) }
+            if watcher == nil { watch() }
+            if probeAfter { probe(coalesce: false) }
         } else if panelVisible {
             if containers == nil || failedLoads.contains(.containers) { refreshContainers() }
             startPanelReads()
@@ -515,16 +520,29 @@ final class DockerService: ObservableObject {
         updateWorkspaceObservers()
         watcher?.cancel()
         watcher = nil
-        guard lifetime != nil, available, endpoint != nil || deadline != nil else { return }
+        guard lifetime != nil, available else { return }
         let fast = state == .starting
         let cadence = fast ? 1 : 10
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + .seconds(cadence), repeating: .seconds(cadence),
                        leeway: .milliseconds(fast ? 100 : 3000))
-        timer.setEventHandler { [weak self] in self?.probe() }
+        timer.setEventHandler { [weak self] in self?.watchTick() }
         watcher = timer
         timer.resume()
         if immediate { probe(coalesce: false) }
+    }
+
+    private func watchTick() {
+        guard lifetime != nil, !switchingContext, discoveryID == nil else { return }
+        switch state {
+        case .stopped, .unreachable:
+            // A runtime started outside Cala can create a socket or select a different context.
+            discover()
+        case .starting, .stopping:
+            probe(coalesce: false)
+        default:
+            break
+        }
     }
 
     private func probe(coalesce: Bool = true) {
@@ -554,9 +572,10 @@ final class DockerService: ObservableObject {
             let up = exists && (try? DockerSocket.request(endpoint, "/_ping", io: io)) != nil
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.connection === io else { return }
-                if socket == nil {
+                if socket == nil && self.state == .starting {
                     self.probing = false
-                    self.discover()
+                    // Refresh a retargeted alias, then let the next timer tick probe it.
+                    self.discover(probeAfter: false)
                 } else {
                     self.probed(io: io, exists: exists, up: up)
                 }
@@ -583,7 +602,7 @@ final class DockerService: ObservableObject {
             let wasUp = state == .running || state == .stopping
             if wasUp { engineWentDown(exists: exists) }
             let settled: DockerEngineState = exists ? .unreachable(.connection) : .stopped
-            if state != .unreachable(.timedOut) && state != .unreachable(.command) { state = settled }
+            if state != settled && state != .unreachable(.timedOut) && state != .unreachable(.command) { state = settled }
             if wasUp { watch() }
         }
     }
@@ -975,7 +994,7 @@ final class DockerService: ObservableObject {
     }
 
     func useContext(_ selected: DockerEndpoint) {
-        guard let lifetime, dockerCLI != nil, selected.isContext, engines.contains(selected), selected.id != endpoint?.id,
+        guard let lifetime, selectableContexts.contains(selected),
               !switchingContext, state != .starting, state != .stopping else { return }
         switchingContext = true
         discoveryID = nil
