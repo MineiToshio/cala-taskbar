@@ -95,7 +95,7 @@ private extension DockerTab {
 }
 
 struct DockerPane: View {
-    @ObservedObject private var service = DockerService.shared
+    @ObservedObject private var service: DockerService
     @Environment(\.colorScheme) private var scheme
     @Environment(\.themeAccent) private var accent
     @State private var collapsed = Set<String>()
@@ -103,6 +103,20 @@ struct DockerPane: View {
     @State private var confirmation: String?
     @State private var listHeight: CGFloat = 100
     let availableHeight: CGFloat
+
+    @MainActor init(availableHeight: CGFloat) {
+        self.availableHeight = availableHeight
+        self.service = .shared
+    }
+
+    #if DEBUG
+    init(availableHeight: CGFloat, fixture: DockerService, collapsed: Set<String> = [], confirmation: String? = nil) {
+        self.availableHeight = availableHeight
+        self.service = fixture
+        _collapsed = State(initialValue: collapsed)
+        _confirmation = State(initialValue: confirmation)
+    }
+    #endif
 
     private var running: Bool { service.state == .running }
     private var dark: Bool { scheme == .dark }

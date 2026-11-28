@@ -275,7 +275,32 @@ final class DockerService: ObservableObject {
     var runningCount: Int { containers?.filter(\.isRunning).count ?? 0 }
     var glyph: DockerGlyphState { .resolve(state, running: runningCount, crashed: !crashed.isEmpty) }
 
+    #if DEBUG
+    private var isFixture = false
+
+    static func fixture(state: DockerEngineState, tab: DockerTab, containers: [DockerContainer],
+                        images: [DockerImage]?, volumes: [DockerVolume]?, usage: DockerDiskUsage?,
+                        ram: Int64?, crashed: Set<String>) -> DockerService {
+        let service = DockerService()
+        service.isFixture = true
+        service.state = state
+        service.tab = tab
+        service.runtime = .desktop
+        service.containers = containers
+        service.images = images
+        service.volumes = volumes
+        service.usage = usage
+        service.ram = ram
+        service.crashed = crashed
+        service.dockerCLI = "/usr/local/bin/docker"
+        return service
+    }
+    #endif
+
     var canToggle: Bool {
+        #if DEBUG
+        if isFixture { return true }
+        #endif
         guard let command = runtime.command(start: state != .running && state != .stopping, dockerCLI: dockerCLI != nil) else { return false }
         switch command {
         case .executable(let name, _): return Self.executable(name) != nil
@@ -284,7 +309,12 @@ final class DockerService: ObservableObject {
         }
     }
 
-    var canOpenRuntime: Bool { runtime.appID.flatMap(NSWorkspace.shared.urlForApplication(withBundleIdentifier:)) != nil }
+    var canOpenRuntime: Bool {
+        #if DEBUG
+        if isFixture { return true }
+        #endif
+        return runtime.appID.flatMap(NSWorkspace.shared.urlForApplication(withBundleIdentifier:)) != nil
+    }
 
     func start() {
         guard lifetime == nil else { return }
