@@ -11,7 +11,7 @@ sessions=${1:a}
 cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-swiftc -O -module-cache-path "$work/modules" -o "$work/cala-usage-backtest" \
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$work/modules}" -o "$work/cala-usage-backtest" \
     Sources/Cala/{UsageWindow,UsageJSON,UsagePaceHistory,CalendarText,UsageForecastTypes,UsageQuotaHistory,UsageCodexBackfill,Zstd,UsageForecast}.swift \
     Checks/UsageBacktest/main.swift
 "$work/cala-usage-backtest" "$sessions" "$work/history" "${2:-}"

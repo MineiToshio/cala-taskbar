@@ -6,7 +6,7 @@ set -eu
 cd "${0:A:h}/.."
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-zstd" Sources/Cala/Zstd.swift Checks/Zstd/main.swift
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-zstd" Sources/Cala/Zstd.swift Checks/Zstd/main.swift
 fixtures=Checks/Zstd/fixtures
 if [[ "${1:-}" == --regenerate ]]; then
     mkdir -p "$out/in" "$fixtures"

@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-usage" \
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-usage" \
     Sources/Cala/{Usage,UsagePace,UsageWindow,UsageJSON,UsagePaceHistory,UsageForecastTypes,UsageQuotaHistory,UsageCodexBackfill,Zstd,UsageForecast}.swift \
     Sources/Cala/{CalendarText,AppPaths,Config,ClaudeStatusLine,ModulePlan}.swift \
     Checks/UsagePace/main.swift

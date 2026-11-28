@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Developer install: publish a complete bundle in /Applications, then open it in this session.
+# Install a fresh build (or CALA_INSTALL_PREBUILT), then open it in this session.
 set -euo pipefail
 if (( EUID == 0 )); then
   print -u2 'Run ./install.sh as your user. It will ask for sudo when needed.'
@@ -18,17 +18,32 @@ OLD_PLIST="$HOME/Library/LaunchAgents/local.mactaskbar.plist"
 PB=/usr/libexec/PlistBuddy
 uid=$(id -u)
 
-# Local rebuilds can come from the same commit. Advance past the installed build by default.
-if [[ -z "${CALA_BUILD_NUMBER:-}" ]]; then
-  build_number=$(git rev-list --count HEAD 2>/dev/null || echo 1)
-  installed=$($PB -c "Print :CFBundleVersion" "$DEST/Contents/Info.plist" 2>/dev/null || true)
-  major=${installed%%.*}
-  if [[ "$major" =~ '^[0-9]{1,18}$' ]] && (( 10#$major >= build_number )); then
-    build_number=$(( 10#$major + 1 ))
+prebuilt_checksums=
+if [[ -n "${CALA_INSTALL_PREBUILT:-}" ]]; then
+  prebuilt_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cala-prebuilt.XXXXXXXX")
+  trap '/bin/rm -rf -- "$prebuilt_dir"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  SRC="$prebuilt_dir/Cala.app"
+  /usr/bin/ditto --noacl "${CALA_INSTALL_PREBUILT:a}" "$SRC"
+  /usr/bin/codesign --verify --deep --strict "$SRC"
+  ./scripts/verify-keychain-helper.sh --bundle "$SRC"
+  # Carry the verified helper and the files defining its signing relationship into the privileged stage.
+  prebuilt_checksums=$(cd "$SRC" && /usr/bin/shasum -a 256 \
+    Contents/Info.plist Contents/MacOS/Cala Contents/Helpers/cala-keychain)
+else
+  # Local rebuilds can come from the same commit. Advance past the installed build by default.
+  if [[ -z "${CALA_BUILD_NUMBER:-}" ]]; then
+    build_number=$(git rev-list --count HEAD 2>/dev/null || echo 1)
+    installed=$($PB -c "Print :CFBundleVersion" "$DEST/Contents/Info.plist" 2>/dev/null || true)
+    major=${installed%%.*}
+    if [[ "$major" =~ '^[0-9]{1,18}$' ]] && (( 10#$major >= build_number )); then
+      build_number=$(( 10#$major + 1 ))
+    fi
+    export CALA_BUILD_NUMBER=$build_number
   fi
-  export CALA_BUILD_NUMBER=$build_number
+  ./build.sh
 fi
-./build.sh
 
 can_publish_as_user() {
   local group groups account_groups denied
@@ -58,10 +73,11 @@ publish() {
     print "Administrator access needed for $DEST. / Se requieren permisos de administrador para $DEST."
     publisher=(/usr/bin/sudo "${publisher[@]}")
   fi
-  "${publisher[@]}" "$SRC" "$DEST" <<'PUBLISH'
+  "${publisher[@]}" "$SRC" "$DEST" "$prebuilt_checksums" <<'PUBLISH'
 set -euo pipefail
 src=$1
 dest=$2
+prebuilt_checksums=$3
 dir=${dest:h}
 if (( EUID == 0 )); then
   owner=${SUDO_USER:?Missing invoking user}
@@ -122,11 +138,16 @@ cleanup() {
   /bin/rmdir "$stage"
 }
 trap '
+  exit_status=$?
+  trap "" INT TERM
   if ! cleanup; then
+    (( exit_status != 130 && exit_status != 143 )) || exit "$exit_status"
     (( swap_succeeded )) || exit 1
     print -u2 "Cala was installed. Could not finish cleaning up $stage. / Cala se instaló. No se pudo terminar de limpiar $stage."
   fi
 ' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 /usr/bin/ditto --noacl "$src" "$staged"
 unusual=$(/usr/bin/find "$staged" ! \( -type d -o \( -type f -links 1 \) \) -print)
 if [[ ! -d "$staged" || -n "$unusual" ]]; then
@@ -141,7 +162,33 @@ else
 fi
 /bin/chmod -R u-s,g-s,u+rwX,g+rwX,o-w "$staged"
 /usr/bin/codesign --verify --deep --strict "$staged"
+if [[ -n "$prebuilt_checksums" ]] &&
+   ! (cd "$staged" && print -r -- "$prebuilt_checksums" | /usr/bin/shasum -a 256 -c --status); then
+  print -u2 'Staged Cala failed the Keychain helper verification. / La copia preparada de Cala no pasó la verificación del helper del Llavero.'
+  exit 1
+fi
 
+main_cdhashes() {
+  local bundle=$1 archs arch hash
+  archs=$(/usr/bin/lipo -archs "$bundle/Contents/MacOS/Cala") || return 1
+  [[ -n "$archs" ]] || return 1
+  for arch in ${=archs}; do
+    hash=$(/usr/bin/codesign -dvvv --arch "$arch" "$bundle" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p') || return 1
+    [[ -n "$hash" ]] || return 1
+    print -r -- "$arch $hash"
+  done
+}
+
+bundle_permissions() (
+  local acl
+  cd -P -- "$1" || return 1
+  acl=$(/usr/bin/find -s . -acl -print -quit) || return 1
+  [[ -z "$acl" ]] || return 1
+  /usr/bin/find -s . -exec /usr/bin/stat -f '%p %u %g %l %N' {} +
+)
+
+repair_identical=0
+old_version= old_build= new_version= new_build=
 if [[ -e "$dest" || -L "$dest" ]]; then
   # Keep the validated inode pinned through the exchange and EXIT cleanup.
   typeset -A validated
@@ -160,9 +207,33 @@ if [[ -e "$dest" || -L "$dest" ]]; then
   fi
   old_id=$($pb -c "Print :CFBundleIdentifier" "$dest/Contents/Info.plist" 2>/dev/null || true)
   new_id=$($pb -c "Print :CFBundleIdentifier" "$staged/Contents/Info.plist")
+  if [[ -n "$prebuilt_checksums" ]]; then
+    old_version=$($pb -c 'Print :CFBundleShortVersionString' "$dest/Contents/Info.plist" 2>/dev/null || true)
+    old_build=$($pb -c 'Print :CFBundleVersion' "$dest/Contents/Info.plist" 2>/dev/null || true)
+    new_version=$($pb -c 'Print :CFBundleShortVersionString' "$staged/Contents/Info.plist")
+    new_build=$($pb -c 'Print :CFBundleVersion' "$staged/Contents/Info.plist")
+  fi
   if [[ "$old_id" != "$new_id" || "$(identity "$dest")" != "$validated_identity" ]]; then
     print -u2 "Unexpected bundle at $dest. / Paquete inesperado en $dest."
     exit 1
+  fi
+  if [[ -n "$prebuilt_checksums" && "$old_version" == "$new_version" && "$old_build" == "$new_build" ]] &&
+     new_hashes=$(main_cdhashes "$staged") && old_hashes=$(main_cdhashes "$dest") &&
+     [[ "$old_hashes" == "$new_hashes" ]] && /usr/bin/codesign --verify --deep --strict "$dest"; then
+    # The signature does not cover modes or ACLs. Exchange the normalized copy if needed.
+    repair_identical=1
+    if new_permissions=$(bundle_permissions "$staged") && old_permissions=$(bundle_permissions "$dest") &&
+       [[ "$old_permissions" == "$new_permissions" ]]; then
+      repair_identical=0
+    fi
+    if [[ "$(identity "$dest")" != "$validated_identity" ]]; then
+      print -u2 "Bundle changed at $dest. / Cambió el paquete en $dest."
+      exit 1
+    fi
+    if (( ! repair_identical )); then
+      print 'This Cala build is already installed. Relaunching. / Este build de Cala ya está instalado. Reiniciando.'
+      exit 0
+    fi
   fi
   flags=2 # RENAME_SWAP
 else
@@ -170,11 +241,28 @@ else
 fi
 incoming_identity=$(identity "$staged")
 swap_attempted=1
-/usr/bin/ruby --disable-gems -rfiddle/import - . "$dir" "$flags" <<'RUBY'
+/usr/bin/ruby --disable-gems -rfiddle/import - . "$dir" "$flags" "$old_version" "$old_build" "$new_version" "$new_build" "$repair_identical" <<'RUBY'
 module Darwin
   extend Fiddle::Importer
   dlload Fiddle::Handle::DEFAULT
   extern 'int renameatx_np(int, const char *, int, const char *, unsigned int)'
+end
+
+old_version, old_build, new_version, new_build, repair_identical = ARGV.drop(3)
+marketing_version = /\A[0-9]+(?:\.[0-9]+){0,2}\z/
+version_parts = ->(version) { (version.split(".").map(&:to_i) + [0, 0]).first(3) }
+version_order = if [old_version, new_version].all? { |v| marketing_version.match?(v) }
+  version_parts.call(old_version) <=> version_parts.call(new_version)
+end
+if version_order == 1
+  abort "Cala #{new_version} is older than installed version #{old_version}. / Cala #{new_version} es anterior a la versión instalada #{old_version}."
+end
+build_number = /\A[0-9]+\z/
+if (version_order == 0 || old_version == new_version) && build_number.match?(old_build)
+  abort "Invalid prebuilt Cala build number: #{new_build}" unless build_number.match?(new_build)
+  if old_build.to_i >= new_build.to_i && !(repair_identical == "1" && old_build.to_i == new_build.to_i)
+    abort "Cala #{new_version} build #{new_build} needs to be newer than installed build #{old_build} so other macOS accounts can detect the update. / El build #{new_build} de Cala #{new_version} debe superar al build instalado #{old_build} para que las otras cuentas detecten la actualización."
+  end
 end
 
 stage, destination = ARGV.take(2).map { |path| File.open(path, File::RDONLY | File::NOFOLLOW) }

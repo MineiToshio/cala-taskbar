@@ -3,6 +3,9 @@
 # CALA_SIGN_IDENTITY selects Developer ID signing; CALA_SKIP_NOTARIZE=1 skips notarization.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [[ -n "${CALA_MODULE_CACHE:-}" ]]; then
+  export CALA_MODULE_CACHE=${CALA_MODULE_CACHE:a}
+fi
 
 for var in ${(k)parameters}; do
   if [[ "$var" == CALA_UPDATE_* ]]; then
@@ -12,13 +15,38 @@ for var in ${(k)parameters}; do
 done
 [[ -z "${CALA_QA_REGULAR:-}" ]] || { echo "CALA_QA_REGULAR is for testing builds only" >&2; exit 1; }
 
-run_checks() {
-  for check in ./scripts/check-*.sh; do
-    echo "› running ${check:t}"
-    "$check"
+run_checks() (
+  unsetopt BG_NICE
+  local -a checks=(./scripts/check-*.sh) pids
+  local logs check log i failed=0
+  : "${CALA_MODULE_CACHE:=$HOME/Library/Caches/cala/modules}"
+  export CALA_MODULE_CACHE
+  mkdir -p "$CALA_MODULE_CACHE" || return 1
+  logs=$(mktemp -d "${TMPDIR:-/tmp}/cala-check-logs.XXXXXXXX") || return 1
+  trap 'rm -rf "$logs"' EXIT
+
+  if [[ "${CALA_CHECKS_SERIAL:-}" != 1 ]]; then
+    for check in "${checks[@]}"; do
+      "$check" > "$logs/${check:t}.log" 2>&1 &
+      pids+=($!)
+    done
+  fi
+  for (( i = 1; i <= ${#checks}; i++ )); do
+    check=${checks[i]}
+    log="$logs/${check:t}.log"
+    if [[ "${CALA_CHECKS_SERIAL:-}" == 1 ]]; then
+      "$check" > "$log" 2>&1 && { echo "PASS ${check:t}"; continue; }
+    elif wait "${pids[i]}"; then
+      echo "PASS ${check:t}"
+      continue
+    fi
+    print -u2 "FAIL ${check:t}"
+    tail -n 40 "$log" >&2 || true
+    failed=1
   done
+  (( failed == 0 )) || return 1
   echo "› checks passed"
-}
+)
 
 if [[ "${1:-}" == --checks-only && $# == 1 ]]; then
   # Isolate checks from ignored output, while letting a dry run test local edits.
@@ -75,6 +103,8 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
+source ./scripts/update-signer.sh
+source ./scripts/verify-release-binary.sh
 
 # Never build in the caller's tree, which may contain untracked or ignored source files.
 echo "› building $commit in a clean checkout"
@@ -132,8 +162,19 @@ export CALA_SIGN_IDENTITY=${CALA_SIGN_IDENTITY:--}
 if [[ -z "$checked_parent" ]]; then
   run_checks
 fi
+# Keep the default build ahead of local rebuilds before signing the published bundle.
+if [[ -z "${CALA_BUILD_NUMBER:-}" ]]; then
+  build_number=$(git rev-list --count HEAD)
+  installed=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' /Applications/Cala.app/Contents/Info.plist 2>/dev/null || true)
+  major=${installed%%.*}
+  if [[ "$major" =~ '^[0-9]{1,18}$' ]] && (( 10#$major >= build_number )); then
+    build_number=$(( 10#$major + 1 ))
+  fi
+  export CALA_BUILD_NUMBER=$build_number
+fi
 ./build.sh
 APP="$BUILD_DIR/Cala.app"
+verify_release_binary "$APP/Contents/MacOS/Cala"
 codesign --verify --deep --strict --verbose=2 "$APP"
 if [[ "$CALA_SIGN_IDENTITY" != "-" ]]; then
   codesign -d --entitlements - "$APP" 2>/dev/null | grep -q automation.apple-events || { echo "entitlements missing" >&2; exit 1; }
@@ -197,10 +238,10 @@ manifest = {
 }
 output.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
 PY
-signer=(swift -module-cache-path "$work/modules" scripts/update-sign.swift)
+signer=$(cached_update_signer scripts/update-sign.swift)
 needs_passphrase=0
 if /usr/bin/security find-generic-password -s local.cala.update-signing -a update-signing-key.json -w 2>/dev/null |
-  "${signer[@]}" sign --key "$key" --manifest "$work/manifest.json" --out "$work/latest.json" --passphrase-fd 0 2>&1 |
+  "$signer" sign --key "$key" --manifest "$work/manifest.json" --out "$work/latest.json" --passphrase-fd 0 2>&1 |
   /usr/bin/tee "$work/sign.log"; then
   :
 else
@@ -212,11 +253,11 @@ fi
 if grep -Fq 'Saved Keychain passphrase did not unlock the key' "$work/sign.log"; then
   needs_passphrase=1
 fi
-"${signer[@]}" verify --keys "$keys" --feed "$work/latest.json" --dmg "$DMG"
+"$signer" verify --keys "$keys" --feed "$work/latest.json" --dmg "$DMG"
 mkdir "$mount"
 hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mount" "$DMG"
 mounted=1
-"${signer[@]}" verify-release --keys "$keys" --feed "$work/latest.json" \
+"$signer" verify-release --keys "$keys" --feed "$work/latest.json" \
   --dmg "$DMG" --app "$mount/Cala.app" --tag "v$CALA_VERSION" --commit "$commit"
 hdiutil detach -quiet "$mount"
 mounted=0

@@ -10,5 +10,5 @@ fi
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-dock" "$file" Checks/DockRules/main.swift
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-dock" "$file" Checks/DockRules/main.swift
 "$out/cala-dock"

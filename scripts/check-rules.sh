@@ -12,9 +12,9 @@ done
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-panel" Sources/Cala/PanelPolicy.swift Checks/PanelDismiss/main.swift
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-panel" Sources/Cala/PanelPolicy.swift Checks/PanelDismiss/main.swift
 "$out/cala-panel"
 
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-rules" "${rules[@]}" \
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-rules" "${rules[@]}" \
     Sources/Cala/CalendarText.swift Checks/SystemRules/main.swift
 "$out/cala-rules"

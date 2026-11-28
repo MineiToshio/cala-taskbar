@@ -28,7 +28,6 @@ BUILD_DIR=${CALA_BUILD_DIR:-build}
 FEED_URL=https://github.com/MineiToshio/cala-taskbar/releases/latest/download/latest.json
 KEYS=$(<packaging/update-public-keys)
 swift_flags=()
-scratch_flags=()
 
 xml() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<< "$1"; }
 update_test_plist=
@@ -71,16 +70,43 @@ if [[ -n "${CALA_BUILD_DIR:-}" ]]; then
   mkdir -p "$BUILD_DIR"
   # Keep SwiftPM's module cache address stable through aliases such as /var and /private/var.
   BUILD_DIR=${BUILD_DIR:A}
-  scratch_flags=(--scratch-path "$BUILD_DIR/.build")
+  scratch_root="$BUILD_DIR/.build"
+else
+  scratch_root="$PWD/.build"
+fi
+
+swift_build() {
+  local arch=$1
+  shift
+  swift build -c release --triple "$arch-apple-macosx14.0" \
+    --scratch-path "$scratch_root/$arch" "${swift_flags[@]}" "$@"
+}
+
+if (( ${#ARCHS} > 1 )); then
+  unsetopt BG_NICE
+  pids=()
+  for arch in "${ARCHS[@]}"; do
+    echo "› swift build ($arch)"
+    swift_build "$arch" &
+    pids+=($!)
+  done
+  failed=0
+  for (( i = 1; i <= ${#pids}; i++ )); do
+    if ! wait "${pids[i]}"; then
+      print -u2 "Swift build failed (${ARCHS[i]})"
+      failed=1
+    fi
+  done
+  (( failed == 0 )) || exit 1
+else
+  echo "› swift build (${ARCHS[1]})"
+  swift_build "${ARCHS[1]}"
 fi
 
 bins=()
 update_bins=()
-for arch in $ARCHS; do
-  echo "› swift build ($arch)"
-  args=(-c release --triple "$arch-apple-macosx14.0" "${scratch_flags[@]}" "${swift_flags[@]}")
-  swift build "${args[@]}"
-  bin_dir=$(swift build "${args[@]}" --show-bin-path)
+for arch in "${ARCHS[@]}"; do
+  bin_dir=$(swift_build "$arch" --show-bin-path)
   bins+=("$bin_dir/Cala")
   update_bins+=("$bin_dir/cala-update")
 done

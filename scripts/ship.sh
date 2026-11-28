@@ -8,6 +8,7 @@ fail() {
 }
 
 cd "$(dirname "$0")/.." || fail 'No se pudo abrir el repositorio.' 'Could not open the repository.'
+source ./scripts/update-signer.sh
 
 delete_passphrase() {
   /usr/bin/security delete-generic-password -s local.cala.update-signing -a update-signing-key.json
@@ -21,11 +22,12 @@ if (( $# == 1 )); then
         fail "Copia la clave de firma a $key." "Copy the signing key to $key."
       [[ -t 0 ]] ||
         fail 'Ejecuta --save-passphrase en tu Terminal.' 'Run --save-passphrase in your Terminal.'
+      signer=$(cached_update_signer scripts/update-sign.swift)
       print 'Pega la frase de «Cala – clave de firma» (NO la contraseña del Mac) / Paste the Cala signing-key passphrase'
       /usr/bin/security add-generic-password -U -s local.cala.update-signing -a update-signing-key.json -T /usr/bin/security -w ||
         fail 'No se pudo guardar la frase en el Llavero.' 'Could not save the passphrase to the Keychain.'
       if /usr/bin/security find-generic-password -s local.cala.update-signing -a update-signing-key.json -w 2>/dev/null |
-        swift scripts/update-sign.swift check-key --key "$key" --passphrase-fd 0; then
+        "$signer" check-key --key "$key" --passphrase-fd 0; then
         print 'Frase guardada en el Llavero de macOS / Passphrase saved in the macOS Keychain'
         exit 0
       fi
@@ -143,6 +145,7 @@ tag=v$version
 ref=refs/tags/$tag
 repo=MineiToshio/cala-taskbar
 remote="https://github.com/$repo.git"
+build_dir=${CALA_BUILD_DIR:-build}
 
 if (( dry_run )); then
   print -r -- "Plan para Cala $version / Plan for Cala $version"
@@ -179,6 +182,7 @@ check_notes() {
 if (( dry_run )); then
   ./scripts/release.sh --checks-only ||
     fail 'Fallaron los checks de Cala.' 'Cala checks failed.'
+  print 'La comprobación de strings se ejecuta en el binario de release recién compilado. / The strings check runs on the freshly built release binary.'
   check_notes
   print 'Simulación completada. / Dry run complete.'
   exit 0
@@ -212,29 +216,50 @@ get_release_state() {
     fail "Hay más de un release para $tag." "More than one release exists for $tag."
 }
 
-get_release_state
 release_head=$base
+pending_feed="$state_dir/$release_head.json"
+if [[ -n "$release_parent" && -s "$pending_feed.public" ]]; then
+  release_state=published
+else
+  get_release_state
+fi
 if [[ -z "$release_parent" && -n "$release_state" ]]; then
   fail "GitHub ya tiene un release para $tag. Revisa el tag antes de continuar." \
        "GitHub already has a release for $tag. Review the tag before continuing."
 fi
-pending_feed="$state_dir/$release_head.json"
-if [[ "$release_state" == published && ! -s "$pending_feed" ]]; then
+if [[ "$release_state" == published && ! -s "$pending_feed" && ! -s "$pending_feed.public" ]]; then
   fail "$tag ya está publicado. Si falta instalarlo, ejecuta ./install.sh." \
        "$tag is already published. If it still needs installation, run ./install.sh."
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/cala-ship.XXXXXXXX") ||
   fail 'No se pudo crear el directorio temporal.' 'Could not create the temporary directory.'
-trap 'rm -rf -- "$work"' EXIT
-signer=(swift -module-cache-path "$work/modules" scripts/update-sign.swift)
-build_dir=${CALA_BUILD_DIR:-build}
+mount="$work/mnt"
+mounted=0
+cleanup() {
+  trap '' INT TERM
+  # An interrupted attach may mount the image before the command returns.
+  if (( mounted )) ||
+     [[ -d "$mount" && "$(/usr/bin/stat -f %d "$mount")" != "$(/usr/bin/stat -f %d "$work")" ]]; then
+    if ! hdiutil detach -quiet "$mount" && ! hdiutil detach -quiet -force "$mount"; then
+      print -u2 -r -- "No se pudo desmontar $mount. Se conservó $work. / Could not detach $mount. Kept $work."
+      return 0
+    fi
+  fi
+  if ! rm -rf -- "$work"; then
+    print -u2 -r -- "No se pudo eliminar $work. / Could not remove $work."
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+signer=$(cached_update_signer scripts/update-sign.swift)
 asset="$build_dir/Cala-$version.dmg"
 
 verify_draft() {
   local expected=$1 downloaded="$work/draft-latest.json"
   "$gh_cli" release download "$tag" -R "$repo" -p latest.json -O "$downloaded" --clobber &&
-    "${signer[@]}" verify --keys packaging/update-public-keys --feed "$downloaded" &&
+    "$signer" verify --keys packaging/update-public-keys --feed "$downloaded" &&
     cmp -s "$downloaded" "$expected"
 }
 
@@ -347,7 +372,7 @@ verify_public() {
   while (( (remaining = deadline - SECONDS) > 0 )); do
     if /usr/bin/curl -q -sfL --max-time "$(( remaining < 15 ? remaining : 15 ))" -o "$feed" "$url" &&
        cmp -s "$feed" "$pending_feed" &&
-       "${signer[@]}" verify --keys packaging/update-public-keys --feed "$feed"; then
+       "$signer" verify --keys packaging/update-public-keys --feed "$feed"; then
       return 0
     fi
     if (( SECONDS < deadline )); then sleep 5; fi
@@ -355,20 +380,24 @@ verify_public() {
   return 1
 }
 
-if ! verify_public; then
-  if "$gh_cli" release edit "$tag" -R "$repo" --draft=true; then
-    fail "Falló la verificación pública de $tag. Volvió a borrador. Reanuda la misma versión con ./scripts/ship.sh." \
-         "Public verification failed for $tag. It is a draft again. Resume the same version with ./scripts/ship.sh."
+ensure_public_verified() {
+  [[ -s "$pending_feed.public" ]] && return 0
+  if ! verify_public; then
+    if "$gh_cli" release edit "$tag" -R "$repo" --draft=true; then
+      fail "Falló la verificación pública de $tag. Volvió a borrador. Reanuda la misma versión con ./scripts/ship.sh." \
+           "Public verification failed for $tag. It is a draft again. Resume the same version with ./scripts/ship.sh."
+    fi
+    fail "Falló la verificación pública de $tag y GitHub no confirmó que volviera a borrador. Reanuda la misma versión con ./scripts/ship.sh." \
+         "Public verification failed for $tag and GitHub did not confirm re-drafting it. Resume the same version with ./scripts/ship.sh."
   fi
-  fail "Falló la verificación pública de $tag y GitHub no confirmó que volviera a borrador. Reanuda la misma versión con ./scripts/ship.sh." \
-       "Public verification failed for $tag and GitHub did not confirm re-drafting it. Resume the same version with ./scripts/ship.sh."
-fi
+  # The verified feed itself is the marker. Commit the transition before trying to install.
+  mv -f -- "$pending_feed" "$pending_feed.public" ||
+    fail 'No se pudo guardar la verificación del manifiesto público.' 'Could not save public feed verification.'
+}
+ensure_public_verified
 
 if [[ -f "$pending_feed.needs-passphrase" ]]; then
   print 'Guarda la frase una vez con ./scripts/ship.sh --save-passphrase / Save the passphrase once with ./scripts/ship.sh --save-passphrase'
-fi
-if ! rm -f -- "$pending_feed" "$pending_feed.needs-passphrase"; then
-  print -u2 'El release está publicado. No se pudo limpiar el estado local. / The release is published. Could not clean up local state.'
 fi
 working_tree=$(git status --porcelain=v1 --untracked-files=all) ||
   fail "El release $tag está publicado. Comprueba el checkout y ejecuta ./install.sh." \
@@ -379,7 +408,24 @@ if [[ "$(git symbolic-ref --quiet --short HEAD)" != main ||
   fail "El release $tag está publicado. El checkout cambió. Desde el commit publicado, ejecuta ./install.sh." \
        "Release $tag is published. The checkout changed. Run ./install.sh from the published commit."
 fi
-CALA_VERSION="$version" ./install.sh ||
-  fail "El release $tag está publicado. Para reintentar la instalación, ejecuta ./install.sh." \
-       "Release $tag is published. To retry installation, run ./install.sh."
+
+prepare_install() {
+  local dmg="$work/${asset:t}" keys=packaging/update-public-keys
+  # Verify a private image before mounting. A resumed ship may need to recover it from GitHub.
+  if ! { [[ -f "$asset" ]] && cp "$asset" "$dmg" &&
+         "$signer" verify --keys "$keys" --feed "$pending_feed.public" --dmg "$dmg"; }; then
+    "$gh_cli" release download "$tag" -R "$repo" -p "${asset:t}" -O "$dmg" --clobber &&
+      "$signer" verify --keys "$keys" --feed "$pending_feed.public" --dmg "$dmg" || return 1
+  fi
+  mkdir "$mount" &&
+    hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mount" "$dmg" || return 1
+  mounted=1
+}
+
+prepare_install && CALA_INSTALL_PREBUILT="$mount/Cala.app" ./install.sh ||
+  fail "El release $tag está publicado. Para reintentar la instalación, ejecuta ./scripts/ship.sh $version." \
+       "Release $tag is published. To retry installation, run ./scripts/ship.sh $version."
+if ! rm -f -- "$pending_feed.needs-passphrase" "$pending_feed.public"; then
+  print -u2 'El release está publicado. No se pudo limpiar el estado local. / The release is published. Could not clean up local state.'
+fi
 print -r -- "Cala $version publicada e instalada. / Cala $version published and installed."

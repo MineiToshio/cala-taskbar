@@ -83,6 +83,6 @@ PY
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-settings-tray" \
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-settings-tray" \
     Sources/Cala/TrayOrder.swift Checks/SettingsTray/main.swift
 "$out/cala-settings-tray"

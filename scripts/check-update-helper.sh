@@ -9,10 +9,10 @@ trap 'rm -rf "$out"' EXIT
 signer=scripts/update-sign.swift
 helper=Sources/CalaUpdateHelper/main.swift
 check=Checks/UpdateHelper/main.swift
-swift=(swift -module-cache-path "$out/modules")
+swift=(swift -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}")
 "${swift[@]}" "$signer" selftest
-swiftc -O -D CALA_UPDATE_TEST -module-cache-path "$out/modules" -o "$out/cala-update" "$helper"
-swiftc -O -module-cache-path "$out/modules" -o "$out/check" "$check"
+swiftc -O -D CALA_UPDATE_TEST -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-update" "$helper"
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/check" "$check"
 "$out/check" "$out/cala-update" "$out"
 python3 - "$helper" <<'PYCHECK'
 from pathlib import Path
@@ -34,7 +34,7 @@ JSON
 
 signature=Sources/Cala/UpdateSignature.swift
 if [[ -f "$signature" ]]; then
-  swiftc -O -D CALA_SIGNATURE_CROSSCHECK -module-cache-path "$out/modules" -o "$out/cross-check" \
+  swiftc -O -D CALA_SIGNATURE_CROSSCHECK -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cross-check" \
     Sources/Cala/{UpdateVersion,UpdateFeed,UpdateSignature}.swift "$check"
   "$out/cross-check" "$out/keys/public" "$out/latest.json" "$out/manifest.json"
 else

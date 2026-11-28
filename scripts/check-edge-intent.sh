@@ -11,6 +11,6 @@ done
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-edge" \
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-edge" \
     Sources/Cala/EdgeIntent.swift Sources/Cala/PanelPolicy.swift Checks/EdgeIntent/main.swift
 "$out/cala-edge"

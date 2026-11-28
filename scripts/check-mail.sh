@@ -10,6 +10,6 @@ fi
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-mail" \
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-mail" \
     "$parser" Sources/Cala/{MailIMAP,MailService,MailKeychainAccess,MailOverlay,MailBodyCache,MailBodyStructure,MailSyncPlan,MailAttachment,AppPaths,CalendarText}.swift Checks/MailParsing/main.swift Checks/MailParsing/MailFastChecks.swift Checks/MailParsing/MailFeatureChecks.swift
 "$out/cala-mail"

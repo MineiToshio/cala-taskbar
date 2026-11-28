@@ -42,8 +42,9 @@ trap cleanup EXIT
 cp "$build_dir/$asset" "$build_dir/$asset.sha256" "$build_dir/latest.json" "$work/"
 git show "${commit}:packaging/update-public-keys" > "$work/keys"
 git show "${commit}:scripts/update-sign.swift" > "$work/update-sign.swift"
-signer=(swift -module-cache-path "$work/modules" "$work/update-sign.swift")
-"${signer[@]}" verify --keys "$work/keys" --feed "$work/latest.json" --dmg "$work/$asset"
+source ./scripts/update-signer.sh
+signer=$(cached_update_signer "$work/update-sign.swift")
+"$signer" verify --keys "$work/keys" --feed "$work/latest.json" --dmg "$work/$asset"
 sum=$(cd "$work" && shasum -a 256 "$asset")
 [[ "${sum%% *}" == "$(cut -d' ' -f1 "$work/$asset.sha256")" ]] ||
   { echo "DMG checksum does not match $asset.sha256" >&2; exit 1; }
@@ -52,7 +53,7 @@ print -r -- "$sum" > "$work/$asset.sha256"
 mkdir "$mount"
 hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mount" "$work/$asset"
 mounted=1
-"${signer[@]}" verify-release --keys "$work/keys" --feed "$work/latest.json" \
+"$signer" verify-release --keys "$work/keys" --feed "$work/latest.json" \
   --dmg "$work/$asset" --app "$mount/Cala.app" --tag "$tag" --commit "$commit"
 hdiutil detach -quiet "$mount"
 mounted=0

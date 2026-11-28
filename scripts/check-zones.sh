@@ -12,6 +12,6 @@ done
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-zones" "${zones[@]}" \
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-zones" "${zones[@]}" \
     Sources/Cala/AppPaths.swift Checks/Zones/main.swift
 "$out/cala-zones"

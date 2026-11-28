@@ -10,5 +10,5 @@ fi
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-swiftc -O -module-cache-path "$out/modules" -o "$out/cala-menu-bar" "$file" Checks/MenuBar/main.swift
+swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-menu-bar" "$file" Checks/MenuBar/main.swift
 "$out/cala-menu-bar"

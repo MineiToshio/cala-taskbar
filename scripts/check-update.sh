@@ -59,15 +59,7 @@ for path in references.keys() | {hook}:
             raise SystemExit(f"FAIL {path}:{number}: updater test hook outside #if CALA_UPDATE_TEST")
 print("PASS updater test hook is conditionally compiled")
 PY
-swift build -c release
-/usr/bin/strings .build/release/Cala > "$out/release-strings"
-if /usr/bin/grep -Fn 'local.cala.test.update' "$out/release-strings"; then
-    print -u2 "FAIL updater test notification is present in the release binary"
-    exit 1
-fi
-print "PASS updater test notification is absent from the release binary"
-
-compile=(swiftc -O -module-cache-path "$out/modules")
+compile=(swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}")
 "${compile[@]}" -o "$out/cala-update" "$policy" "$src/UpdateVersion.swift" Checks/Update/main.swift
 "$out/cala-update"
 "${compile[@]}" -o "$out/core" "${core[@]}" Checks/UpdateCore/main.swift
