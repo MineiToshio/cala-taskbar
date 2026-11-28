@@ -117,6 +117,9 @@ struct MorePane: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                     ForEach(ids, id: \.self) { id in
                         if let info = TrayItems.info(id) {
+                            let title = id == trayDocker
+                                ? dockerTrayTitle(docker.state, count: docker.runningCount, crashes: docker.crashed.count)
+                                : info.title
                             Button {
                                 fm.fromMore = true; fm.kind = id; fm.token += 1
                             } label: {
@@ -129,8 +132,8 @@ struct MorePane: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .help(id == trayDocker ? dockerTrayTitle(docker.state, count: docker.runningCount) : info.title)
-                            .accessibilityLabel(id == trayDocker ? dockerTrayTitle(docker.state, count: docker.runningCount) : info.title)
+                            .help(title)
+                            .accessibilityLabel(title)
                             .onHover { hover = $0 ? id : (hover == id ? nil : hover) }
                             .reportFrame(id, in: "flyout")
                         }

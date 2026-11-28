@@ -73,7 +73,7 @@ struct MailOverflowPane: View {
         let title: String
         switch info.id {
         case trayMail: title = mailTrayTitle(service.unreadCount)
-        case trayDocker: title = dockerTrayTitle(docker.state, count: docker.runningCount)
+        case trayDocker: title = dockerTrayTitle(docker.state, count: docker.runningCount, crashes: docker.crashed.count)
         default: title = info.title
         }
         return Button {

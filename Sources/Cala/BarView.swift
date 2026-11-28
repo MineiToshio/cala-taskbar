@@ -394,7 +394,7 @@ struct TrayView: View {
             }
         case trayDocker:
             if docker.available {
-                let title = dockerTrayTitle(docker.state, count: docker.runningCount)
+                let title = dockerTrayTitle(docker.state, count: docker.runningCount, crashes: docker.crashed.count)
                 cell(nil, id: id, text: nil, custom: AnyView(DockerTrayMark(state: docker.glyph, showCount: true)),
                      accessibilityTitle: title).help(title)
             }

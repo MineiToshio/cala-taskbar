@@ -287,11 +287,16 @@ func openAppLauncher() {
 #if DEBUG
 if let index = CommandLine.arguments.firstIndex(of: "--snapshot-docker") {
     guard index + 1 < CommandLine.arguments.count else {
-        fputs("Usage: Cala --snapshot-docker <directory>\n", stderr)
+        fputs("Usage: Cala --snapshot-docker <directory> [en|es]\n", stderr)
+        exit(1)
+    }
+    let language = index + 2 < CommandLine.arguments.count ? CommandLine.arguments[index + 2] : "en"
+    guard language == "en" || language == "es" else {
+        fputs("Usage: Cala --snapshot-docker <directory> [en|es]\n", stderr)
         exit(1)
     }
     // The fixture is independent of the live instance and exits before the application lifecycle.
-    MainActor.assumeIsolated { DockerFixtures.run(dir: CommandLine.arguments[index + 1]) }
+    MainActor.assumeIsolated { DockerFixtures.run(dir: CommandLine.arguments[index + 1], language: language) }
 }
 #endif
 // Keep the raw descriptor open until kernel process teardown.

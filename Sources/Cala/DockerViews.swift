@@ -31,9 +31,17 @@ struct DockerWhale: Shape {
     }
 }
 
-func dockerTrayTitle(_ state: DockerEngineState, count: Int) -> String {
+func dockerTrayTitle(_ state: DockerEngineState, count: Int, crashes: Int) -> String {
     switch state {
-    case .running: return tx("Docker · \(count) running", "Docker · \(count) en marcha")
+    case .running:
+        let title = tx("Docker · \(count) running", "Docker · \(count) en marcha")
+        if crashes == 1 {
+            return tx("\(title) · 1 container crashed", "\(title) · 1 contenedor falló")
+        }
+        if crashes > 1 {
+            return tx("\(title) · \(crashes) containers crashed", "\(title) · \(crashes) contenedores fallaron")
+        }
+        return title
     case .starting: return tx("Docker · starting", "Docker · iniciando")
     case .stopping: return tx("Docker · stopping", "Docker · deteniendo")
     case .unreachable: return tx("Docker · unreachable", "Docker · sin conexión")
@@ -100,13 +108,14 @@ struct DockerPane: View {
     @Environment(\.themeAccent) private var accent
     @State private var collapsed = Set<String>()
     @State private var search = ""
-    @State private var confirmation: DockerConfirmation?
+    @Binding private var confirmation: DockerConfirmation?
     @State private var listHeight: CGFloat = 100
     let availableHeight: CGFloat
 
-    @MainActor init(availableHeight: CGFloat) {
+    @MainActor init(availableHeight: CGFloat, confirmation: Binding<DockerConfirmation?>) {
         self.availableHeight = availableHeight
         self.service = .shared
+        _confirmation = confirmation
     }
 
     #if DEBUG
@@ -114,7 +123,7 @@ struct DockerPane: View {
         self.availableHeight = availableHeight
         self.service = fixture
         _collapsed = State(initialValue: collapsed)
-        _confirmation = State(initialValue: fixture.listing.flatMap { listing in
+        _confirmation = .constant(fixture.listing.flatMap { listing in
             confirmation.map { DockerConfirmation(key: $0, listing: listing) }
         })
     }
@@ -147,7 +156,10 @@ struct DockerPane: View {
             footer
         }
         .onAppear { service.panelOpened() }
-        .onDisappear { service.panelClosed() }
+        .onDisappear {
+            confirmation = nil
+            service.panelClosed()
+        }
         .onChange(of: service.endpoint?.id) { _, _ in
             collapsed.removeAll()
             search = ""
@@ -174,13 +186,13 @@ struct DockerPane: View {
                     HStack(spacing: 7) {
                         Circle().fill(engineColor).frame(width: 7, height: 7)
                         Text(engineTitle).font(.system(size: 11.5)).flyoutSecondary()
-                        if service.canToggle {
+                        if running && service.canToggle {
                             Toggle(tx("Docker engine", "Motor de Docker"), isOn: Binding(
-                                get: { running || service.state == .starting },
+                                get: { running },
                                 set: { service.setEngine($0, shown: shown) }
                             ))
                             .labelsHidden()
-                            .disabled(service.state == .starting || service.state == .stopping || service.switchingContext)
+                            .disabled(service.switchingContext)
                         }
                     }
                 }
@@ -210,7 +222,7 @@ struct DockerPane: View {
                 } else {
                     Text(runtimeName)
                 }
-                if running, let list = service.containers {
+                if running, let list = service.containers, !list.isEmpty {
                     Text(tx("· \(service.runningCount) of \(list.count) running", "· \(service.runningCount) de \(list.count) en marcha"))
                     if let ram = service.ram { Text(tx("· \(size(ram)) RAM", "· \(size(ram)) de RAM")) }
                 }
@@ -290,8 +302,8 @@ struct DockerPane: View {
             let filtered = containers.filter(matchesSearch)
             if containers.isEmpty {
                 message("shippingbox", tx("No containers yet", "Aún no hay contenedores"),
-                        tx("Run docker run or docker compose up and they'll show up here.",
-                           "Ejecuta docker run o docker compose up y aparecerán aquí."))
+                        tx("Create a container with `docker run` or `docker compose up`.",
+                           "Crea un contenedor con `docker run` o `docker compose up`."))
             } else if filtered.isEmpty {
                 message("magnifyingglass", tx("No matching containers", "No hay contenedores que coincidan"))
             } else {
@@ -331,7 +343,7 @@ struct DockerPane: View {
         let count = DockerGroup(project: project, containers: members).countLabel
         let busy = members.contains { service.busy[$0.id] != nil }
         let shown = service.listing
-        return DockerHoverRow { _ in
+        return DockerHoverRow {
             HStack(spacing: 5) {
                 Button {
                     if closed { collapsed.remove(project) } else { collapsed.insert(project) }
@@ -365,45 +377,41 @@ struct DockerPane: View {
     private func containerRow(_ container: DockerContainer) -> some View {
         let action = service.busy[container.id]
         let shown = service.listing
-        return DockerHoverRow { hovered in
-            if !service.switchingContext && confirmation?.matches(container.id, shown: shown) == true {
-                confirm(tx("Remove \(container.displayName)?", "¿Eliminar \(container.displayName)?")) {
-                    service.act(.remove, on: container, shown: shown)
-                }
-            } else {
+        let name = container.displayName
+        return DockerHoverRow {
+            confirmable(container.id, shown: shown, title: tx("Remove \(name)?", "¿Eliminar \(name)?"), remove: {
+                service.act(.remove, on: container, shown: shown)
+            }) {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Circle().fill(containerColor(container, action: action)).frame(width: 7, height: 7)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(container.displayName).font(.system(size: 13)).lineLimit(1)
-                            Text(containerSubtitle(container, action: action))
-                                .font(.system(size: 11)).flyoutSecondary().lineLimit(1)
+                            Text(name).font(.system(size: 13)).lineLimit(1)
+                            containerSubtitle(container, action: action)
                         }
                         Spacer(minLength: 0)
                         if let publication = container.publishedPort, let url = publication.url {
                             let port = publication.number
                             Button { NSWorkspace.shared.open(url) } label: {
                                 HStack(spacing: 3) {
-                                    Text(tx(":\(String(port))", ":\(String(port))")).monospacedDigit()
+                                    Text(verbatim: ":\(String(port))").monospacedDigit()
                                     Image(systemName: "arrow.up.right").font(.system(size: 8, weight: .semibold))
                                 }
                                 .font(.system(size: 10, weight: .medium)).padding(.horizontal, 5).padding(.vertical, 3)
-                                .foregroundStyle(accent).background(accent.opacity(0.14), in: Capsule())
+                                .foregroundStyle(.primary).background(accent.opacity(0.14), in: Capsule())
+                                .fixedSize()
                             }
                             .buttonStyle(.plain)
-                            .help(tx("Open port \(port) in browser", "Abrir el puerto \(port) en el navegador"))
+                            .help(tx("Open port \(String(port)) in browser", "Abrir el puerto \(String(port)) en el navegador"))
                         }
-                        if action != nil {
-                            ProgressView().controlSize(.small).frame(width: 22)
-                        } else {
-                            if hovered { containerTools(container, shown: shown) }
-                            iconButton(container.isActive ? "stop.fill" : "play.fill",
-                                       container.isActive ? tx("Stop container", "Detener contenedor") : tx("Start container", "Iniciar contenedor")) {
-                                service.act(container.isActive ? .stop : .start, on: container, shown: shown)
-                            }
-                            .disabled(service.switchingContext)
+                        containerActions(container, shown: shown)
+                            .disabled(action != nil)
+                        iconButton(container.isActive ? "stop.fill" : "play.fill",
+                                   container.isActive ? tx("Stop container", "Detener contenedor") : tx("Start container", "Iniciar contenedor")) {
+                            service.act(container.isActive ? .stop : .start, on: container, shown: shown)
                         }
+                        .disabled(action != nil || service.switchingContext)
                     }
                     errorLine(container.id)
                 }
@@ -411,19 +419,28 @@ struct DockerPane: View {
         }
     }
 
-    @ViewBuilder private func containerTools(_ container: DockerContainer, shown: DockerListing?) -> some View {
-        if service.dockerCLI != nil {
-            iconButton("doc.text", tx("Open logs in Terminal", "Abrir registros en Terminal")) { service.logs(container, shown: shown) }
-            if container.isRunning {
-                iconButton("terminal", tx("Open shell in Terminal", "Abrir consola en Terminal")) { service.shell(container, shown: shown) }
+    private func containerActions(_ container: DockerContainer, shown: DockerListing?) -> some View {
+        let name = container.displayName
+        return actionsMenu(tx("Actions for \(name)", "Acciones de \(name)")) {
+            if service.dockerCLI != nil {
+                Button { service.logs(container, shown: shown) } label: {
+                    Label(tx("Open logs in Terminal", "Abrir registros en Terminal"), systemImage: "doc.text")
+                }
+                if container.isRunning {
+                    Button { service.shell(container, shown: shown) } label: {
+                        Label(tx("Open shell in Terminal", "Abrir consola en Terminal"), systemImage: "terminal")
+                    }
+                }
             }
-        }
-        if container.isActive {
-            iconButton("arrow.clockwise", tx("Restart container", "Reiniciar contenedor")) { service.act(.restart, on: container, shown: shown) }
-                .disabled(service.switchingContext)
-        } else {
-            iconButton("trash", tx("Remove container", "Eliminar contenedor")) { askToRemove(container.id, shown: shown) }
-                .disabled(service.switchingContext)
+            if container.isActive {
+                Button { service.act(.restart, on: container, shown: shown) } label: {
+                    Label(tx("Restart container", "Reiniciar contenedor"), systemImage: "arrow.clockwise")
+                }
+            } else {
+                Button { askToRemove(container.id, shown: shown) } label: {
+                    Label(tx("Remove container…", "Eliminar contenedor…"), systemImage: "trash")
+                }
+            }
         }
     }
 
@@ -435,33 +452,59 @@ struct DockerPane: View {
         return container.isRunning ? StatusColor.color(.ok, dark: dark) : tertiary
     }
 
-    private func containerSubtitle(_ container: DockerContainer, action: DockerContainerAction?) -> String {
-        let title: String
-        switch action {
-        case .start: title = tx("Starting…", "Iniciando…")
-        case .stop: title = tx("Stopping…", "Deteniendo…")
-        case .restart: title = tx("Restarting…", "Reiniciando…")
-        case .remove: title = tx("Removing…", "Eliminando…")
-        case nil:
-            if service.crashed.contains(container.id) {
-                title = tx("Crashed", "Falló")
-            } else if let exit = container.exitCode {
-                title = tx("Exited (\(exit))", "Terminó (\(exit))")
-            } else {
-                switch container.State {
-                case "running":
-                    if let elapsed = container.uptimeSeconds {
-                        let relative = relativeTime(Date().timeIntervalSince1970 - elapsed)
-                        title = tx("Started \(relative)", "Inició \(relative)")
-                    } else { title = tx("Running", "En marcha") }
-                case "restarting": title = tx("Restarting…", "Reiniciando…")
-                case "paused": title = tx("Paused", "En pausa")
-                case "created": title = tx("Created", "Creado")
-                default: title = tx("Stopped", "Detenido")
-                }
+    private func containerSubtitle(_ container: DockerContainer, action: DockerContainerAction?) -> some View {
+        HStack(spacing: 0) {
+            Text(containerStatus(container, action: action)).flyoutSecondary().layoutPriority(1)
+            if let image = container.Image, !image.isEmpty {
+                Text(verbatim: " · " + image).flyoutTertiary().layoutPriority(-1)
             }
         }
-        return container.Image.map { tx("\($0) · \(title)", "\($0) · \(title)") } ?? title
+        .font(.system(size: 11))
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func containerStatus(_ container: DockerContainer, action: DockerContainerAction?) -> String {
+        switch action {
+        case .start: return tx("Starting…", "Iniciando…")
+        case .stop: return tx("Stopping…", "Deteniendo…")
+        case .restart: return tx("Restarting…", "Reiniciando…")
+        case .remove: return tx("Removing…", "Eliminando…")
+        case nil: break
+        }
+        if container.exitCode == 0 { return tx("Stopped", "Detenido") }
+        if service.crashed.contains(container.id) {
+            if let exit = container.exitCode { return tx("Crashed (\(exit))", "Falló (\(exit))") }
+            return tx("Crashed", "Falló")
+        }
+        if let exit = container.exitCode { return tx("Exited (\(exit))", "Terminó (\(exit))") }
+        switch container.State {
+        case "running":
+            if let elapsed = container.uptimeSeconds {
+                let duration = abbreviatedUptime(elapsed)
+                return tx("Running · \(duration)", "En marcha · \(duration)")
+            }
+            return tx("Running", "En marcha")
+        case "restarting": return tx("Restarting…", "Reiniciando…")
+        case "paused": return tx("Paused", "En pausa")
+        case "created": return tx("Created", "Creado")
+        default: return tx("Stopped", "Detenido")
+        }
+    }
+
+    private func abbreviatedUptime(_ seconds: TimeInterval) -> String {
+        let unit: (seconds: TimeInterval, label: String)
+        switch seconds {
+        case ..<60: unit = (1, tx("s", "s"))
+        case ..<3_600: unit = (60, tx("min", "min"))
+        case ..<86_400: unit = (3_600, tx("h", "h"))
+        case ..<604_800: unit = (86_400, tx("d", "d"))
+        case ..<2_592_000: unit = (604_800, tx("wk", "sem"))
+        case ..<31_536_000: unit = (2_592_000, tx("mo", "mes"))
+        default: unit = (31_536_000, tx("yr", "a"))
+        }
+        let count = (seconds / unit.seconds).rounded(.down).formatted(.number.locale(formattingLocale))
+        return tx("\(count) \(unit.label)", "\(count) \(unit.label)")
     }
 
     @ViewBuilder private var imageList: some View {
@@ -486,29 +529,33 @@ struct DockerPane: View {
     private func imageRow(_ image: DockerImage) -> some View {
         let key = "image:" + image.id
         let reference = image.reference
-        let title = reference?.repo ?? tx("<untagged>", "<sin nombre>")
+        let title = reference?.repo ?? tx("Untagged", "Sin etiqueta")
+        let removeName = reference.map { $0.repo + ($0.tag.map { ":" + $0 } ?? "") }
+            ?? String(image.id.split(separator: ":", maxSplits: 1).last?.prefix(12) ?? "")
         let inUse = service.containers.map { image.inUse(by: $0) }
         let shown = service.listing
-        return DockerHoverRow { hovered in
-            if !service.switchingContext && confirmation?.matches(key, shown: shown) == true {
-                confirm(tx("Remove \(title)?", "¿Eliminar \(title)?")) { service.removeImage(image, shown: shown) }
-            } else {
+        return DockerHoverRow {
+            confirmable(key, shown: shown, title: tx("Remove \(removeName)?", "¿Eliminar \(removeName)?"), remove: {
+                service.removeImage(image, shown: shown)
+            }) {
                 itemRow(key: key, icon: "shippingbox", title: title, tag: reference?.tag,
                         subtitle: image.Created.flatMap { $0 > 0 ? relativeTime($0) : nil }) {
                     if inUse == true {
                         let ok = StatusColor.color(.ok, dark: dark)
                         Text(tx("In use", "En uso")).font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(ok).padding(.horizontal, 5).padding(.vertical, 3)
+                            .foregroundStyle(.primary).padding(.horizontal, 5).padding(.vertical, 3)
                             .background(ok.opacity(0.13), in: Capsule())
+                            .fixedSize()
                     } else if let bytes = image.Size, bytes >= 0 {
                         Text(size(bytes)).font(.system(size: 11)).flyoutTertiary()
                     }
-                    if hovered && !service.pendingRows.contains(key) {
-                        let help = inUse == true ? tx("This image is in use.", "Esta imagen está en uso.")
-                            : tx("Remove image", "Eliminar imagen")
-                        iconButton("trash", help) { askToRemove(key, shown: shown) }
-                            .disabled(inUse != false || service.switchingContext)
-                            .help(help)
+                } actions: {
+                    if inUse == false {
+                        actionsMenu(tx("Actions for \(removeName)", "Acciones de \(removeName)")) {
+                            Button { askToRemove(key, shown: shown) } label: {
+                                Label(tx("Remove image…", "Eliminar imagen…"), systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }
@@ -520,16 +567,17 @@ struct DockerPane: View {
         let bytes = size(dockerTotal(unused.map(\.Size)))
         let shown = service.listing
         return VStack(alignment: .leading, spacing: 4) {
-            if !service.switchingContext && confirmation?.matches("prune", shown: shown) == true {
-                confirm(tx("Remove all unused images?", "¿Eliminar todas las imágenes sin uso?")) { service.pruneImages(shown: shown) }
-                    .padding(6).flyoutSection()
-            } else if service.pendingRows.contains("prune") {
+            if service.pendingRows.contains("prune") {
                 HStack { ProgressView().controlSize(.small); Text(tx("Removing unused images…", "Eliminando imágenes sin uso…")) }
                     .font(.system(size: 11)).flyoutSecondary().padding(6)
             } else if !unused.isEmpty {
-                Row(icon: "trash", title: tx("Remove unused images…", "Eliminar imágenes sin uso…"),
-                    subtitle: tx("Frees up to \(bytes)", "Libera hasta \(bytes)")) { askToRemove("prune", shown: shown) }
-                    .disabled(service.switchingContext)
+                confirmable("prune", shown: shown, title: tx("Remove all unused images?", "¿Eliminar todas las imágenes sin uso?"), remove: {
+                    service.pruneImages(shown: shown)
+                }) {
+                    Row(icon: "trash", title: tx("Remove unused images…", "Eliminar imágenes sin uso…"),
+                        subtitle: tx("Frees up to \(bytes)", "Libera hasta \(bytes)")) { askToRemove("prune", shown: shown) }
+                        .disabled(service.switchingContext)
+                }
             }
             errorLine("prune")
         }
@@ -558,41 +606,53 @@ struct DockerPane: View {
         let names = users?.joined(separator: ", ") ?? ""
         let shown = service.listing
         let subtitle = users.map { $0.isEmpty ? tx("Unused", "Sin uso") : tx("Used by \(names)", "En uso por \(names)") }
-        return DockerHoverRow { hovered in
-            if !service.switchingContext && confirmation?.matches(key, shown: shown) == true {
-                confirm(tx("Remove \(volume.id)? Its data will be deleted forever.",
-                           "¿Eliminar \(volume.id)? Sus datos se borrarán para siempre.")) { service.removeVolume(volume, shown: shown) }
-            } else {
-                itemRow(key: key, icon: "cylinder", title: volume.id, subtitle: subtitle) {
+        return DockerHoverRow {
+            confirmable(key, shown: shown, title: tx("Remove \(volume.id)?", "¿Eliminar \(volume.id)?"),
+                        detail: tx("Data will be deleted forever.", "Los datos se borrarán para siempre."), remove: {
+                service.removeVolume(volume, shown: shown)
+            }) {
+                itemRow(key: key, icon: "cylinder", title: volume.id, subtitle: subtitle, subtitleHelp: names) {
                     if let bytes {
-                        Text(size(bytes)).font(.system(size: 11)).flyoutTertiary()
+                        Text(size(bytes)).font(.system(size: 11)).monospacedDigit().fixedSize().flyoutTertiary()
                     } else if service.usage == nil && !service.usageFailed {
                         SystemLoadingPulse { SystemSkeletonMark().frame(width: 38, height: 9) }.accessibilityHidden(true)
                     }
-                    if hovered && users?.isEmpty == true && !service.pendingRows.contains(key) {
-                        iconButton("trash", tx("Remove volume", "Eliminar volumen")) { askToRemove(key, shown: shown) }
-                            .disabled(service.switchingContext)
+                } actions: {
+                    if users?.isEmpty == true {
+                        actionsMenu(tx("Actions for \(volume.id)", "Acciones de \(volume.id)")) {
+                            Button { askToRemove(key, shown: shown) } label: {
+                                Label(tx("Remove volume…", "Eliminar volumen…"), systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    private func itemRow<Trailing: View>(key: String, icon: String, title: String, tag: String? = nil,
-                                         subtitle: String?, @ViewBuilder trailing: () -> Trailing) -> some View {
+    private func itemRow<Value: View, Actions: View>(key: String, icon: String, title: String, tag: String? = nil,
+                                                      subtitle: String?, subtitleHelp: String = "",
+                                                      @ViewBuilder value: () -> Value, @ViewBuilder actions: () -> Actions) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
                 Image(systemName: icon).frame(width: 17).flyoutSecondary().accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 0) {
                         Text(title).font(.system(size: 13))
-                        if let tag { Text(":\(tag)").font(.system(size: 11)).flyoutTertiary() }
+                        if let tag { Text(verbatim: ":" + tag).font(.system(size: 11)).flyoutTertiary() }
                     }.lineLimit(1)
-                    if let subtitle { Text(subtitle).font(.system(size: 11)).flyoutSecondary().lineLimit(1) }
+                    if let subtitle {
+                        Text(subtitle).font(.system(size: 11)).flyoutSecondary().lineLimit(1)
+                            .help(subtitleHelp)
+                    }
                 }
                 Spacer(minLength: 2)
-                trailing()
-                if service.pendingRows.contains(key) { ProgressView().controlSize(.small).frame(width: 22) }
+                value()
+                ZStack {
+                    if service.pendingRows.contains(key) { ProgressView().controlSize(.small) }
+                    else { actions() }
+                }
+                .frame(width: 24, height: 24)
             }
             errorLine(key)
         }
@@ -602,11 +662,11 @@ struct DockerPane: View {
         let shown = service.endpoint
         return VStack(spacing: 7) {
             if service.state == .starting || service.state == .stopping {
-                ProgressView().controlSize(.small).padding(.bottom, 3)
-                Text(service.state == .starting
-                     ? tx("Starting Docker… this can take a few seconds.", "Iniciando Docker… puede tardar unos segundos.")
-                     : tx("Stopping Docker…", "Deteniendo Docker…"))
-                    .font(.system(size: 13)).multilineTextAlignment(.center)
+                ProgressView().controlSize(.small)
+                if service.state == .starting {
+                    Text(tx("This can take a few seconds.", "Puede tardar unos segundos."))
+                        .font(.system(size: 11)).flyoutSecondary().multilineTextAlignment(.center)
+                }
             } else {
                 DockerWhale().fill(FlyoutStyle.secondary(dark: dark)).frame(width: 26, height: 21)
                     .accessibilityHidden(true)
@@ -651,7 +711,8 @@ struct DockerPane: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 1) {
             if service.signedIn {
-                footerLabel("person.crop.circle.badge.checkmark", tx("Signed in to Docker Hub", "Sesión iniciada en Docker Hub"))
+                Text(tx("Signed in to Docker Hub", "Sesión iniciada en Docker Hub"))
+                    .font(.system(size: 11)).flyoutSecondary().padding(.vertical, 3)
             } else {
                 Row(icon: "person.crop.circle", title: tx("Sign in to Docker Hub…", "Iniciar sesión en Docker Hub…")) { service.login() }
                     .disabled(service.dockerCLI == nil || service.endpoint == nil || service.switchingContext)
@@ -662,8 +723,8 @@ struct DockerPane: View {
             errorLine("login")
             if let totals = service.usage?.totals {
                 let used = size(totals.used), reclaimable = size(totals.reclaimable)
-                footerLabel("internaldrive",
-                            tx("Docker uses \(used) · \(reclaimable) reclaimable", "Docker usa \(used) · \(reclaimable) recuperables"))
+                Text(tx("Docker uses \(used) · \(reclaimable) reclaimable", "Docker usa \(used) · \(reclaimable) recuperables"))
+                    .font(.system(size: 11)).flyoutSecondary().padding(.vertical, 3)
             }
             if service.canOpenRuntime {
                 Row(icon: "arrow.up.forward.app", title: tx("Open \(runtimeName)", "Abrir \(runtimeName)")) { service.openRuntime() }
@@ -671,11 +732,19 @@ struct DockerPane: View {
         }
     }
 
-    private func footerLabel(_ icon: String, _ text: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).frame(width: 18).flyoutSecondary().accessibilityHidden(true)
-            Text(text).font(.system(size: 13))
-        }.padding(.vertical, 6)
+    private func actionsMenu<Items: View>(_ title: String, @ViewBuilder items: () -> Items) -> some View {
+        Menu(content: items) {
+            Image(systemName: "ellipsis").font(.system(size: 12, weight: .semibold))
+                .frame(width: 24, height: 24)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .frame(width: 24, height: 24)
+        .tint(FlyoutStyle.secondary(dark: dark))
+        .help(title)
+        .accessibilityLabel(title)
+        .disabled(service.switchingContext)
     }
 
     private func iconButton(_ icon: String, _ label: String, action: @escaping () -> Void) -> some View {
@@ -691,15 +760,40 @@ struct DockerPane: View {
         confirmation = DockerConfirmation(key: key, listing: shown)
     }
 
-    private func confirm(_ title: String, action: @escaping () -> Void) -> some View {
-        HStack(spacing: 7) {
-            Text(title).font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-            Button(tx("Cancel", "Cancelar")) { confirmation = nil }
-                .buttonStyle(.plain).flyoutSecondary()
-            Button(tx("Remove", "Eliminar")) { confirmation = nil; action() }
-                .buttonStyle(.plain).foregroundStyle(critical).disabled(service.switchingContext)
-        }.font(.system(size: 11, weight: .semibold)).padding(.vertical, 3)
+    private func confirmable<Content: View>(_ key: String, shown: DockerListing?, title: String, detail: String? = nil,
+                                             remove: @escaping () -> Void, @ViewBuilder content: () -> Content) -> some View {
+        let confirming = !service.switchingContext && confirmation?.matches(key, shown: shown) == true
+        return content()
+            .frame(minHeight: 30)
+            .opacity(confirming ? 0 : 1)
+            .allowsHitTesting(!confirming)
+            .disabled(confirming)
+            .accessibilityHidden(confirming)
+            .overlay {
+                if confirming { confirm(title, detail: detail, remove: remove) }
+            }
+    }
+
+    private func confirm(_ title: String, detail: String?, remove: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 12, weight: .medium))
+                    .lineLimit(detail == nil ? 2 : 1).truncationMode(.middle).help(title)
+                if let detail {
+                    Text(detail).font(.system(size: 11)).flyoutSecondary().fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button { confirmation = nil } label: {
+                Text(tx("Cancel", "Cancelar")).frame(minHeight: 24).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).flyoutSecondary().keyboardShortcut(.cancelAction).fixedSize()
+            Button { confirmation = nil; remove() } label: {
+                Text(tx("Remove", "Eliminar")).frame(minHeight: 24).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).foregroundStyle(critical).fixedSize()
+        }
+        .font(.system(size: 11, weight: .semibold))
     }
 
     @ViewBuilder private func errorLine(_ key: String) -> some View {
@@ -733,7 +827,8 @@ struct DockerPane: View {
             Image(systemName: icon).font(.system(size: 21)).flyoutSecondary().accessibilityHidden(true)
             Text(title).font(.system(size: 13, weight: .medium))
             if let subtitle {
-                Text(subtitle).font(.system(size: 11)).flyoutTertiary().multilineTextAlignment(.center)
+                Text((try? AttributedString(markdown: subtitle, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                     ?? AttributedString(subtitle)).font(.system(size: 11)).flyoutTertiary().multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -756,10 +851,10 @@ struct DockerPane: View {
 
 private struct DockerHoverRow<Content: View>: View {
     @State private var hovered = false
-    @ViewBuilder var content: (Bool) -> Content
+    @ViewBuilder var content: () -> Content
 
     var body: some View {
-        content(hovered)
+        content()
             .padding(.horizontal, 5).padding(.vertical, 5)
             .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(hovered ? 0.09 : 0)))

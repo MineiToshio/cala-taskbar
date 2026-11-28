@@ -63,9 +63,9 @@ enum DockerFixtures {
                         crashed: running && !sample.empty ? ["worker"] : [])
     }
 
-    static func run(dir: String) -> Never {
+    static func run(dir: String, language: String) -> Never {
         _ = NSApplication.shared
-        appLanguageOverride = "en"
+        appLanguageOverride = language
         let directory = URL(fileURLWithPath: dir, isDirectory: true)
         let panes = [
             PaneSample(name: "01-containers"),
@@ -80,18 +80,20 @@ enum DockerFixtures {
             ("08-tray-running", .running(4)), ("09-tray-starting", .starting),
             ("10-tray-off", .off), ("11-tray-crashed", .crashed(4))
         ]
+        let spanish = language == "es"
+        let selectedPanes = spanish ? panes.filter { ["01-containers", "03-images", "05-off"].contains($0.name) } : panes
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            for dark in [false, true] {
-                for sample in panes {
+            for dark in spanish ? [true] : [false, true] {
+                for sample in selectedPanes {
                     let fixture = service(for: sample)
                     let pane = DockerPane(availableHeight: 700, fixture: fixture, collapsed: ["blog"],
                                           confirmation: sample.confirmation)
                         .padding(18).frame(width: 380)
                         .flyoutControls().themedPanel(theme: .named("system"))
-                    try png(pane, name: sample.name, dark: dark, in: directory)
+                    try png(pane, name: spanish ? sample.name + "-es" : sample.name, dark: dark, in: directory)
                 }
-                for (name, state) in tray {
+                for (name, state) in spanish ? [] : tray {
                     let strip = DockerTrayMark(state: state, showCount: true)
                         .foregroundStyle(.primary.opacity(0.85))
                         .padding(.horizontal, 8)

@@ -12,6 +12,7 @@ final class FlyoutModel: ObservableObject {
     @Published var availableHeight: CGFloat = 700
     @Published var mailReaderSize = CGSize(width: 672, height: 620)
     @Published var mailMessage: MailMessage?
+    @Published var dockerConfirmation: DockerConfirmation?
     /// The pane was opened from the "^" overflow panel, so it shows a back button.
     @Published var fromMore = false
     /// Tallest height this pane has had since it was opened. The panel keeps it, so switching to a shorter page does
@@ -109,7 +110,8 @@ struct FlyoutView: View {
             case trayBatt: BatteryPane(model: model)
             case trayBright: BrightPane()
             case trayDisk: DiskPane(model: model)
-            case trayDocker: DockerPane(availableHeight: fm.availableHeight - (fm.fromMore ? 22 : 0))
+            case trayDocker:
+                DockerPane(availableHeight: fm.availableHeight - (fm.fromMore ? 22 : 0), confirmation: $fm.dockerConfirmation)
             case trayMail:
                 MailPane(availableHeight: fm.availableHeight - (fm.fromMore ? 22 : 0),
                          readerHeight: fm.mailReaderSize.height - 36, reading: $fm.mailMessage)
@@ -344,7 +346,12 @@ final class FlyoutController {
         let flyoutPanel = FlyoutPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel = flyoutPanel
         flyoutPanel.goBack = { [weak fm] in
-            guard let fm, fm.kind == trayMail, fm.mailMessage != nil else { return false }
+            guard let fm else { return false }
+            if fm.kind == trayDocker, fm.dockerConfirmation != nil {
+                fm.dockerConfirmation = nil
+                return true
+            }
+            guard fm.kind == trayMail, fm.mailMessage != nil else { return false }
             fm.mailMessage = nil
             return true
         }
@@ -442,6 +449,7 @@ final class FlyoutController {
         fittedMailReader = false
         pointerAfterMailReader = nil
         fm.mailMessage = nil
+        fm.dockerConfirmation = nil
         if kind == trayDisk { DiskService.shared.refresh(extra: ConfigStore.shared.config.diskFolders) }
         fm.fromMore = false
         fm.minHeight = 0
@@ -476,6 +484,7 @@ final class FlyoutController {
         pointerAfterMailReader = nil
         fm.kind = ""
         fm.mailMessage = nil
+        fm.dockerConfirmation = nil
         trayFrames = [:]
         removeMonitors()
         panel.orderOut(nil)
