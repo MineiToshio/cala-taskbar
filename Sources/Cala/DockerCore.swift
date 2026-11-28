@@ -2,8 +2,25 @@ import Foundation
 
 enum DockerCommand: Equatable {
     case executable(String, [String])
-    case openApp(String)
+    /// Starts an app engine in the background: the CLI when it is installed, otherwise a hidden launch of the app.
+    case startApp(bundle: String, executable: String, args: [String])
     case terminateApp(String)
+}
+
+/// Cala never opens an engine's window when it starts one. A few cheap checks hide a window that opens anyway.
+enum DockerQuietStart {
+    /// Seconds after the start during which Cala hides a window that opens by itself.
+    static let window: Double = 45
+    /// Seconds after the start of the checks that look for such a window: quick at first, when it appears,
+    /// then sparse for a slow start.
+    static let checkDelays: [Double] = (1...60).map { Double($0) * 0.1 } + [7, 8, 9, 10, 13, 17, 22, 30, 45]
+    /// Seconds after an engine app launches of the extra checks that look for its window.
+    static let launchDelays: [Double] = [0.1, 0.4, 1]
+
+    /// A start Cala made hides windows only while it is fresh. A window the user opens later is theirs.
+    static func isFresh(startedAt: Double, now: Double) -> Bool {
+        now >= startedAt && now - startedAt <= window
+    }
 }
 
 enum DockerRuntime: Equatable {
@@ -78,18 +95,31 @@ enum DockerRuntime: Equatable {
         }
     }
 
+    /// Apps whose windows Cala hides after it starts this engine. Docker Desktop shows its Dashboard from a nested app.
+    var quietBundles: [String] {
+        switch self {
+        case .desktop: return ["com.electron.dockerdesktop", "com.docker.docker"]
+        case .orbstack, .rancher: return appID.map { [$0] } ?? []
+        default: return []
+        }
+    }
+
+    private func startApp(_ executable: String, _ args: [String]) -> DockerCommand? {
+        appID.map { DockerCommand.startApp(bundle: $0, executable: executable, args: args) }
+    }
+
     func command(start: Bool, dockerCLI: Bool) -> DockerCommand? {
         switch self {
         case .desktop:
-            if start { return appID.map(DockerCommand.openApp) }
+            if start { return startApp("docker", ["desktop", "start", "--detach"]) }
             return dockerCLI ? .executable("docker", ["desktop", "stop"]) : appID.map(DockerCommand.terminateApp)
         case .colima(let profile):
             let args = profile == "default" ? [] : ["--profile", profile]
             return .executable("colima", [start ? "start" : "stop"] + args)
         case .orbstack:
-            return start ? appID.map(DockerCommand.openApp) : .executable("orb", ["stop"])
+            return start ? startApp("orb", ["start"]) : .executable("orb", ["stop"])
         case .rancher:
-            return start ? appID.map(DockerCommand.openApp) : .executable("rdctl", ["shutdown"])
+            return start ? startApp("rdctl", ["start"]) : .executable("rdctl", ["shutdown"])
         case .podman(let machine):
             return machine.map { .executable("podman", ["machine", start ? "start" : "stop", $0]) }
         case .unknown:

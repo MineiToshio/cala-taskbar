@@ -250,6 +250,72 @@ enum DockerContainerAction: String {
     var timeout: Int { self == .stop || self == .restart ? 35 : 15 }
 }
 
+/// Hides the window an engine app opens by itself right after Cala started it, as Docker Desktop does with its
+/// Dashboard. It exists only for that one start: it listens for the app launching, makes a few timed checks and
+/// then removes itself. A window the user opens later, or through the footer row, is left alone.
+@MainActor
+final class DockerWindowHider {
+    private let bundles: [String]
+    private let startedAt = ProcessInfo.processInfo.systemUptime
+    private var observer: NSObjectProtocol?
+    private var finished = false
+
+    init(bundles: [String]) {
+        self.bundles = bundles
+        observer = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            let bundleID = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+            MainActor.assumeIsolated {
+                guard let self, let bundleID, self.bundles.contains(bundleID) else { return }
+                self.checkSoon(DockerQuietStart.launchDelays)
+            }
+        }
+        checkSoon(DockerQuietStart.checkDelays)
+        DispatchQueue.main.asyncAfter(deadline: .now() + DockerQuietStart.window + 1) { [weak self] in
+            MainActor.assumeIsolated { self?.finish() }
+        }
+    }
+
+    func finish() {
+        guard !finished else { return }
+        finished = true
+        if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        observer = nil
+    }
+
+    private func checkSoon(_ delays: [Double]) {
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, !self.finished else { return }
+                    self.hideWindows()
+                }
+            }
+        }
+    }
+
+    private func hideWindows() {
+        guard DockerQuietStart.isFresh(startedAt: startedAt, now: ProcessInfo.processInfo.systemUptime) else { return finish() }
+        for bundle in bundles {
+            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundle) where !app.isHidden && !app.isTerminated {
+                // Docker Desktop activates itself when it opens its Dashboard, so being frontmost says nothing about the user.
+                if Self.hasVisibleWindow(app.processIdentifier) { app.hide() }
+            }
+        }
+    }
+
+    private static func hasVisibleWindow(_ pid: pid_t) -> Bool {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return windows.contains { window in
+            guard (window[kCGWindowOwnerPID as String] as? Int32) == pid,
+                  (window[kCGWindowLayer as String] as? Int) == 0,
+                  (window[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Double] else { return false }
+            return (bounds["Width"] ?? 0) >= 100 && (bounds["Height"] ?? 0) >= 100
+        }
+    }
+}
+
 @MainActor
 final class DockerService: ObservableObject {
     static let shared = DockerService()
@@ -288,6 +354,7 @@ final class DockerService: ObservableObject {
     private var watcher: DispatchSourceTimer?
     private var statsTimer: DispatchSourceTimer?
     private var observers: [NSObjectProtocol] = []
+    private var windowHider: DockerWindowHider?
     private var deadline: TimeInterval?
     private var engineOperation: DockerIO?
     private var probing = false
@@ -344,7 +411,8 @@ final class DockerService: ObservableObject {
         guard let command = runtime.command(start: state != .running && state != .stopping, dockerCLI: dockerCLI != nil) else { return false }
         switch command {
         case .executable(let name, _): return Self.executable(name) != nil
-        case .openApp(let id): return NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) != nil
+        case .startApp(let id, let name, _):
+            return Self.executable(name) != nil || NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) != nil
         case .terminateApp: return true
         }
     }
@@ -394,6 +462,8 @@ final class DockerService: ObservableObject {
         preferredApp = nil
         engineOperation?.cancel()
         engineOperation = nil
+        windowHider?.finish()
+        windowHider = nil
         watcher?.cancel()
         watcher = nil
         panelClosed()
@@ -431,6 +501,13 @@ final class DockerService: ObservableObject {
     func openRuntime() {
         guard lifetime != nil, let id = runtime.appID,
               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return }
+        // The user asked for the window: a pending quiet start must not hide it.
+        windowHider?.finish()
+        windowHider = nil
+        // Docker Desktop's window belongs to a nested app that Cala may have hidden after a quiet start.
+        for bundle in runtime.quietBundles {
+            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundle) where app.isHidden { app.unhide() }
+        }
         NSWorkspace.shared.open(url)
     }
 
@@ -970,6 +1047,9 @@ final class DockerService: ObservableObject {
             clearPanelReads()
         }
         deadline = uptime + (start ? 180 : 35)
+        windowHider?.finish()
+        windowHider = nil
+        if start, case .startApp = command { windowHider = DockerWindowHider(bundles: runtime.quietBundles) }
         watch(immediate: start)
         Task {
             do {
@@ -1017,10 +1097,16 @@ final class DockerService: ObservableObject {
     private func run(_ command: DockerCommand, io: DockerIO) async throws {
         guard !io.isCancelled else { throw CancellationError() }
         switch command {
-        case .openApp(let bundle):
+        case .startApp(let bundle, let name, let args):
+            // The CLI starts the engine without opening a window. Without it, launch the app hidden and in the background.
+            if Self.executable(name) != nil {
+                do { return try await run(.executable(name, args), io: io) } catch { if io.isCancelled { throw error } }
+            }
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { throw DockerSocketError.command }
             let options = NSWorkspace.OpenConfiguration()
             options.activates = false
+            options.hides = true
+            options.addsToRecentItems = false
             _ = try await NSWorkspace.shared.openApplication(at: url, configuration: options)
         case .terminateApp(let bundle):
             for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundle) {

@@ -167,14 +167,30 @@ func runChecks() throws {
     try expect("unsafe Podman machine argument is ignored",
                DockerRuntime.detect(context: "podman", path: "/tmp/podman/--help-api.sock") == .podman(nil))
     try expect("unknown runtime has no command", DockerRuntime.detect(context: "default", path: defaultPath).command(start: true, dockerCLI: true) == nil)
-    try expect("Desktop starts without CLI", DockerRuntime.desktop.command(start: true, dockerCLI: false) == .openApp("com.docker.docker"))
+    try expect("Desktop starts in the background through its CLI, with the app as fallback",
+               DockerRuntime.desktop.command(start: true, dockerCLI: false) ==
+               .startApp(bundle: "com.docker.docker", executable: "docker", args: ["desktop", "start", "--detach"]) &&
+               DockerRuntime.desktop.command(start: true, dockerCLI: true) == DockerRuntime.desktop.command(start: true, dockerCLI: false))
+    try expect("app engines hide the window they open, command-line engines have none to hide",
+               DockerRuntime.desktop.quietBundles == ["com.electron.dockerdesktop", "com.docker.docker"] &&
+               DockerRuntime.orbstack.quietBundles == ["dev.kdrag0n.MacVirt"] &&
+               DockerRuntime.rancher.quietBundles == ["io.rancherdesktop.app"] &&
+               DockerRuntime.colima("default").quietBundles.isEmpty && DockerRuntime.podman("work").quietBundles.isEmpty &&
+               DockerRuntime.unknown.quietBundles.isEmpty)
+    try expect("quiet start only covers a fresh start and checks stay few and ordered",
+               DockerQuietStart.isFresh(startedAt: 100, now: 100) && DockerQuietStart.isFresh(startedAt: 100, now: 145) &&
+               !DockerQuietStart.isFresh(startedAt: 100, now: 145.1) && !DockerQuietStart.isFresh(startedAt: 100, now: 99) &&
+               DockerQuietStart.checkDelays == DockerQuietStart.checkDelays.sorted() &&
+               DockerQuietStart.checkDelays.count <= 80 && DockerQuietStart.checkDelays.filter { $0 > 8 }.count <= 8 && DockerQuietStart.checkDelays.allSatisfy { $0 > 0 && $0 <= DockerQuietStart.window } &&
+               DockerQuietStart.launchDelays.count <= 4 && DockerQuietStart.launchDelays.allSatisfy { $0 < 5 })
     try expect("Desktop stop CLI or app", DockerRuntime.desktop.command(start: false, dockerCLI: true) == .executable("docker", ["desktop", "stop"]) &&
                DockerRuntime.desktop.command(start: false, dockerCLI: false) == .terminateApp("com.docker.docker"))
     try expect("Colima command for named profile", DockerRuntime.colima("food").command(start: false, dockerCLI: true) ==
                .executable("colima", ["stop", "--profile", "food"]))
     try expect("Colima command for default profile", DockerRuntime.colima("default").command(start: true, dockerCLI: false) ==
                .executable("colima", ["start"]))
-    try expect("OrbStack commands", DockerRuntime.orbstack.command(start: true, dockerCLI: true) == .openApp("dev.kdrag0n.MacVirt") &&
+    try expect("OrbStack commands", DockerRuntime.orbstack.command(start: true, dockerCLI: true) ==
+               .startApp(bundle: "dev.kdrag0n.MacVirt", executable: "orb", args: ["start"]) &&
                DockerRuntime.orbstack.command(start: false, dockerCLI: true) == .executable("orb", ["stop"]))
     try expect("Podman commands target the named machine",
                DockerRuntime.podman("work").command(start: true, dockerCLI: false) == .executable("podman", ["machine", "start", "work"]) &&
@@ -182,7 +198,8 @@ func runChecks() throws {
     try expect("ambiguous Podman has no commands",
                DockerRuntime.podman(nil).command(start: true, dockerCLI: true) == nil &&
                DockerRuntime.podman(nil).command(start: false, dockerCLI: true) == nil)
-    try expect("Rancher Desktop commands", DockerRuntime.rancher.command(start: true, dockerCLI: false) == .openApp("io.rancherdesktop.app") &&
+    try expect("Rancher Desktop commands", DockerRuntime.rancher.command(start: true, dockerCLI: false) ==
+               .startApp(bundle: "io.rancherdesktop.app", executable: "rdctl", args: ["start"]) &&
                DockerRuntime.rancher.command(start: false, dockerCLI: false) == .executable("rdctl", ["shutdown"]))
 
     let containers = try decode([DockerContainer].self, #"""
