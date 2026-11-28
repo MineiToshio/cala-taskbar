@@ -212,11 +212,12 @@ enum MenuBarDiagnostics {
         guard AXUIElementCopyAttributeValue(e, attr as CFString, &v) == .success, let s = v as? String else { return "" }
         return s
     }
-    private static func point(_ e: AXUIElement, _ attr: String) -> CGPoint {
+    private static func point(_ e: AXUIElement, _ attr: String) -> CGPoint? {
         var v: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, attr as CFString, &v) == .success,
+              let v, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
         var p = CGPoint.zero
-        if AXUIElementCopyAttributeValue(e, attr as CFString, &v) == .success, let v, CFGetTypeID(v) == AXValueGetTypeID() { AXValueGetValue(v as! AXValue, .cgPoint, &p) }
-        return p
+        return AXValueGetValue(v as! AXValue, .cgPoint, &p) ? p : nil
     }
 
     struct Extra: Identifiable {
@@ -226,8 +227,21 @@ enum MenuBarDiagnostics {
         let detail: String
     }
 
+    @MainActor
+    static func screenGeometry() -> MenuBarGeometry {
+        let screens = NSScreen.screens.map { screen in
+            let frame = screen.frame
+            return MenuBarGeometry.Screen(
+                frame: frame,
+                menuBarHeight: frame.maxY - screen.visibleFrame.maxY,
+                unobscuredTopAreas: [screen.auxiliaryTopLeftArea, screen.auxiliaryTopRightArea].compactMap { $0 }
+            )
+        }
+        return MenuBarGeometry(screens: screens, fallbackHeight: NSStatusBar.system.thickness)
+    }
+
     /// Icons from apps other than Control Center (which Cala handles above), in menu bar order.
-    static func extras() -> [Extra] {
+    static func extras(in geometry: MenuBarGeometry) -> [Extra] {
         var out: [(x: CGFloat, e: Extra)] = []
         for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier != "com.apple.controlcenter" {
             let el = AXUIElementCreateApplication(app.processIdentifier)
@@ -236,8 +250,8 @@ enum MenuBarDiagnostics {
             var kids: CFTypeRef?
             guard AXUIElementCopyAttributeValue(bar as! AXUIElement, kAXChildrenAttribute as CFString, &kids) == .success, let list = kids as? [AXUIElement] else { continue }
             for (i, item) in list.enumerated() {
-                let p = point(item, kAXPositionAttribute)
-                guard p.x > 0 else { continue }       // x <= 0: the app keeps it hidden
+                guard let p = point(item, kAXPositionAttribute),
+                      geometry.contains(p) else { continue }
                 let bundle = app.bundleIdentifier ?? "?"
                 let name = bundle == "com.apple.TextInputMenuAgent" ? tx("Keyboard language", "Idioma del teclado") : (app.localizedName ?? bundle)
                 out.append((p.x, Extra(id: "\(bundle)#\(i)", app: name, bundle: bundle, detail: string(item, kAXDescriptionAttribute))))
@@ -255,8 +269,8 @@ enum MenuBarDiagnostics {
             var kids: CFTypeRef?
             guard AXUIElementCopyAttributeValue(bar as! AXUIElement, kAXChildrenAttribute as CFString, &kids) == .success, let list = kids as? [AXUIElement] else { continue }
             for item in list {
-                let p = point(item, kAXPositionAttribute)
-                log("menubar-extra: x=\(Int(p.x)) app=\(app.localizedName ?? "?") (\(app.bundleIdentifier ?? "?")) title=\(string(item, kAXTitleAttribute)) desc=\(string(item, kAXDescriptionAttribute)) id=\(string(item, "AXIdentifier"))")
+                let x = point(item, kAXPositionAttribute).map { String(Int($0.x)) } ?? "?"
+                log("menubar-extra: x=\(x) app=\(app.localizedName ?? "?") (\(app.bundleIdentifier ?? "?")) title=\(string(item, kAXTitleAttribute)) desc=\(string(item, kAXDescriptionAttribute)) id=\(string(item, "AXIdentifier"))")
                 found += 1
             }
         }

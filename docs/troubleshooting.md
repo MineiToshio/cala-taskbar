@@ -35,7 +35,7 @@
 An unreadable or malformed configuration is preserved as `~/Library/Application Support/Cala/config.json.bad` when possible, and the app uses defaults. Mistyped individual fields use their defaults while valid fields are retained; the bar's numeric settings are clamped (the saved original Dock values are never altered). Check `config:` log entries before recovering the backup. If the invalid file cannot be preserved, saving is disabled for that run so the original is not overwritten.
 
 ## Known limits
-- **Third-party menu bar icons** cannot be moved into the taskbar. Auto-hide the menu bar instead.
+- **Third-party menu bar icons** stay in the macOS menu bar at the top of the screen. In Cala’s bar settings, you can hide the whole menu bar and bring it back by moving the pointer to the top edge.
 - **Notes (and similar apps)** keep invisible windows of closed notes. They are filtered out: windows macOS does not report are not listed unless the app is hidden. A real window on another Space that Accessibility does not report will not appear in the preview.
 - **Space reservation** is an approximation (it shrinks the active window), only on the primary screen and only with auto-hide off. Windows that reject the requested height are skipped until the app restarts.
 - **Notifications** from other apps cannot be read by macOS apps, so the clock panel only links to the notification settings.

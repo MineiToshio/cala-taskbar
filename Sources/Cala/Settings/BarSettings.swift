@@ -172,8 +172,9 @@ struct OtherMenuBarIcons: View {
 
     private func reload() {
         loaded = false
+        let geometry = MenuBarDiagnostics.screenGeometry()
         DispatchQueue.global(qos: .userInitiated).async {
-            let found = MenuBarDiagnostics.extras()
+            let found = MenuBarDiagnostics.extras(in: geometry)
             DispatchQueue.main.async { items = found; loaded = true }
         }
     }
@@ -275,7 +276,9 @@ struct BarSettingsPane: View {
 
     private var menuBar: some View {
         Card {
-            SettingRow(title: tx("Hide the whole menu bar", "Ocultar toda la barra de menús"), caption: tx("It hides completely and reappears when you move the mouse to the top edge of the screen. macOS does not allow removing it entirely. Turn it off and it is left exactly as it was.", "Se esconde por completo y reaparece al llevar el mouse al borde superior de la pantalla. macOS no permite quitarla del todo. Al apagarlo, queda exactamente como estaba.")) {
+            SettingRow(title: tx("Hide the whole menu bar", "Ocultar toda la barra de menús"),
+                       caption: tx("Your app icons stay in the menu bar at the top of the screen. If you hide it, move the pointer to the top edge to show it. Turn this setting off to restore the previous behavior.",
+                                   "Los iconos de tus apps siguen en la barra de menús de arriba. Si la ocultas, lleva el puntero al borde superior para verla. Desactiva esta opción para recuperar el comportamiento anterior.")) {
                 Toggle("", isOn: Binding(get: { store.config.hideMenuBar }, set: { MenuBarControl.setHidden($0, store) })).toggleStyle(.switch).labelsHidden()
                     .accessibilityLabel(tx("Hide the whole menu bar", "Ocultar toda la barra de menús"))
             }
