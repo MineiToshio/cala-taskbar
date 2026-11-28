@@ -7,23 +7,54 @@ enum DockerCommand: Equatable {
 }
 
 enum DockerRuntime: Equatable {
-    case desktop, colima(String), orbstack, rancher, podman, unknown
+    case desktop, colima(String), orbstack, rancher, podman(String?), unknown
 
     static let appRuntimes: [Self] = [.desktop, .orbstack, .rancher]
 
-    static func detect(context: String, path: String) -> Self {
+    static func detect(context: String, path: String, resolvedPath: String? = nil) -> Self {
+        let resolved = resolvedPath ?? path
         let name = context.lowercased()
-        let parts = path.split(separator: "/")
-        if name == "desktop-linux" || path.hasSuffix("/.docker/run/docker.sock") { return .desktop }
+        let parts = resolved.split(separator: "/")
+        if name == "desktop-linux" || [path, resolved].contains(where: { $0.hasSuffix("/.docker/run/docker.sock") }) { return .desktop }
         if let i = parts.firstIndex(of: ".colima"), i + 2 < parts.count, parts.last == "docker.sock" {
             return .colima(String(parts[i + 1]))
         }
         if name.hasPrefix("colima-"), context.count > 7 { return .colima(String(context.dropFirst(7))) }
         if name.hasPrefix("colima") { return .colima("default") }
-        if name == "orbstack" || path.hasSuffix("/.orbstack/run/docker.sock") { return .orbstack }
-        if name == "rancher-desktop" || path.hasSuffix("/.rd/docker.sock") { return .rancher }
-        if name.hasPrefix("podman") || path.lowercased().contains("podman") { return .podman }
+        if name == "orbstack" || [path, resolved].contains(where: { $0.hasSuffix("/.orbstack/run/docker.sock") }) { return .orbstack }
+        if name == "rancher-desktop" || [path, resolved].contains(where: { $0.hasSuffix("/.rd/docker.sock") }) { return .rancher }
+        let socketNames = Set([path, resolved].compactMap(podmanSocketName))
+        let genericContexts = ["podman-machine", "podman-rootful", "podman-rootless"]
+        let contextName = name.hasPrefix("podman-") && !genericContexts.contains(name) && validMachineName(context) ? context : nil
+        if name.hasPrefix("podman") || [path, resolved].contains(where: { $0.lowercased().contains("podman") }) {
+            // A context can be an arbitrary alias. Explicit machine names must agree with the socket.
+            let names = socketNames.union([contextName].compactMap { $0 })
+            return .podman(names.count == 1 ? names.first : nil)
+        }
         return .unknown
+    }
+
+    private static func podmanSocketName(_ path: String) -> String? {
+        let parts = path.split(separator: "/")
+        guard parts.count >= 2 else { return nil }
+        let filename = parts[parts.count - 1]
+        let parent = parts[parts.count - 2]
+        let name: String
+        if parent == "podman", filename.hasSuffix("-api.sock") {
+            name = String(filename.dropLast("-api.sock".count))
+        } else if filename == "podman.sock", parts.dropLast(2).contains("podman") {
+            name = String(parent)
+            guard !["podman", "machine", "applehv", "libkrun", "qemu"].contains(name) else { return nil }
+        } else {
+            return nil
+        }
+        return validMachineName(name) ? name : nil
+    }
+
+    private static func validMachineName(_ name: String) -> Bool {
+        let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-".utf8
+        guard let first = name.utf8.first, first != 45, first != 46 else { return false }
+        return name.utf8.allSatisfy(allowed.contains)
     }
 
     // These are product names. The pane localizes the fallback for an unidentified engine.
@@ -59,8 +90,8 @@ enum DockerRuntime: Equatable {
             return start ? appID.map(DockerCommand.openApp) : .executable("orb", ["stop"])
         case .rancher:
             return start ? appID.map(DockerCommand.openApp) : .executable("rdctl", ["shutdown"])
-        case .podman:
-            return .executable("podman", ["machine", start ? "start" : "stop"])
+        case .podman(let machine):
+            return machine.map { .executable("podman", ["machine", start ? "start" : "stop", $0]) }
         case .unknown:
             return nil
         }
@@ -87,14 +118,17 @@ struct DockerResolution {
 enum DockerDiscovery {
     static let defaultPath = "/var/run/docker.sock"
 
-    struct Config: Decodable {
+    struct Config: Equatable {
         let currentContext: String?
-        // Read registry names only. The value of each key is ignored.
-        let auths: [String: IgnoredJSON]?
-    }
+        let registryNames: Set<String>
 
-    struct IgnoredJSON: Decodable {
-        init(from decoder: Decoder) throws {}
+        static func read(_ data: Data?) -> Self {
+            guard let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return Self(currentContext: nil, registryNames: [])
+            }
+            let names = (json["auths"] as? [String: Any]).map { Set($0.keys) } ?? []
+            return Self(currentContext: json["currentContext"] as? String, registryNames: names)
+        }
     }
 
     private struct Context: Decodable {
@@ -121,7 +155,7 @@ enum DockerDiscovery {
         let path = String(host.dropFirst(7))
         let expanded = path.hasPrefix("~/") ? home + path.dropFirst() : path
         guard expanded.hasPrefix("/"), !expanded.utf8.contains(0) else { return nil }
-        return (expanded as NSString).standardizingPath
+        return expanded
     }
 
     static func contextPaths(_ metadata: [Data], home: String) -> [String] {
@@ -134,54 +168,57 @@ enum DockerDiscovery {
         return Dictionary(entries.map { ($0.Name, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
-    static func ownsDefault(_ resolvedPath: String, home: String) -> Bool {
-        let path = (resolvedPath as NSString).standardizingPath
-        let own = (home as NSString).standardizingPath
-        return !path.hasPrefix("/Users/") || path.hasPrefix("/Users/Shared/") ||
-            path == own || path.hasPrefix(own + "/")
+    static func ownsSocket(_ canonicalPath: String, home: String, otherHomes: [String] = []) -> Bool {
+        func comparable(_ value: String) -> String {
+            let volume = "/System/Volumes/Data/"
+            return value.lowercased().hasPrefix(volume.lowercased()) ? "/" + String(value.dropFirst(volume.count)) : value
+        }
+        func includes(_ home: String, _ path: String) -> Bool {
+            path == home || path.hasPrefix(home + "/")
+        }
+        let path = comparable(canonicalPath)
+        guard path.hasPrefix("/") else { return false }
+        if includes(comparable(home), path) { return true }
+        if otherHomes.contains(where: { includes(comparable($0), path) }) { return false }
+        return !path.lowercased().hasPrefix("/users/") || includes("/Users/Shared", path)
     }
 
-    static func resolve(home: String, config: Data?, metadata: [Data], existing: Set<String>,
+    static func resolve(home: String, config: Config, metadata: [Data], existing: Set<String>,
                         resolved: [String: String], known: [(name: String, path: String)] = [],
-                        preferredApp: DockerRuntime? = nil) -> DockerResolution {
-        let config = config.flatMap { try? JSONDecoder().decode(Config.self, from: $0) }
-        let current = config?.currentContext.flatMap { $0.isEmpty ? nil : $0 } ?? "default"
+                        preferredApp: DockerRuntime? = nil, canonicalHome: String? = nil, otherHomes: [String] = []) -> DockerResolution {
+        let current = config.currentContext.flatMap { $0.isEmpty ? nil : $0 } ?? "default"
         let contexts = contexts(metadata)
-        func endpoint(_ name: String, _ path: String, isContext: Bool = true) -> DockerEndpoint {
-            let real = resolved[path] ?? path
-            let runtime = DockerRuntime.detect(context: name, path: path)
+        func endpoint(_ name: String, _ path: String, isContext: Bool = true) -> DockerEndpoint? {
+            guard let real = resolved[path], ownsSocket(real, home: canonicalHome ?? home, otherHomes: otherHomes) else { return nil }
             return DockerEndpoint(context: name, path: path, resolvedPath: real,
-                                  runtime: runtime == .unknown ? DockerRuntime.detect(context: name, path: real) : runtime,
+                                  runtime: DockerRuntime.detect(context: name, path: path, resolvedPath: real),
                                   isContext: isContext)
         }
-        let fallback = endpoint("default", defaultPath)
-        let ownDefault = ownsDefault(fallback.resolvedPath, home: home)
         let named = contexts.keys.sorted().compactMap { name -> DockerEndpoint? in
             guard name != "default", let host = contexts[name]?.Endpoints?["docker"]?.Host,
-                  let path = socketPath(host, home: home), path != defaultPath || ownDefault else { return nil }
+                  let path = socketPath(host, home: home) else { return nil }
             return endpoint(name, path)
         }
-        let discovered = known.map { endpoint($0.name, $0.path, isContext: false) }
-        let defaultEngine = ownDefault ? fallback : nil
-        let liveNamed = (named + discovered).filter { existing.contains($0.path) }
+        let discovered = known.compactMap { endpoint($0.name, $0.path, isContext: false) }
+        let defaultEngine = endpoint("default", defaultPath)
+        let liveNamed = (named + discovered).filter { existing.contains($0.resolvedPath) }
+        let liveDefault = defaultEngine.flatMap { existing.contains($0.resolvedPath) ? $0 : nil }
 
         let active: DockerEndpoint?
         if current != "default", contexts[current] != nil {
             active = named.first { $0.context == current }
-        } else if let defaultEngine, existing.contains(defaultPath) {
-            active = defaultEngine
         } else {
-            active = liveNamed.first ?? (named + discovered).first { $0.runtime == preferredApp } ?? defaultEngine
+            let direct = liveNamed.first { $0.isContext && $0.path == $0.resolvedPath }
+            active = liveDefault ?? direct ?? liveNamed.first ?? (named + discovered).first { $0.runtime == preferredApp } ?? defaultEngine
         }
 
         var seen = Set<String>()
-        let candidates = [active].compactMap { $0 } + named +
-            (existing.contains(defaultPath) ? [defaultEngine].compactMap { $0 } : []) + liveNamed.filter { !$0.isContext }
+        let candidates = [active].compactMap { $0 } + named + [liveDefault].compactMap { $0 } + liveNamed.filter { !$0.isContext }
         let engines = candidates.filter { seen.insert($0.resolvedPath).inserted }
-        let signedIn = config?.auths?.keys.contains { $0.contains("docker.io") } ?? false
-        return DockerResolution(active: active, engines: engines, hasSocket: !liveNamed.isEmpty ||
-                                (ownDefault && existing.contains(defaultPath)), signedIn: signedIn)
+        let signedIn = config.registryNames.contains { $0.contains("docker.io") }
+        return DockerResolution(active: active, engines: engines, hasSocket: !liveNamed.isEmpty || liveDefault != nil, signedIn: signedIn)
     }
+
 }
 
 struct DockerPort: Decodable {
@@ -240,11 +277,41 @@ struct DockerContainer: Decodable, Identifiable {
         default: return nil
         }
     }
-    var publishedPort: Int? {
-        Set((Ports ?? []).filter { $0.Type?.lowercased() == "tcp" }.compactMap(\.PublicPort))
-            .filter { (1...65535).contains($0) }.min()
+    var publishedPort: DockerPublishedPort? { DockerPublishedPort.first(in: Ports ?? []) }
+
+}
+
+struct DockerPublishedPort: Equatable {
+    let number: Int
+    let ip: String
+
+    var url: URL? {
+        guard !ip.isEmpty else { return nil }
+        let host: String
+        if ip == "0.0.0.0" || ip == "::" {
+            host = "localhost"
+        } else if ip.contains(":") {
+            let digits = Set("0123456789abcdefABCDEF:.".utf8)
+            guard ip.utf8.allSatisfy(digits.contains) else { return nil }
+            host = "[\(ip)]"
+        } else {
+            let octets = ip.split(separator: ".", omittingEmptySubsequences: false)
+            guard octets.count == 4, octets.allSatisfy({ UInt8($0) != nil }) else { return nil }
+            host = ip
+        }
+        return URL(string: "http://\(host):\(number)")
     }
-    var publishedURL: URL? { publishedPort.flatMap { URL(string: "http://localhost:\($0)") } }
+
+    static func first(in ports: [DockerPort]) -> Self? {
+        // min() preserves the first binding on ties. A second IPv4/IPv6 record
+        // for the same public port must not replace the selected binding's IP.
+        ports.lazy.compactMap { port -> Self? in
+            guard port.Type?.lowercased() == "tcp", let number = port.PublicPort, (1...65535).contains(number),
+                  let ip = port.IP else { return nil }
+            let publication = Self(number: number, ip: ip)
+            return publication.url == nil ? nil : publication
+        }.min { $0.number < $1.number }
+    }
 }
 
 struct DockerGroup: Identifiable {
@@ -400,20 +467,27 @@ struct DockerEvent: Decodable {
 struct DockerCrashes {
     private(set) var ids = Set<String>()
     private var stopEvents: [String: TimeInterval] = [:]
+    private var calaStops: [String: TimeInterval] = [:]
 
     mutating func clear() { ids.removeAll() }
-    mutating func started(_ id: String) { ids.remove(id) }
+    mutating func suppressStop(_ id: String, until expiry: TimeInterval) { calaStops[id] = expiry }
+    mutating func cancelStop(_ id: String) { calaStops[id] = nil }
 
-    mutating func receive(_ event: DockerEvent, calaStopped: Set<String>) {
+    mutating func receive(_ event: DockerEvent, now: TimeInterval) {
         guard event.Type == "container", let id = event.Actor?.ID, !id.isEmpty else { return }
         let time = event.time
         if let time { stopEvents = stopEvents.filter { $0.value >= time - 15 } }
+        calaStops = calaStops.filter { $0.value >= now }
         switch event.Action {
         case "kill", "stop": stopEvents[id] = time
-        case "start", "destroy": ids.remove(id)
+        case "start", "destroy":
+            ids.remove(id)
+            cancelStop(id)
+            stopEvents[id] = nil
         case "die":
+            let suppressed = calaStops.removeValue(forKey: id) != nil
             guard let raw = event.Actor?.Attributes?["exitCode"], let code = Int(raw), code != 0,
-                  !calaStopped.contains(id) else { return }
+                  !suppressed else { return }
             if let time, let stop = stopEvents[id], (0...15).contains(time - stop) { return }
             ids.insert(id)
         default: break
@@ -421,10 +495,61 @@ struct DockerCrashes {
     }
 }
 
+struct DockerEventDebounce {
+    private var firstEvent: TimeInterval?
+
+    mutating func delay(afterEventAt now: TimeInterval) -> TimeInterval {
+        let first = firstEvent ?? now
+        firstEvent = first
+        return max(0, min(0.3, first + 1 - now))
+    }
+
+    mutating func reset() { firstEvent = nil }
+}
+
+struct DockerListing: Equatable {
+    let socket: String
+    private let generation = UUID()
+
+    func matches(current: Self?, endpoint: DockerEndpoint?) -> Bool {
+        self == current && socket == endpoint?.resolvedPath
+    }
+}
+
+struct DockerConfirmation {
+    let key: String
+    let listing: DockerListing
+
+    func matches(_ key: String, shown: DockerListing?) -> Bool {
+        self.key == key && listing == shown
+    }
+}
+
+struct DockerUsageLoad {
+    private var request: UUID?
+
+    mutating func begin() -> UUID? {
+        guard request == nil else { return nil }
+        let token = UUID()
+        request = token
+        return token
+    }
+
+    mutating func invalidate() { request = nil }
+    func accepts(_ token: UUID) -> Bool { request == token }
+}
+
 enum DockerEngineState: Equatable {
     enum Reason { case connection, context, command, timedOut }
 
     case notInstalled, stopped, starting, running, stopping, unreachable(Reason)
+
+    var observesRuntimeApps: Bool {
+        switch self {
+        case .stopped, .starting, .unreachable: return true
+        default: return false
+        }
+    }
 }
 
 enum DockerGlyphState: Equatable {

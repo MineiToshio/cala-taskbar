@@ -2,8 +2,10 @@ import Darwin
 import Foundation
 
 enum DockerLocal {
+    private static let accountLock = NSLock()
+
     static func discover(home: String = NSHomeDirectory(), preferredApp: DockerRuntime? = nil) -> DockerResolution {
-        let config = try? Data(contentsOf: URL(fileURLWithPath: home + "/.docker/config.json"))
+        let config = DockerDiscovery.Config.read(try? Data(contentsOf: URL(fileURLWithPath: home + "/.docker/config.json")))
         let root = URL(fileURLWithPath: home + "/.docker/contexts/meta", isDirectory: true)
         let folders = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
         let metadata = folders.sorted().compactMap {
@@ -12,15 +14,31 @@ enum DockerLocal {
         let profiles = (try? FileManager.default.contentsOfDirectory(atPath: home + "/.colima")) ?? []
         let known = DockerDiscovery.knownPaths(home: home, colimaProfiles: profiles.filter { !$0.hasPrefix(".") })
         let paths = Set(known.map(\.path) + DockerDiscovery.contextPaths(metadata, home: home) + [DockerDiscovery.defaultPath])
-        let resolved = Dictionary(uniqueKeysWithValues: paths.map { ($0, realSocketPath($0)) })
-        let existing = paths.filter { path in
-            if path == DockerDiscovery.defaultPath,
-               !DockerDiscovery.ownsDefault(resolved[path] ?? path, home: home) { return false }
-            return isSocket(path)
+        let canonicalHome = realSocketPath(home) ?? home
+        let otherHomes = accountLock.withLock {
+            var homes: [String] = []
+            setpwent()
+            defer { endpwent() }
+            while let account = getpwent() {
+                let uid = account.pointee.pw_uid
+                guard (uid == 0 || uid >= 500), uid != getuid(),
+                      let directory = account.pointee.pw_dir else { continue }
+                let path = String(cString: directory)
+                if path.hasPrefix("/"), path != "/", let canonical = realSocketPath(path) {
+                    homes.append(canonical)
+                }
+            }
+            return homes
+        }
+        let resolved = Dictionary(uniqueKeysWithValues: paths.compactMap { path in
+            realSocketPath(path).map { (path, $0) }
+        })
+        let existing = Set(resolved.values).filter {
+            DockerDiscovery.ownsSocket($0, home: canonicalHome, otherHomes: otherHomes) && isSocket($0)
         }
         return DockerDiscovery.resolve(home: home, config: config, metadata: metadata,
-                                       existing: Set(existing), resolved: resolved, known: known,
-                                       preferredApp: preferredApp)
+                                       existing: existing, resolved: resolved, known: known,
+                                       preferredApp: preferredApp, canonicalHome: canonicalHome, otherHomes: otherHomes)
     }
 
     static func isSocket(_ path: String) -> Bool {
@@ -28,25 +46,37 @@ enum DockerLocal {
         return stat(path, &info) == 0 && info.st_mode & S_IFMT == S_IFSOCK
     }
 
-    static func realSocketPath(_ path: String) -> String {
+    static func realSocketPath(_ path: String) -> String? {
         if let real = realpath(path, nil) {
             defer { free(real) }
             return String(cString: real)
         }
-        let url = URL(fileURLWithPath: path)
-        // The symlink can be readable even when the other user's socket is down or inaccessible.
-        if let link = try? FileManager.default.destinationOfSymbolicLink(atPath: path) {
-            let target = link.hasPrefix("/") ? URL(fileURLWithPath: link) :
-                url.deletingLastPathComponent().appendingPathComponent(link)
-            return target.resolvingSymlinksInPath().standardizedFileURL.path
+        // Resolve every existing component even when the final socket doesn't exist yet.
+        // A dangling symlink can still point into another account's home.
+        var remaining = Array(path.split(separator: "/").reversed())
+        var prefix: [Substring] = []
+        var links = 0
+        while let part = remaining.popLast() {
+            if part == "." { continue }
+            if part == ".." { _ = prefix.popLast(); continue }
+            let candidate = "/" + (prefix + [part]).joined(separator: "/")
+            if let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: candidate) {
+                links += 1
+                guard links <= 32 else { return nil }
+                if destination.hasPrefix("/") { prefix.removeAll() }
+                remaining.append(contentsOf: destination.split(separator: "/").reversed())
+            } else {
+                prefix.append(part)
+            }
         }
-        return url.resolvingSymlinksInPath().path
+        return "/" + prefix.joined(separator: "/")
     }
 
     static func socketPath(for endpoint: DockerEndpoint, home: String = NSHomeDirectory()) -> String? {
-        guard endpoint.path == DockerDiscovery.defaultPath else { return endpoint.path }
-        let real = realSocketPath(endpoint.path)
-        return DockerDiscovery.ownsDefault(real, home: home) ? real : nil
+        let ownHome = realSocketPath(home) ?? home
+        guard let real = realSocketPath(endpoint.path), real == endpoint.resolvedPath,
+              DockerDiscovery.ownsSocket(real, home: ownHome) else { return nil }
+        return real
     }
 }
 
@@ -106,7 +136,7 @@ final class DockerIO: @unchecked Sendable {
 }
 
 enum DockerSocketError: Error {
-    case path, posix(Int32), command
+    case path, endpointChanged, posix(Int32), command
 }
 
 enum DockerSocket {
@@ -122,7 +152,7 @@ enum DockerSocket {
     }
 
     static func events(_ endpoint: DockerEndpoint, io: DockerIO,
-                       onEvent: (DockerEvent) -> Void) throws {
+                       onReady: () -> Void, onEvent: (DockerEvent) -> Void) throws {
         let filter = dockerURLComponent(#"{"type":["container"]}"#)
         try connection(endpoint, "/events?filters=" + filter, io: io) { fd in
             var header = Data()
@@ -132,13 +162,13 @@ enum DockerSocket {
                 do { response = try DockerHTTPHead.parse(header) }
                 catch DockerHTTPError.incomplete { continue }
                 guard response.head.status == 200 else { throw DockerHTTPError.status(response.head.status) }
-                // After the handshake the engine can be idle indefinitely. Cancellation interrupts read().
+                // A peer that already closed can reject this change. Still deliver the buffered events.
                 var wait = timeval()
-                guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, socklen_t(MemoryLayout.size(ofValue: wait))) == 0
-                else { throw DockerSocketError.posix(errno) }
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, socklen_t(MemoryLayout.size(ofValue: wait)))
+                onReady()
                 var stream = DockerEventStream(chunked: response.head.isChunked)
                 for event in try stream.append(response.remainder) { onEvent(event) }
-                while !stream.finished, let bytes = try read(fd, io: io) {
+                while !stream.finished, let bytes = try read(fd, io: io, allowIdle: true) {
                     for event in try stream.append(bytes) { onEvent(event) }
                 }
                 return
@@ -194,14 +224,14 @@ enum DockerSocket {
         return try use(fd)
     }
 
-    private static func read(_ fd: Int32, io: DockerIO) throws -> Data? {
+    private static func read(_ fd: Int32, io: DockerIO, allowIdle: Bool = false) throws -> Data? {
         var buffer = [UInt8](repeating: 0, count: 16 * 1024)
         while !io.isCancelled {
             let count = Darwin.read(fd, &buffer, buffer.count)
             if count > 0 { return Data(buffer.prefix(count)) }
             if count == 0 { return nil }
             let error = errno
-            if error == EINTR { continue }
+            if error == EINTR || (allowIdle && error == EAGAIN) { continue }
             throw DockerSocketError.posix(error)
         }
         throw CancellationError()
@@ -226,6 +256,7 @@ final class DockerService: ObservableObject {
 
     @Published private(set) var state: DockerEngineState = .notInstalled
     @Published private(set) var endpoint: DockerEndpoint?
+    @Published private(set) var listing: DockerListing?
     @Published private(set) var engines: [DockerEndpoint] = []
     @Published private(set) var runtime: DockerRuntime = .unknown
     @Published private(set) var containers: [DockerContainer]?
@@ -244,10 +275,13 @@ final class DockerService: ObservableObject {
     @Published private(set) var failedLoads = Set<DockerTab>()
     @Published private(set) var usageFailed = false
 
+    private let detection = DispatchQueue(label: "Cala.docker.discovery", qos: .utility)
     private let requests = DispatchQueue(label: "Cala.docker.http", qos: .utility)
     private let events = DispatchQueue(label: "Cala.docker.events", qos: .utility)
     private let commands = DispatchQueue(label: "Cala.docker.commands", qos: .utility)
     private var lifetime: DockerIO?
+    private var discoveryID: UUID?
+    private var preferredApp: DockerRuntime?
     private var connection = DockerIO()
     private var eventIO: DockerIO?
     private var panelIO: DockerIO?
@@ -262,13 +296,13 @@ final class DockerService: ObservableObject {
     private var refreshAgain = false
     private var loadingTabs = Set<DockerTab>()
     private var reloadTabs = Set<DockerTab>()
-    private var requestedUsage = false
+    private var usageLoad = DockerUsageLoad()
     private var statsTask: Task<Void, Never>?
     private var refreshWork: DispatchWorkItem?
     private var usageWork: DispatchWorkItem?
     private var errorWork: [String: DispatchWorkItem] = [:]
     private var crashHistory = DockerCrashes()
-    private var calaStops: [String: TimeInterval] = [:]
+    private var refreshDebounce = DockerEventDebounce()
     private var panelVisible = false
 
     var available: Bool { state != .notInstalled }
@@ -286,6 +320,9 @@ final class DockerService: ObservableObject {
         service.state = state
         service.tab = tab
         service.runtime = .desktop
+        service.endpoint = DockerEndpoint(context: "desktop-linux", path: "/fixture/docker.sock",
+                                          resolvedPath: "/fixture/docker.sock", runtime: .desktop, isContext: true)
+        service.listing = DockerListing(socket: "/fixture/docker.sock")
         service.containers = containers
         service.images = images
         service.volumes = volumes
@@ -320,32 +357,45 @@ final class DockerService: ObservableObject {
         guard lifetime == nil else { return }
         lifetime = DockerIO()
         discover()
+    }
+
+    private func updateWorkspaceObservers() {
+        guard lifetime != nil, state.observesRuntimeApps else {
+            removeWorkspaceObservers()
+            return
+        }
+        guard observers.isEmpty else { return }
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 let bundleID = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
                 guard DockerRuntime.appRuntimes.contains(where: { $0.appID == bundleID }) else { return }
                 MainActor.assumeIsolated {
-                    guard let self, self.lifetime != nil, !self.switchingContext else { return }
+                    guard let self, self.state.observesRuntimeApps, !self.switchingContext else { return }
                     self.discover()
-                    self.probe()
                 }
             })
         }
+    }
+
+    private func removeWorkspaceObservers() {
+        observers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        observers.removeAll()
     }
 
     func stop() {
         guard let lifetime else { return }
         lifetime.cancel()
         self.lifetime = nil
+        discoveryID = nil
+        preferredApp = nil
         engineOperation?.cancel()
         engineOperation = nil
         watcher?.cancel()
         watcher = nil
         panelClosed()
         resetConnection()
-        observers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
-        observers.removeAll()
+        removeWorkspaceObservers()
         endpoint = nil
         engines = []
         runtime = .unknown
@@ -362,7 +412,6 @@ final class DockerService: ObservableObject {
         crashHistory.clear()
         crashed = []
         if !switchingContext { discover() }
-        if state == .running { startPanelReads() }
     }
 
     func panelClosed() {
@@ -383,11 +432,27 @@ final class DockerService: ObservableObject {
     }
 
     private func discover() {
+        guard let lifetime else { return }
         let app = DockerRuntime.appRuntimes.first {
             $0.appID.flatMap(NSWorkspace.shared.urlForApplication(withBundleIdentifier:)) != nil
         }
-        let detected = DockerLocal.discover(preferredApp: app)
-        dockerCLI = Self.executable("docker")
+        let generation = UUID()
+        discoveryID = generation
+        detection.async { [weak self] in
+            guard !lifetime.isCancelled else { return }
+            let detected = DockerLocal.discover(preferredApp: app)
+            let cli = Self.executable("docker")
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.lifetime === lifetime, self.discoveryID == generation else { return }
+                self.discoveryID = nil
+                self.applyDiscovery(detected, cli: cli, app: app)
+            }
+        }
+    }
+
+    private func applyDiscovery(_ detected: DockerResolution, cli: String?, app: DockerRuntime?) {
+        preferredApp = app
+        dockerCLI = cli
         signedIn = detected.signedIn
         engines = detected.engines
         let next = detected.active
@@ -403,6 +468,7 @@ final class DockerService: ObservableObject {
                 state = .notInstalled
                 watcher?.cancel()
                 watcher = nil
+                removeWorkspaceObservers()
             }
             return
         }
@@ -410,18 +476,22 @@ final class DockerService: ObservableObject {
         if state != .running {
             if next == nil && deadline == nil { state = .unreachable(.context) }
             watch(immediate: true)
+        } else if panelVisible {
+            if containers == nil || failedLoads.contains(.containers) { refreshContainers() }
+            startPanelReads()
         }
     }
 
     private func resetConnection(keepContainers: Bool = false) {
         connection.cancel()
         connection = DockerIO()
+        listing = nil
         disconnectEvents()
         clearPanelReads()
         if !keepContainers { containers = nil }
+        failedLoads = []
         crashHistory = DockerCrashes()
         crashed = []
-        calaStops = [:]
         probing = false
         retryProbe = false
         refreshing = false
@@ -438,9 +508,11 @@ final class DockerService: ObservableObject {
         eventIO = nil
         refreshWork?.cancel()
         refreshWork = nil
+        refreshDebounce.reset()
     }
 
     private func watch(immediate: Bool = false) {
+        updateWorkspaceObservers()
         watcher?.cancel()
         watcher = nil
         guard lifetime != nil, available, endpoint != nil || deadline != nil else { return }
@@ -456,13 +528,14 @@ final class DockerService: ObservableObject {
     }
 
     private func probe(coalesce: Bool = true) {
-        guard lifetime != nil, !switchingContext else { return }
+        guard lifetime != nil, !switchingContext, discoveryID == nil else { return }
         if let deadline, uptime >= deadline {
             self.deadline = nil
             engineOperation?.cancel()
             engineOperation = nil
             if state == .starting {
                 state = .unreachable(.timedOut)
+                disconnectEvents()
                 watch()
                 return
             }
@@ -475,9 +548,19 @@ final class DockerService: ObservableObject {
         probing = true
         let io = connection
         requests.async { [weak self] in
-            let exists = DockerLocal.socketPath(for: endpoint).map(DockerLocal.isSocket) == true
+            guard !io.isCancelled else { return }
+            let socket = DockerLocal.socketPath(for: endpoint)
+            let exists = socket.map(DockerLocal.isSocket) == true
             let up = exists && (try? DockerSocket.request(endpoint, "/_ping", io: io)) != nil
-            DispatchQueue.main.async { [weak self] in self?.probed(io: io, exists: exists, up: up) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.connection === io else { return }
+                if socket == nil {
+                    self.probing = false
+                    self.discover()
+                } else {
+                    self.probed(io: io, exists: exists, up: up)
+                }
+            }
         }
     }
 
@@ -498,7 +581,7 @@ final class DockerService: ObservableObject {
             if state != .running { connected() }
         } else if state != .starting {
             let wasUp = state == .running || state == .stopping
-            if wasUp { engineWentDown() }
+            if wasUp { engineWentDown(exists: exists) }
             let settled: DockerEngineState = exists ? .unreachable(.connection) : .stopped
             if state != .unreachable(.timedOut) && state != .unreachable(.command) { state = settled }
             if wasUp { watch() }
@@ -507,49 +590,71 @@ final class DockerService: ObservableObject {
 
     private func connected() {
         guard let endpoint else { return }
+        if let io = eventIO {
+            if listing != nil { eventStreamReady(io: io, endpoint: endpoint) }
+            return
+        }
+        let io = DockerIO()
+        eventIO = io
+        events.async { [weak self] in
+            try? DockerSocket.events(endpoint, io: io, onReady: { [weak self] in
+                DispatchQueue.main.async { [weak self] in self?.eventStreamReady(io: io, endpoint: endpoint) }
+            }, onEvent: { [weak self] event in
+                DispatchQueue.main.async { [weak self] in self?.received(event, io: io) }
+            })
+            guard !io.isCancelled else { return }
+            let exists = DockerLocal.socketPath(for: endpoint).map(DockerLocal.isSocket) == true
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.eventIO === io else { return }
+                self.engineWentDown(exists: exists)
+                self.watch()
+            }
+        }
+    }
+
+    private func eventStreamReady(io: DockerIO, endpoint: DockerEndpoint) {
+        guard eventIO === io else { return }
+        if listing == nil {
+            containers = nil
+            listing = DockerListing(socket: endpoint.resolvedPath)
+        }
         watcher?.cancel()
         watcher = nil
         deadline = nil
         state = .running
-        if eventIO == nil {
-            let io = DockerIO()
-            eventIO = io
-            events.async { [weak self] in
-                try? DockerSocket.events(endpoint, io: io) { [weak self] event in
-                    DispatchQueue.main.async { [weak self] in self?.received(event, io: io) }
-                }
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.eventIO === io else { return }
-                    self.engineWentDown()
-                    self.watch()
-                }
-            }
-        }
+        removeWorkspaceObservers()
         refreshContainers()
-        if panelVisible { startPanelReads() }
+        if panelVisible && discoveryID == nil { startPanelReads() }
     }
 
-    private func engineWentDown() {
+    private func engineWentDown(exists: Bool) {
         resetConnection(keepContainers: true)
         deadline = nil
-        state = endpoint.flatMap { DockerLocal.socketPath(for: $0) }.map(DockerLocal.isSocket) == true
-            ? .unreachable(.connection) : .stopped
+        state = exists ? .unreachable(.connection) : .stopped
     }
 
     private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
     private func received(_ event: DockerEvent, io: DockerIO) {
         guard eventIO === io else { return }
-        let now = uptime
-        calaStops = calaStops.filter { $0.value >= now }
-        crashHistory.receive(event, calaStopped: Set(calaStops.keys))
+        let delay = refreshDebounce.delay(afterEventAt: uptime)
+        crashHistory.receive(event, now: uptime)
         if crashed != crashHistory.ids { crashed = crashHistory.ids }
         refreshWork?.cancel()
+        if delay == 0 {
+            refreshWork = nil
+            refreshDebounce.reset()
+            refreshContainers()
+            return
+        }
         let work = DispatchWorkItem { [weak self] in
-            self?.refreshContainers()
+            guard let self, self.eventIO === io else { return }
+            self.refreshWork = nil
+            self.refreshDebounce.reset()
+            self.refreshContainers()
         }
         refreshWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func decode<T: Decodable>(_: T.Type, _ path: String, at endpoint: DockerEndpoint, io: DockerIO) async throws -> T {
@@ -564,7 +669,7 @@ final class DockerService: ObservableObject {
     }
 
     private func refreshContainers() {
-        guard state == .running, let endpoint else { return }
+        guard state == .running, listing != nil, let endpoint else { return }
         if refreshing { refreshAgain = true; return }
         refreshing = true
         let io = connection
@@ -576,7 +681,7 @@ final class DockerService: ObservableObject {
                 containers = list.filter { !$0.id.isEmpty }
                 failedLoads.remove(.containers)
                 if ram == nil { refreshRAM() }
-            } else if containers == nil, state == .running { failedLoads.insert(.containers) }
+            } else if state == .running { failedLoads.insert(.containers) }
             if refreshAgain {
                 refreshAgain = false
                 refreshContainers()
@@ -618,9 +723,9 @@ final class DockerService: ObservableObject {
         ram = nil
         loadingTabs = []
         reloadTabs = []
-        failedLoads = []
+        failedLoads = failedLoads.intersection([.containers])
         usageFailed = false
-        requestedUsage = false
+        usageLoad.invalidate()
     }
 
     private func refreshRAM() {
@@ -673,44 +778,67 @@ final class DockerService: ObservableObject {
     }
 
     private func loadUsage() {
-        guard !requestedUsage, let io = panelIO, let endpoint else { return }
-        requestedUsage = true
+        guard let io = panelIO, let endpoint, let token = usageLoad.begin() else { return }
         Task {
             let result = try? await decode(DockerDiskUsage.self, "/system/df?verbose=true", at: endpoint, io: io)
             guard panelIO === io else { return }
+            guard usageLoad.accepts(token) else { return }
             usage = result
             usageFailed = result == nil
         }
     }
 
-    func act(_ action: DockerContainerAction, on container: DockerContainer) {
-        act(action, on: [container])
+    private func invalidateUsage() {
+        guard panelIO != nil else { return }
+        usageWork?.cancel()
+        usageWork = nil
+        usageLoad.invalidate()
+        usage = nil
+        usageFailed = false
+        loadUsage()
     }
 
-    func act(_ action: DockerContainerAction, on containers: [DockerContainer]) {
-        guard state == .running, !switchingContext, let endpoint else { return }
+    private func actionEndpoint(for shown: DockerListing?) -> DockerEndpoint? {
+        guard panelVisible, state == .running, discoveryID == nil, !switchingContext,
+              shown?.matches(current: listing, endpoint: endpoint) == true else { return nil }
+        return endpoint
+    }
+
+    func act(_ action: DockerContainerAction, on container: DockerContainer, shown: DockerListing?) {
+        act(action, on: [container], shown: shown)
+    }
+
+    func act(_ action: DockerContainerAction, on containers: [DockerContainer], shown: DockerListing?) {
+        guard let endpoint = actionEndpoint(for: shown) else { return }
         let targets = containers.filter { busy[$0.id] == nil }
         for container in targets { busy[container.id] = action; clearError(container.id) }
         let io = connection
         Task {
+            var removed = false
             for container in targets {
-                guard connection === io, state == .running else { break }
+                guard connection === io, state == .running, !switchingContext else { break }
                 let id = container.id
-                if action == .stop || action == .restart { calaStops[id] = uptime + Double(action.timeout) + 15 }
+                if action == .stop || action == .restart {
+                    crashHistory.suppressStop(id, until: uptime + Double(action.timeout) + 15)
+                }
                 let path = "/containers/" + dockerURLComponent(id) + (action == .remove ? "" : "/" + action.rawValue)
                 let method = action == .remove ? "DELETE" : "POST"
                 let error = await mutate(endpoint, path, method: method, timeout: action.timeout, io: io)
                 guard connection === io else { return }
                 if let error {
-                    if action == .stop || action == .restart { calaStops[id] = nil }
+                    if case DockerSocketError.endpointChanged = error {
+                        reloadEngine()
+                        return
+                    }
+                    if case DockerHTTPError.status = error, action == .stop || action == .restart {
+                        crashHistory.cancelStop(id)
+                    }
                     showError(id, actionError(error))
-                } else if action == .start || action == .restart {
-                    crashHistory.started(id)
-                    crashed = crashHistory.ids
-                }
+                } else if action == .remove { removed = true }
             }
             guard connection === io else { return }
             await finishContainerAction(targets, at: endpoint, io: io)
+            if removed && connection === io { invalidateUsage() }
         }
     }
 
@@ -721,38 +849,55 @@ final class DockerService: ObservableObject {
         for container in targets { busy[container.id] = nil }
     }
 
-    func removeImage(_ image: DockerImage) {
+    func removeImage(_ image: DockerImage, shown: DockerListing?) {
         guard let containers, !image.inUse(by: containers) else { return }
-        resourceAction("image:" + image.id, "/images/" + dockerURLComponent(image.id), tab: .images)
+        resourceAction("image:" + image.id, "/images/" + dockerURLComponent(image.id), tab: .images, shown: shown)
     }
 
-    func pruneImages() {
+    func pruneImages(shown: DockerListing?) {
         let filter = dockerURLComponent(#"{"dangling":["false"]}"#)
-        resourceAction("prune", "/images/prune?filters=" + filter, method: "POST", tab: .images)
+        resourceAction("prune", "/images/prune?filters=" + filter, method: "POST", tab: .images, shown: shown)
     }
 
-    func removeVolume(_ volume: DockerVolume) {
+    func removeVolume(_ volume: DockerVolume, shown: DockerListing?) {
         guard let containers, volume.usedBy(containers).isEmpty else { return }
-        resourceAction("volume:" + volume.id, "/volumes/" + dockerURLComponent(volume.id), tab: .volumes)
+        resourceAction("volume:" + volume.id, "/volumes/" + dockerURLComponent(volume.id), tab: .volumes, shown: shown)
     }
 
-    private func resourceAction(_ key: String, _ path: String, method: String = "DELETE", tab: DockerTab) {
-        guard state == .running, !switchingContext, let endpoint, pendingRows.insert(key).inserted else { return }
+    private func resourceAction(_ key: String, _ path: String, method: String = "DELETE", tab: DockerTab, shown: DockerListing?) {
+        guard let endpoint = actionEndpoint(for: shown), pendingRows.insert(key).inserted else { return }
         clearError(key)
         let io = connection
         Task {
             let error = await mutate(endpoint, path, method: method, io: io)
             guard connection === io else { return }
             pendingRows.remove(key)
-            if let error { showError(key, actionError(error)) }
-            else { loadTab(tab, reload: true) }
+            if let error {
+                if case DockerSocketError.endpointChanged = error { reloadEngine() }
+                else { showError(key, actionError(error)) }
+            } else {
+                loadTab(tab, reload: true)
+                invalidateUsage()
+            }
         }
     }
 
+    private func reloadEngine() {
+        resetConnection()
+        state = .stopped
+        if !switchingContext { discover() }
+    }
+
     private func mutate(_ endpoint: DockerEndpoint, _ path: String, method: String, timeout: Int = 15, io: DockerIO) async -> Error? {
-        await withCheckedContinuation { continuation in
+        let app = preferredApp
+        return await withCheckedContinuation { continuation in
             requests.async {
                 do {
+                    guard !io.isCancelled else { throw CancellationError() }
+                    // The context may also have been changed by a terminal outside Cala.
+                    guard DockerLocal.discover(preferredApp: app).active?.resolvedPath == endpoint.resolvedPath else {
+                        throw DockerSocketError.endpointChanged
+                    }
                     _ = try DockerSocket.request(endpoint, path, method: method, timeout: timeout, io: io)
                     continuation.resume(returning: nil)
                 } catch { continuation.resume(returning: error) }
@@ -769,16 +914,40 @@ final class DockerService: ObservableObject {
         }
     }
 
-    func setEngine(_ start: Bool) {
-        guard lifetime != nil, available, !switchingContext, engineOperation == nil,
-              state != .starting, state != .stopping, start != (state == .running), canToggle,
+    func setEngine(_ start: Bool, shown: DockerEndpoint?) {
+        guard let lifetime, let shown, shown == endpoint, available, discoveryID == nil,
+              !switchingContext, engineOperation == nil, state != .starting, state != .stopping,
+              start != (state == .running), canToggle,
               let command = runtime.command(start: start, dockerCLI: dockerCLI != nil) else { return }
+        let app = preferredApp
+        let valid = DockerIO()
+        engineOperation = valid
+        Task {
+            let current = await withCheckedContinuation { continuation in
+                detection.async {
+                    guard !lifetime.isCancelled, !valid.isCancelled else { continuation.resume(returning: false); return }
+                    let safe = DockerLocal.discover(preferredApp: app).active == shown &&
+                        DockerLocal.socketPath(for: shown) != nil
+                    continuation.resume(returning: safe)
+                }
+            }
+            guard self.lifetime === lifetime, engineOperation === valid else { return }
+            engineOperation = nil
+            guard current, shown == endpoint else { reloadEngine(); return }
+            guard !switchingContext, start != (state == .running) else { return }
+            runEngineCommand(command, start: start)
+        }
+    }
+
+    private func runEngineCommand(_ command: DockerCommand, start: Bool) {
         clearError("engine")
         let io = DockerIO()
         engineOperation = io
         state = start ? .starting : .stopping
         if !start {
-            for container in containers ?? [] where container.isActive { calaStops[container.id] = uptime + 50 }
+            for container in containers ?? [] where container.isActive {
+                crashHistory.suppressStop(container.id, until: uptime + 50)
+            }
             clearPanelReads()
         }
         deadline = uptime + (start ? 180 : 35)
@@ -806,9 +975,10 @@ final class DockerService: ObservableObject {
     }
 
     func useContext(_ selected: DockerEndpoint) {
-        guard let lifetime, dockerCLI != nil, selected.isContext, selected.id != endpoint?.id,
+        guard let lifetime, dockerCLI != nil, selected.isContext, engines.contains(selected), selected.id != endpoint?.id,
               !switchingContext, state != .starting, state != .stopping else { return }
         switchingContext = true
+        discoveryID = nil
         clearError("engine")
         Task {
             do {
@@ -820,7 +990,7 @@ final class DockerService: ObservableObject {
                 guard self.lifetime === lifetime else { return }
                 switchingContext = false
                 showError("engine", tx("Couldn't switch Docker context.", "No se pudo cambiar de contexto."))
-                if state != .running { probe() }
+                discover()
             }
         }
     }
@@ -862,29 +1032,49 @@ final class DockerService: ObservableObject {
         }
     }
 
-    private static var searchDirectories: [String] {
+    private nonisolated static var searchDirectories: [String] {
         let home = NSHomeDirectory()
         return ["/opt/homebrew/bin", "/usr/local/bin", home + "/.docker/bin", home + "/.orbstack/bin",
                 home + "/.rd/bin", "/Applications/Docker.app/Contents/Resources/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     }
 
-    private static func executable(_ name: String) -> String? {
+    private nonisolated static func executable(_ name: String) -> String? {
         searchDirectories.lazy.map { $0 + "/" + name }.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    func logs(_ container: DockerContainer) {
+    func logs(_ container: DockerContainer, shown: DockerListing?) {
+        guard let endpoint = actionEndpoint(for: shown) else { return }
         terminal(["logs", "-f", "--tail", "200", "--", container.name], on: endpoint, errorKey: container.id)
     }
 
-    func shell(_ container: DockerContainer) {
+    func shell(_ container: DockerContainer, shown: DockerListing?) {
+        guard let endpoint = actionEndpoint(for: shown) else { return }
         terminal(["exec", "-it", "--", container.name, "sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"],
                  on: endpoint, errorKey: container.id)
     }
 
-    func login() { terminal(["login"], on: nil, errorKey: "login") }
+    func login() {
+        guard discoveryID == nil, !switchingContext, let endpoint else { return }
+        terminal(["login"], on: endpoint, errorKey: "login")
+    }
 
-    private func terminal(_ args: [String], on endpoint: DockerEndpoint?, errorKey: String) {
-        guard lifetime != nil, let dockerCLI else { return }
+    private func terminal(_ args: [String], on endpoint: DockerEndpoint, errorKey: String) {
+        guard let lifetime, let dockerCLI else { return }
+        let io = connection
+        let app = preferredApp
+        detection.async { [weak self] in
+            guard !lifetime.isCancelled, !io.isCancelled else { return }
+            let active = DockerLocal.discover(preferredApp: app).active?.resolvedPath
+            let socket = active == endpoint.resolvedPath ? DockerLocal.socketPath(for: endpoint) : nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.lifetime === lifetime, self.connection === io, self.panelVisible, !self.switchingContext else { return }
+                guard let socket else { self.reloadEngine(); return }
+                self.openTerminal(args, cli: dockerCLI, socket: socket, errorKey: errorKey)
+            }
+        }
+    }
+
+    private func openTerminal(_ args: [String], cli: String, socket: String, errorKey: String) {
         do {
             let home = URL(fileURLWithPath: NSHomeDirectory())
             let bundle = Bundle.main.bundleIdentifier ?? "local.cala"
@@ -894,12 +1084,11 @@ final class DockerService: ObservableObject {
             let script = directory.appendingPathComponent(UUID().uuidString + ".command")
             let path = dockerShellQuote(Self.searchDirectories.joined(separator: ":"))
             let config = dockerShellQuote(home.appendingPathComponent(".docker").path)
-            var body = "#!/bin/sh\n/bin/rm -f -- \"$0\"\nexport PATH=\(path)\nexport DOCKER_CONFIG=\(config)\nunset DOCKER_HOST DOCKER_CONTEXT\n"
-            if let endpoint {
-                guard let socket = DockerLocal.socketPath(for: endpoint) else { throw DockerSocketError.path }
-                body += "export DOCKER_HOST=" + dockerShellQuote("unix://" + socket) + "\n"
-            }
-            body += "exec " + ([dockerCLI] + args).map(dockerShellQuote).joined(separator: " ") + "\n"
+            var body = "#!/bin/zsh -f\n/bin/rm -f -- \"$0\"\nexport PATH=\(path)\nexport DOCKER_CONFIG=\(config)\nunset DOCKER_HOST DOCKER_CONTEXT\n"
+            let quotedSocket = dockerShellQuote(socket)
+            body += "socket=\(quotedSocket)\n[[ ${socket:A} == \"$socket\" ]] || exit 1\n"
+            body += "export DOCKER_HOST=" + dockerShellQuote("unix://" + socket) + "\n"
+            body += "exec " + ([cli] + args).map(dockerShellQuote).joined(separator: " ") + "\n"
             try body.write(to: script, atomically: true, encoding: .utf8)
             do {
                 try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)

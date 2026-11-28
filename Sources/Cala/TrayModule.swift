@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 
 final class TrayModule: CalaModule {
     let id = ModuleID.tray
@@ -10,7 +9,6 @@ final class TrayModule: CalaModule {
     private var shellReady = false
     private var runID: UUID?
     private var wakeObserver: NSObjectProtocol?
-    private var dockerPlacementObserver: AnyCancellable?
     private var lastTray = Date.distantPast
     private var lastCalendar = Date.distantPast
     private var lastMonitor = Date.distantPast
@@ -37,9 +35,6 @@ final class TrayModule: CalaModule {
             guard let self, self.runID == run, self.shellReady, self.usageVisible else { return }
             UsageService.shared.refresh()
         }
-        updateDockerService()
-        dockerPlacementObserver = store.$config.map { $0.place(trayDocker) == .hidden }.removeDuplicates().dropFirst()
-            .receive(on: DispatchQueue.main).sink { [weak self] _ in self?.updateDockerService() }
         if shellReady { startServices() }
     }
 
@@ -47,8 +42,6 @@ final class TrayModule: CalaModule {
         guard isRunning else { return }
         isRunning = false
         runID = nil
-        dockerPlacementObserver?.cancel()
-        dockerPlacementObserver = nil
         MainActor.assumeIsolated { DockerService.shared.stop() }
         Users.cancelSwitch()
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
@@ -84,7 +77,7 @@ final class TrayModule: CalaModule {
         !store.config.autoHide || bar.controller?.bars.contains(where: { !$0.hidden }) == true
     }
 
-    private func updateDockerService() {
+    func reconcileServices() {
         guard isRunning else { return }
         let visible = store.config.place(trayDocker) != .hidden
         if !visible, flyout?.kind == trayDocker { bar.controller?.closeFlyout() }

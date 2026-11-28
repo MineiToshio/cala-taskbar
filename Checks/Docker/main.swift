@@ -1,4 +1,7 @@
 import Foundation
+#if DOCKER_CHECK
+import Darwin
+#endif
 
 var checks = 0
 func expect(_ label: String, _ condition: @autoclosure () throws -> Bool) throws {
@@ -43,7 +46,10 @@ func runChecks() throws {
 
     func resolve(_ config: Data?, _ existing: Set<String>,
                  _ paths: [String: String] = [:], _ metadata: [Data] = []) -> DockerResolution {
-        DockerDiscovery.resolve(home: home, config: config, metadata: metadata, existing: existing, resolved: paths)
+        let allPaths = Set(DockerDiscovery.contextPaths(metadata, home: home) + [defaultPath]).union(existing)
+        let resolved = Dictionary(uniqueKeysWithValues: allPaths.map { ($0, paths[$0] ?? $0) })
+        return DockerDiscovery.resolve(home: home, config: .read(config), metadata: metadata,
+                                       existing: Set(existing.map { resolved[$0] ?? $0 }), resolved: resolved)
     }
 
     let local = resolve(selected, [defaultPath, desktop, colima],
@@ -51,10 +57,44 @@ func runChecks() throws {
     try expect("current context wins over foreign default", local.active?.path == desktop && local.active?.context == "desktop-linux")
     try expect("deduplicated aliases, no remote engines", local.engines.map(\.context) == ["desktop-linux", "colima-food"])
     try expect("Docker Hub auth key", local.signedIn)
+    let configFields = DockerDiscovery.Config.read(bytes(#"{"currentContext":"desktop-linux","auths":{"docker.io":{"auth":"secret","identitytoken":"token"},"example.org":null},"credsStore":"secret-helper","extra":"secret"}"#))
+    try expect("config retains context and registry names only",
+               configFields == DockerDiscovery.Config(currentContext: "desktop-linux", registryNames: ["docker.io", "example.org"]))
+    try expect("invalid config returns empty fields", DockerDiscovery.Config.read(bytes("[123]")) == .read(nil))
+    try expect("invalid auths don't discard context",
+               DockerDiscovery.Config.read(bytes(#"{"currentContext":"colima","auths":"wrong"}"#)) ==
+               DockerDiscovery.Config(currentContext: "colima", registryNames: []))
     let missing = resolve(nil, [defaultPath], [defaultPath: foreign])
     try expect("foreign symlink is rejected even if it is live", missing.active == nil && !missing.hasSocket && missing.engines.isEmpty)
     try expect("foreign user's name cannot share our prefix",
-               !DockerDiscovery.ownsDefault("/Users/SergioOther/socket", home: home))
+               !DockerDiscovery.ownsSocket("/Users/SergioOther/socket", home: home))
+    let alias = "/tmp/foreign-engine.sock"
+    let foreignContext = bytes(#"{"currentContext":"shared-alias"}"#)
+    let rejected = resolve(foreignContext, [alias], [alias: foreign], [context("shared-alias", "unix://" + alias)])
+    try expect("foreign named endpoint is neither active, listed nor installed", rejected.active == nil &&
+               rejected.engines.isEmpty && !rejected.hasSocket)
+    let direct = resolve(foreignContext, [foreign], [:], [context("shared-alias", "unix://" + foreign)])
+    try expect("direct path in another user's home is rejected", direct.active == nil && !direct.hasSocket)
+    let sharedEngine = DockerDiscovery.resolve(home: home, config: .read(nil), metadata: [], existing: [foreign],
+                                        resolved: [desktop: foreign], known: [("desktop-linux", desktop)], preferredApp: .desktop)
+    try expect("foreign known socket path is not an app fallback", sharedEngine.active == nil && !sharedEngine.hasSocket)
+    try expect("APFS data-volume alias into a foreign home is rejected",
+               !DockerDiscovery.ownsSocket("/System/Volumes/Data/Users/Trabajo/engine.sock", home: home))
+    try expect("own home via APFS data-volume alias is allowed",
+               DockerDiscovery.ownsSocket("/System/Volumes/Data/Users/Sergio/engine.sock", home: home))
+    try expect("distinct homes can differ only by case on a case-sensitive disk",
+               !DockerDiscovery.ownsSocket("/Users/sergio/engine.sock", home: home))
+    try expect("socket in a locally registered custom home is rejected",
+               !DockerDiscovery.ownsSocket("/Volumes/Work/Trabajo/engine.sock", home: home, otherHomes: ["/Volumes/Work/Trabajo"]))
+    try expect("similarly named directory outside a custom home is allowed",
+               DockerDiscovery.ownsSocket("/Volumes/Work/Trabajo-VM/engine.sock", home: home, otherHomes: ["/Volumes/Work/Trabajo"]))
+    try expect("shared non-home directory and system run directory are allowed",
+               DockerDiscovery.ownsSocket("/Users/Shared/engine.sock", home: home) &&
+               DockerDiscovery.ownsSocket("/private/var/run/engine.sock", home: home))
+    let unresolved = DockerDiscovery.resolve(home: home, config: .read(foreignContext),
+                                            metadata: [context("shared-alias", "unix://" + alias)],
+                                            existing: [alias], resolved: [:])
+    try expect("unresolved socket can't be used", unresolved.active == nil && !unresolved.hasSocket)
     let defaultEngine = resolve(nil, [defaultPath], [defaultPath: desktop], contexts)
     try expect("current omitted means default", defaultEngine.active?.context == "default" && defaultEngine.active?.resolvedPath == desktop)
     try expect("default alias acquires the correct runtime", defaultEngine.active?.runtime == .desktop)
@@ -67,8 +107,8 @@ func runChecks() throws {
     try expect("credential helpers are not login evidence", !resolve(bytes(#"{"credsStore":"desktop"}"#), []).signedIn)
     try expect("tilde expands for the supplied home", DockerDiscovery.socketPath("unix://~/.docker/run/docker.sock", home: home) == desktop)
     let known = DockerDiscovery.knownPaths(home: home, colimaProfiles: ["food"])
-    let app = DockerDiscovery.resolve(home: home, config: nil, metadata: [], existing: [],
-                                      resolved: [defaultPath: foreign], known: known, preferredApp: .desktop)
+    let app = DockerDiscovery.resolve(home: home, config: .read(nil), metadata: [], existing: [],
+                                      resolved: [defaultPath: foreign, desktop: desktop], known: known, preferredApp: .desktop)
     try expect("an installed app can be reached after its socket appears", app.active?.path == desktop && !app.hasSocket)
 
     try expect("Docker Desktop by name", DockerRuntime.detect(context: "desktop-linux", path: "/tmp/d.sock") == .desktop)
@@ -80,8 +120,28 @@ func runChecks() throws {
     try expect("OrbStack by path", DockerRuntime.detect(context: "other", path: home + "/.orbstack/run/docker.sock") == .orbstack)
     try expect("Rancher Desktop by path", DockerRuntime.detect(context: "other", path: home + "/.rd/docker.sock") == .rancher)
     try expect("Rancher Desktop by name", DockerRuntime.detect(context: "rancher-desktop", path: "") == .rancher)
-    try expect("Podman by name and path", DockerRuntime.detect(context: "podman-machine-default", path: "") == .podman &&
-               DockerRuntime.detect(context: "other", path: "/var/folders/podman/socket") == .podman)
+    try expect("Podman by explicit context name", DockerRuntime.detect(context: "podman-machine-default", path: "") ==
+               .podman("podman-machine-default"))
+    try expect("Podman custom name from context name", DockerRuntime.detect(context: "podman-build", path: "") ==
+               .podman("podman-build"))
+    try expect("Podman named machine from resolved socket",
+               DockerRuntime.detect(context: "default", path: defaultPath,
+                                    resolvedPath: "/private/var/folders/x/T/podman/work-api.sock") == .podman("work"))
+    try expect("Podman machine name from a named socket directory",
+               DockerRuntime.detect(context: "podman", path: "/Users/Sergio/.local/share/containers/podman/machine/work/podman.sock") ==
+               .podman("work"))
+    try expect("named context and socket agree",
+               DockerRuntime.detect(context: "podman-machine-build", path: "/tmp/podman/podman-machine-build-api.sock") ==
+               .podman("podman-machine-build"))
+    try expect("Podman context and socket disagreement disables the toggle",
+               DockerRuntime.detect(context: "podman-machine-default", path: "/tmp/podman/work-api.sock") == .podman(nil))
+    try expect("different Podman machines in configured and resolved paths are ambiguous",
+               DockerRuntime.detect(context: "podman", path: "/tmp/podman/work-api.sock",
+                                    resolvedPath: "/tmp/podman/build-api.sock") == .podman(nil))
+    try expect("generic Podman socket and context are ambiguous",
+               DockerRuntime.detect(context: "podman", path: "/var/folders/podman/podman.sock") == .podman(nil))
+    try expect("unsafe Podman machine argument is ignored",
+               DockerRuntime.detect(context: "podman", path: "/tmp/podman/--help-api.sock") == .podman(nil))
     try expect("unknown runtime has no command", DockerRuntime.detect(context: "default", path: defaultPath).command(start: true, dockerCLI: true) == nil)
     try expect("Desktop starts without CLI", DockerRuntime.desktop.command(start: true, dockerCLI: false) == .openApp("com.docker.docker"))
     try expect("Desktop stop CLI or app", DockerRuntime.desktop.command(start: false, dockerCLI: true) == .executable("docker", ["desktop", "stop"]) &&
@@ -92,8 +152,12 @@ func runChecks() throws {
                .executable("colima", ["start"]))
     try expect("OrbStack commands", DockerRuntime.orbstack.command(start: true, dockerCLI: true) == .openApp("dev.kdrag0n.MacVirt") &&
                DockerRuntime.orbstack.command(start: false, dockerCLI: true) == .executable("orb", ["stop"]))
-    try expect("Podman commands", DockerRuntime.podman.command(start: true, dockerCLI: false) == .executable("podman", ["machine", "start"]) &&
-               DockerRuntime.podman.command(start: false, dockerCLI: false) == .executable("podman", ["machine", "stop"]))
+    try expect("Podman commands target the named machine",
+               DockerRuntime.podman("work").command(start: true, dockerCLI: false) == .executable("podman", ["machine", "start", "work"]) &&
+               DockerRuntime.podman("work").command(start: false, dockerCLI: false) == .executable("podman", ["machine", "stop", "work"]))
+    try expect("ambiguous Podman has no commands",
+               DockerRuntime.podman(nil).command(start: true, dockerCLI: true) == nil &&
+               DockerRuntime.podman(nil).command(start: false, dockerCLI: true) == nil)
     try expect("Rancher Desktop commands", DockerRuntime.rancher.command(start: true, dockerCLI: false) == .openApp("io.rancherdesktop.app") &&
                DockerRuntime.rancher.command(start: false, dockerCLI: false) == .executable("rdctl", ["shutdown"]))
 
@@ -122,8 +186,20 @@ func runChecks() throws {
     try expect("container name and compose service", web.name == "garden-web-1" && web.displayName == "web")
     try expect("running status time", web.isRunning && web.uptimeSeconds == 7200)
     try expect("exit status", !db.isRunning && db.exitCode == 17)
-    try expect("port picks lowest published TCP and ignores IPv4/IPv6 duplicates", web.publishedPort == 3000 &&
-               web.publishedURL?.absoluteString == "http://localhost:3000" && db.publishedURL == nil)
+    try expect("port picks lowest published TCP and keeps its IP", web.publishedPort == .init(number: 3000, ip: "127.0.0.1") &&
+               web.publishedPort?.url?.absoluteString == "http://127.0.0.1:3000" && db.publishedPort == nil)
+    try expect("wildcard IPv4 and IPv6 use localhost",
+               DockerPublishedPort(number: 8080, ip: "0.0.0.0").url?.absoluteString == "http://localhost:8080" &&
+               DockerPublishedPort(number: 8080, ip: "::").url?.absoluteString == "http://localhost:8080")
+    try expect("specific IPv6 is bracketed", DockerPublishedPort(number: 8080, ip: "2001:db8::1").url?.absoluteString ==
+               "http://[2001:db8::1]:8080")
+    try expect("a specific IPv4 link keeps its binding", DockerPublishedPort(number: 8080, ip: "192.168.1.9").url?.absoluteString ==
+               "http://192.168.1.9:8080")
+    let duplicatePorts = try decode([DockerPort].self, #"[{"PublicPort":3000,"Type":"tcp","IP":"::1"},{"PublicPort":3000,"Type":"tcp","IP":"0.0.0.0"}]"#)
+    try expect("first duplicate keeps the selected publication's IP", DockerPublishedPort.first(in: duplicatePorts)?.url?.absoluteString ==
+               "http://[::1]:3000")
+    let missingIP = try decode([DockerPort].self, #"[{"PublicPort":80,"Type":"tcp"},{"PublicPort":81,"Type":"tcp","IP":""},{"PublicPort":82,"Type":"tcp","IP":"127.0.0.1/path"}]"#)
+    try expect("unrecorded or invalid IPs aren't mapped to localhost", DockerPublishedPort.first(in: missingIP) == nil)
     let groups = DockerGroup.build(containers)
     try expect("sort projects and standalone", groups.map(\.project) == ["alpha", "garden", nil])
     try expect("stable alphabetical, even when stopped precedes running", groups[1].containers.map(\.displayName) == ["db", "web"])
@@ -210,40 +286,173 @@ func runChecks() throws {
     try expect("stream accepts unchunked lines", try plain.append(bytes(first + second)).count == 2)
 
     var crashes = DockerCrashes()
-    crashes.receive(try event("die", 100), calaStopped: [])
+    crashes.receive(try event("die", 100), now: 0)
     try expect("exited nonzero without stop is a crash", crashes.ids == ["a"])
-    crashes.receive(try event("start", 101), calaStopped: [])
+    crashes.receive(try event("start", 101), now: 0)
     try expect("start clears the crash mark", crashes.ids.isEmpty)
-    crashes.receive(try event("kill", 110), calaStopped: [])
-    crashes.receive(try event("die", 125), calaStopped: [])
+    crashes.receive(try event("kill", 110), now: 0)
+    crashes.receive(try event("die", 125), now: 0)
     try expect("kill within 15 seconds suppresses a crash", crashes.ids.isEmpty)
-    crashes.receive(try event("die", 126), calaStopped: [])
+    crashes.receive(try event("die", 126), now: 0)
     try expect("older kill does not suppress a crash", crashes.ids == ["a"])
     crashes.clear()
     try expect("opening clears crash marks", crashes.ids.isEmpty)
-    crashes.receive(try event("stop", 128, id: "another"), calaStopped: [])
-    crashes.receive(try event("die", 130), calaStopped: [])
+    crashes.receive(try event("stop", 128, id: "another"), now: 0)
+    crashes.receive(try event("die", 130), now: 0)
     try expect("stop for another id does not suppress a crash", crashes.ids == ["a"])
     crashes.clear()
-    crashes.receive(try event("stop", 140), calaStopped: [])
-    crashes.receive(try event("die", 150), calaStopped: [])
+    crashes.receive(try event("stop", 140), now: 0)
+    crashes.receive(try event("die", 150), now: 0)
     try expect("recent stop suppresses a crash", crashes.ids.isEmpty)
-    crashes.receive(try event("die", 180), calaStopped: ["a"])
-    try expect("Cala stop suppresses a crash", crashes.ids.isEmpty)
-    crashes.receive(try event("die", 200, code: "0"), calaStopped: [])
+    crashes.suppressStop("a", until: 100)
+    crashes.receive(try event("die", 180), now: 1)
+    try expect("Cala stop suppresses its first die", crashes.ids.isEmpty)
+    crashes.receive(try event("die", 181), now: 2)
+    try expect("matching die consumes Cala suppression", crashes.ids == ["a"])
+    crashes.clear()
+    crashes.suppressStop("a", until: 100)
+    crashes.receive(try event("die", 200, code: "0"), now: 3)
     try expect("zero exit is not a crash", crashes.ids.isEmpty)
+    crashes.receive(try event("die", 201), now: 4)
+    try expect("even a clean die consumes Cala suppression", crashes.ids == ["a"])
+    crashes.clear()
+    crashes.suppressStop("a", until: 100)
+    crashes.receive(try event("kill", 210), now: 5)
+    crashes.receive(try event("start", 211), now: 6)
+    crashes.receive(try event("die", 212), now: 7)
+    try expect("start clears Cala suppression and old kill history for a fresh crash", crashes.ids == ["a"])
+    crashes.clear()
+    crashes.suppressStop("a", until: 10)
+    crashes.receive(try event("die", 213), now: 11)
+    try expect("expired Cala suppression does not hide a crash", crashes.ids == ["a"])
+    crashes.clear()
+    crashes.suppressStop("a", until: 20)
+    crashes.cancelStop("a")
+    crashes.receive(try event("die", 214), now: 12)
+    try expect("rejected stop leaves no suppression", crashes.ids == ["a"])
     try expect("glyph transitions", DockerGlyphState.resolve(.stopped, running: 3, crashed: true) == .off &&
                DockerGlyphState.resolve(.starting, running: 0, crashed: false) == .starting &&
                DockerGlyphState.resolve(.stopping, running: 3, crashed: false) == .starting &&
                DockerGlyphState.resolve(.running, running: 3, crashed: false) == .running(3) &&
                DockerGlyphState.resolve(.running, running: 3, crashed: true) == .crashed(3))
 
+    var debounce = DockerEventDebounce()
+    let closely = { (left: Double, right: Double) in abs(left - right) < 0.0001 }
+    try expect("first event delays refresh 300 ms", closely(debounce.delay(afterEventAt: 10), 0.3))
+    try expect("each event pushes out trailing refresh", closely(debounce.delay(afterEventAt: 10.2), 0.3))
+    try expect("continuous events cap the deadline at first plus 1 s", closely(debounce.delay(afterEventAt: 10.8), 0.2))
+    try expect("event at deadline forces immediate refresh", debounce.delay(afterEventAt: 11) == 0)
+    debounce.reset()
+    try expect("new burst starts after a refresh", closely(debounce.delay(afterEventAt: 11.1), 0.3))
+
+    let listing = DockerListing(socket: local.active!.resolvedPath)
+    let nextListing = DockerListing(socket: stopped.active!.resolvedPath)
+    let otherEngine = local.engines.last!
+    try expect("shown listing matches only its current engine", listing.matches(current: listing, endpoint: local.active))
+    try expect("changed canonical socket invalidates actions", !listing.matches(current: listing, endpoint: otherEngine))
+    try expect("reconnection at same socket invalidates stale actions", !listing.matches(current: nextListing, endpoint: stopped.active))
+    try expect("listing cannot authorize an action while the engine is being reloaded",
+               !listing.matches(current: nil, endpoint: local.active))
+    let removal = DockerConfirmation(key: "volume:data", listing: listing)
+    try expect("confirmation requires the shown listing and item", removal.matches("volume:data", shown: listing) &&
+               !removal.matches("volume:data", shown: nextListing) && !removal.matches("volume:other", shown: listing))
+
+    var loads = DockerUsageLoad()
+    let firstLoad = loads.begin()!
+    try expect("disk totals load once per opening", loads.accepts(firstLoad) && loads.begin() == nil)
+    loads.invalidate()
+    let refreshedLoad = loads.begin()!
+    try expect("disk invalidation permits reload and rejects stale completion",
+               !loads.accepts(firstLoad) && loads.accepts(refreshedLoad))
+
+    try expect("only down or starting states observe runtime launches",
+               [DockerEngineState.stopped, .starting, .unreachable(.connection)].allSatisfy(\.observesRuntimeApps) &&
+               ![DockerEngineState.running, .notInstalled, .stopping].contains(where: \.observesRuntimeApps))
     try expect("shell quotes spaces", dockerShellQuote("my container") == "'my container'")
     try expect("shell quotes single and double quotes", dockerShellQuote("my 'quoted' \"name\"") == "'my '\\''quoted'\\'' \"name\"'")
     try expect("shell quotes empty argument", dockerShellQuote("") == "''")
     try expect("URL argument cannot change the request target", dockerURLComponent(":/?\r\n") == "%3A%2F%3F%0D%0A")
     print("PASS docker: \(checks) checks")
 }
+
+#if DOCKER_CHECK
+func testStream(on endpoint: DockerEndpoint, response: String, beforeRead: (String) -> Void) throws -> [String] {
+    var address = sockaddr_un()
+    let path = Array(endpoint.resolvedPath.utf8)
+    let length = MemoryLayout<sockaddr_un>.offset(of: \.sun_path)! + path.count + 1
+    address.sun_family = sa_family_t(AF_UNIX)
+    address.sun_len = UInt8(length)
+    withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: path) }
+
+    let listener = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard listener >= 0 else { throw DockerSocketError.posix(errno) }
+    defer { close(listener); unlink(endpoint.resolvedPath) }
+    let bound = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(listener, $0, socklen_t(length)) }
+    }
+    guard bound == 0 else { throw NSError(domain: "test socket bind", code: Int(errno)) }
+    guard listen(listener, 1) == 0 else { throw NSError(domain: "test socket listen", code: Int(errno)) }
+    DispatchQueue.global().async {
+        let fd = accept(listener, nil, nil)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        var wait = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, socklen_t(MemoryLayout.size(ofValue: wait)))
+        var request = [UInt8](repeating: 0, count: 4096)
+        guard read(fd, &request, request.count) > 0 else { return }
+        _ = Data(response.utf8).withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return 0 }
+            return write(fd, base, bytes.count)
+        }
+    }
+    var order: [String] = []
+    try DockerSocket.events(endpoint, io: DockerIO(), onReady: {
+        order.append("headers")
+        beforeRead("headers")
+    }, onEvent: {
+        order.append($0.Action ?? "")
+    })
+    return order
+}
+
+func runTransportChecks() throws {
+    let fm = FileManager.default
+    let root = URL(fileURLWithPath: "/private/tmp/cala-docker-" + String(UUID().uuidString.prefix(8)), isDirectory: true)
+    try fm.createDirectory(at: root, withIntermediateDirectories: false)
+    defer { try? fm.removeItem(at: root) }
+
+    let alias = root.appendingPathComponent("alias").path
+    let canonical = root.appendingPathComponent("test.sock").path
+    let endpoint = DockerEndpoint(context: "test", path: alias, resolvedPath: canonical, runtime: .unknown, isContext: true)
+    try fm.createSymbolicLink(atPath: alias, withDestinationPath: "test.sock")
+    try expect("relative dangling alias is resolved to its future socket", DockerLocal.socketPath(for: endpoint) == canonical)
+
+    let line = #"{"Type":"container","Action":"start","Actor":{"ID":"a"},"time":10}"# + "\n"
+    let headers = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    let order = try testStream(on: endpoint, response: headers + chunk(line) + "0\r\n\r\n", beforeRead: { _ in })
+    try expect("socket transport reports HTTP 200 before publishing events", order == ["headers", "start"])
+    do {
+        _ = try testStream(on: endpoint, response: "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                           beforeRead: { _ in fatalError("failed subscription must not report readiness") })
+        try expect("non-200 event stream rejected", false)
+    } catch DockerHTTPError.status(404) { try expect("non-200 event stream rejected", true) }
+
+    try fm.removeItem(atPath: alias)
+    try fm.createSymbolicLink(atPath: alias, withDestinationPath: "replacement.sock")
+    try expect("local retarget invalidates a pinned address", DockerLocal.socketPath(for: endpoint) == nil)
+
+    let parent = root.appendingPathComponent("foreign").path
+    let foreign = "/Users/CalaOtherAccount/.docker/run"
+    try fm.createSymbolicLink(atPath: parent, withDestinationPath: foreign)
+    let nested = parent + "/docker.sock"
+    try expect("missing socket with foreign symlinked parent resolves into foreign home",
+               DockerLocal.realSocketPath(nested) == foreign + "/docker.sock")
+    let unsafe = DockerEndpoint(context: "unsafe", path: nested, resolvedPath: foreign + "/docker.sock",
+                                runtime: .unknown, isContext: true)
+    try expect("transport rejects even a pinned foreign canonical socket", DockerLocal.socketPath(for: unsafe) == nil)
+    print("PASS docker transport: \(checks) checks")
+}
+#endif
 
 do {
     #if DOCKER_CHECK
@@ -255,6 +464,8 @@ do {
         let containers = try JSONDecoder().decode([DockerContainer].self, from: list.body)
         print("GET /_ping → HTTP \(ping.head.status) \(String(decoding: ping.body, as: UTF8.self))")
         print("GET /containers/json?all=1 → HTTP \(list.head.status) · \(containers.count) containers · \(containers.filter(\.isRunning).count) running")
+    } else if CommandLine.arguments.contains("--transport") {
+        try runTransportChecks()
     } else {
         try runChecks()
     }

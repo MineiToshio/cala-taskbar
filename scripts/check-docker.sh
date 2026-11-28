@@ -12,7 +12,7 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 sources=("$core" Checks/Docker/main.swift)
 defines=()
-if [[ ${1:-} == --live ]]; then
+if [[ ${1:-} == --live || ${1:-} == --transport ]]; then
     sources+=(Sources/Cala/DockerService.swift)
     defines+=(-D DOCKER_CHECK)
 fi
