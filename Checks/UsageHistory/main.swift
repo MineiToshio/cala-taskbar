@@ -775,5 +775,16 @@ do {
     check(after.profile != before.profile && !after.adopted, "an account after a sign-out is not adopted")
 }
 
+do {
+    let history = store("stop-cancels-flush")
+    history.ingest([observation(t, 1), observation(date(10), 2)], now: date(10))
+    _ = buckets(history)  // waits for the ingest
+    check(history.hasScheduledFlush, "an ingest schedules a delayed flush")
+    history.cancelScheduledFlush()
+    check(!history.hasScheduledFlush, "stopping usage cancels the delayed flush and its retries")
+    check(history.flush() && buckets(store("stop-cancels-flush")).first?.deltaHundredths == 100,
+          "rows kept in memory are still written by the next flush")
+}
+
 try checkArchiveAccounts()
 print("Usage history checks passed (\(assertions) assertions).")

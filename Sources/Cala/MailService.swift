@@ -813,8 +813,7 @@ final class MailService: ObservableObject {
         running = true
         let run = UUID()
         runID = run
-        pendingPurge?.cancel()
-        pendingPurge = nil
+        cancelPendingPurge()
         if let bodyCache {
             let keep = accounts.filter(\.enabled).map(\.id)
             cacheQueue.async { bodyCache.cleanUp(keeping: keep) }
@@ -866,7 +865,7 @@ final class MailService: ObservableObject {
         watchedReads.insert(id)
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(1))
-            guard let self, self.watchedReads.contains(id), !self.watchNoticeShown, !self.awaitingKeychainNotice,
+            guard let self, self.running, self.watchedReads.contains(id), !self.watchNoticeShown, !self.awaitingKeychainNotice,
                   let present = self.keychainPresenter else { return }
             self.watchNoticeShown = true
             log("mail: a Keychain read is waiting; explaining the macOS window")
@@ -921,6 +920,10 @@ final class MailService: ObservableObject {
         wakeObserver = nil
         awaitingKeychainNotice = false
         accountsAwaitingNotice.removeAll()
+        // A read still being watched must not bring the Keychain explanation back after sync stopped.
+        keychainWatch.removeAll()
+        watchedReads.removeAll()
+        if watchNoticeShown { watchNoticeShown = false; keychainDismiss?() }
         pathMonitor?.cancel()
         pathMonitor = nil
         for connection in pendingSignIns.values { connection.close() }
@@ -939,11 +942,23 @@ final class MailService: ObservableObject {
         olderExhausted.removeAll()
         for account in accounts { status[account.id] = .paused }
         publishInbox()
-        if purgingCache, let bodyCache {
-            let purge = DispatchWorkItem { bodyCache.purgeAll() }
-            pendingPurge = purge
-            cacheQueue.asyncAfter(deadline: .now() + 3, execute: purge)
-        }
+        if purgingCache { purgeCache() }
+    }
+
+    /// Deletes the cached bodies 3 s from now; a start in between cancels it. Turning the tray off calls it even when
+    /// sync had already stopped because the Mail item is hidden (hiding it alone keeps the cache).
+    /// The tray came back within the grace period: the cached bodies stay.
+    func cancelPendingPurge() {
+        pendingPurge?.cancel()
+        pendingPurge = nil
+    }
+
+    func purgeCache() {
+        guard let bodyCache else { return }
+        pendingPurge?.cancel()
+        let purge = DispatchWorkItem { bodyCache.purgeAll() }
+        pendingPurge = purge
+        cacheQueue.asyncAfter(deadline: .now() + 3, execute: purge)
     }
 
     /// The network came back: accounts waiting out a retry delay reconnect now.

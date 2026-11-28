@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 final class TrayModule: CalaModule {
     let id = ModuleID.tray
@@ -9,6 +10,9 @@ final class TrayModule: CalaModule {
     private var shellReady = false
     private var runID: UUID?
     private var wakeObserver: NSObjectProtocol?
+    private var placeObserver: AnyCancellable?
+    /// The services running now; `reconcile` keeps it equal to `TrayServicePlan.wanted` for the shown items.
+    private(set) var services = Set<TrayService>()
     private var lastTray = Date.distantPast
     private var lastCalendar = Date.distantPast
     private var lastMonitor = Date.distantPast
@@ -25,44 +29,40 @@ final class TrayModule: CalaModule {
         runID = run
         lastTray = .distantPast; lastCalendar = .distantPast; lastMonitor = .distantPast
         MenuBarIcons.apply(store)
-        WifiInfo.shared.start()
-        CalendarService.shared.start()
-        SystemMonitor.shared.start()
         controller.model.startTray()
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self, self.runID == run, self.shellReady, self.usageVisible else { return }
-            UsageService.shared.refresh()
-        }
-        if shellReady { startServices() }
+        // Back within the 3 s grace after turning the tray off: keep mail's cached bodies even if Mail stays hidden.
+        MainActor.assumeIsolated { MailService.shared.cancelPendingPurge() }
+        // Hiding or showing an item starts or stops only its own services; other layout changes do nothing.
+        placeObserver = store.$config.map(Self.shownItems).removeDuplicates().dropFirst()
+            .receive(on: DispatchQueue.main).sink { [weak self] shown in
+                guard let self, self.runID == run else { return }
+                self.reconcile(shown)
+            }
+        reconcile(Self.shownItems(store.config))
     }
 
     func stop() {
         guard isRunning else { return }
         isRunning = false
         runID = nil
-        MainActor.assumeIsolated { DockerService.shared.stop() }
+        placeObserver?.cancel()
+        placeObserver = nil
         Users.cancelSwitch()
-        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
-        wakeObserver = nil
         flyout?.stop()
         flyout = nil
         bar.controller?.closeFlyout()
-        bar.controller?.model.stopTray()
-        CalendarService.shared.stop()
-        WifiInfo.shared.stop()
-        SystemMonitor.shared.stop()
-        DiskService.shared.stop()
-        if shellReady {
-            UsagePace.shared.stop()
-            UsageService.shared.stop()
-            MainActor.assumeIsolated {
-                // Turning the tray off deletes mail's cached bodies; quitting (or an update relaunch) keeps them.
-                MailService.shared.stop(purgingCache: !ModuleRegistry.shared.isShuttingDown)
-                MailKeychainNoticeController.shared.dismiss()
-            }
+        for service in TrayServicePlan.transition(from: services, to: []).stop { stop(service) }
+        services.removeAll()
+        MainActor.assumeIsolated {
+            // Also when Mail was hidden (its service already stopped): a sign-in started from Settings still holds an
+            // IMAP socket, and stop() closes it. It is idempotent.
+            MailService.shared.stop()
+            MailKeychainNoticeController.shared.dismiss()
+            // Turning the tray off deletes mail's cached bodies, also when a hidden Mail item had already stopped
+            // sync; quitting (or an update relaunch) keeps them.
+            if shellReady, !ModuleRegistry.shared.isShuttingDown { MailService.shared.purgeCache() }
         }
+        bar.controller?.model.stopTray()
         if ModuleRegistry.shared.isShuttingDown { MenuBarIcons.onQuit(store) }
         else { MenuBarIcons.restoreForTrayStop(store) }
     }
@@ -70,40 +70,101 @@ final class TrayModule: CalaModule {
     func finishOnboarding() {
         guard !shellReady else { return }
         shellReady = true
-        if isRunning { startServices() }
+        if isRunning { reconcile(Self.shownItems(store.config)) }
+    }
+
+    /// Placeable items in the bar or in More, plus the clock: a hidden item is not shown anywhere.
+    private static func shownItems(_ config: Config) -> Set<String> {
+        TrayServicePlan.visibleItems(TrayItems.all.map(\.id), place: config.place)
+    }
+
+    /// Starts the services the shown items need and stops the rest (TrayServicePlan, pure and checked).
+    private func reconcile(_ shown: Set<String>) {
+        guard isRunning, let controller = bar.controller else { return }
+        controller.model.shownTray = shown
+        if let flyout, flyout.isVisible, TrayItems.info(flyout.kind) != nil, !shown.contains(flyout.kind) {
+            controller.closeFlyout() // Its item was just hidden: its panel goes with the service behind it.
+        }
+        let (stops, starts) = TrayServicePlan.transition(
+            from: services, to: TrayServicePlan.wanted(visible: shown, welcomeDone: shellReady))
+        for service in stops {
+            stop(service)
+            services.remove(service)
+        }
+        for service in starts {
+            start(service)
+            services.insert(service)
+        }
+        if !stops.isEmpty || !starts.isEmpty {
+            log(TrayServicePlan.summary(running: services, stopped: stops, started: starts))
+        }
+        // An item that just came back shows fresh values instead of the ones from before it was hidden.
+        lastTray = .distantPast; lastMonitor = .distantPast
+    }
+
+    private func start(_ service: TrayService) {
+        switch service {
+        case .wifi: WifiInfo.shared.start()
+        case .power: bar.controller?.model.startPowerWatch()
+        case .system: SystemMonitor.shared.start()
+        case .disk: break // The folder scan runs when the Disk panel opens.
+        case .docker: MainActor.assumeIsolated { DockerService.shared.start() }
+        case .usage:
+            let visible = usageVisible
+            UsageService.shared.start(store: store, visible: visible)
+            UsagePace.shared.start(store: store)
+            bar.controller?.model.startUsageFeed()
+            let run = runID
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                guard let self, self.runID == run, self.services.contains(.usage), self.usageVisible else { return }
+                UsageService.shared.refresh()
+            }
+            if visible { UsageService.shared.refresh() }
+        case .mail:
+            MainActor.assumeIsolated {
+                // Warm the message web view (rule list, data store, WebContent process) only when mail is set up.
+                if !MailService.shared.accounts.isEmpty { MailWebBody.prewarm() }
+                MailService.shared.start(explainingKeychain: MailKeychainNoticeController.shared.show,
+                                         dismissing: MailKeychainNoticeController.shared.dismiss)
+            }
+        case .calendar: CalendarService.shared.start()
+        }
+    }
+
+    private func stop(_ service: TrayService) {
+        switch service {
+        case .wifi: WifiInfo.shared.stop()
+        case .power: bar.controller?.model.stopPowerWatch()
+        case .system: SystemMonitor.shared.stop()
+        case .disk: DiskService.shared.stop()
+        case .docker: MainActor.assumeIsolated { DockerService.shared.stop() }
+        case .usage:
+            if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+            wakeObserver = nil
+            bar.controller?.model.stopUsageFeed()
+            UsagePace.shared.stop()
+            UsageService.shared.stop()
+        case .mail:
+            MainActor.assumeIsolated {
+                // Hiding Mail stops sync and keeps the cached bodies; `stop()` purges them when the tray turns off.
+                MailService.shared.stop()
+                MailKeychainNoticeController.shared.dismiss()
+                MailWebBody.cool()
+            }
+        case .calendar: CalendarService.shared.stop()
+        }
     }
 
     private var usageVisible: Bool {
         !store.config.autoHide || bar.controller?.bars.contains(where: { !$0.hidden }) == true
     }
 
-    func reconcileServices() {
-        guard isRunning else { return }
-        let visible = store.config.place(trayDocker) != .hidden
-        if !visible, flyout?.kind == trayDocker { bar.controller?.closeFlyout() }
-        MainActor.assumeIsolated {
-            if visible { DockerService.shared.start() }
-            else { DockerService.shared.stop() }
-        }
-    }
-
-    private func startServices() {
-        let visible = usageVisible
-        UsageService.shared.start(store: store, visible: visible)
-        UsagePace.shared.start(store: store)
-        if visible { UsageService.shared.refresh() }
-        MainActor.assumeIsolated {
-            // Warm the message web view (rule list, data store, WebContent process) only when mail is set up.
-            if !MailService.shared.accounts.isEmpty { MailWebBody.prewarm() }
-            MailService.shared.start(explainingKeychain: MailKeychainNoticeController.shared.show,
-                                     dismissing: MailKeychainNoticeController.shared.dismiss)
-        }
-    }
-
     func tick() {
         guard isRunning, let controller = bar.controller else { return }
         let now = Date()
-        if shellReady {
+        if services.contains(.usage) {
             UsageService.shared.visibility(visible: controller.bars.contains(where: { !$0.hidden }),
                                            alwaysVisible: !store.config.autoHide)
         }
@@ -111,24 +172,29 @@ final class TrayModule: CalaModule {
             lastTray = now
             controller.model.refreshTray()
         }
-        if store.config.place(traySystem) != .hidden, now.timeIntervalSince(lastMonitor) > 3 {
+        if services.contains(.system), now.timeIntervalSince(lastMonitor) > 3 {
             lastMonitor = now
             SystemMonitor.shared.tick()
             RestartAdvisor.shared.refresh(disk: controller.model.disk)
         }
-        if now.timeIntervalSince(lastCalendar) > 60 {
+        if services.contains(.calendar), now.timeIntervalSince(lastCalendar) > 60 {
             lastCalendar = now
             CalendarService.shared.backgroundRefresh(config: store.config)
         }
     }
 
     func openSystemPanel() {
-        guard isRunning, let controller = bar.controller, let first = controller.bars.first else { return }
+        guard isRunning, services.contains(.system), let controller = bar.controller, let first = controller.bars.first else { return }
         click(traySystem, bar: first, controller: controller)
     }
 
+    /// Whether a service runs now (callers outside the tray, e.g. the Cleanup window's disk rescan).
+    func isServiceRunning(_ service: TrayService) -> Bool { isRunning && services.contains(service) }
+
     func click(_ id: String, bar: Bar, controller: BarController) {
-        guard isRunning else { return }
+        // A click that arrives after its item was hidden (late event, accessibility action) opens nothing.
+        guard isRunning, TrayServicePlan.acceptsClick(id, shown: controller.model.shownTray,
+                                                      placeable: TrayItems.all.map(\.id)) else { return }
         if id == trayJoin {
             controller.closeFlyout()
             if let url = CalendarLogic.joinCandidate(CalendarService.shared.events, now: Date())?.joinURL { NSWorkspace.shared.open(url) }

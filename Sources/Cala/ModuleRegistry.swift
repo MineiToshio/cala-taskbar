@@ -65,7 +65,7 @@ final class ModuleRegistry: ObservableObject {
         // While waiting for the welcome, module keys may still hold their defaults: only the saved choice
         // (modulesChosen turning true) starts anything, even when it equals those defaults.
         configObserver = store.$config.map {
-            ModuleKeys(modules: $0.modules, chosen: $0.modulesChosen, dockerVisible: $0.place(trayDocker) != .hidden)
+            ModuleKeys(modules: $0.modules, chosen: $0.modulesChosen)
         }.removeDuplicates().dropFirst()
             .receive(on: DispatchQueue.main).sink { [weak self] _ in
                 guard let self else { return }
@@ -89,7 +89,6 @@ final class ModuleRegistry: ObservableObject {
     private struct ModuleKeys: Equatable {
         var modules: ModuleSet
         var chosen: Bool
-        var dockerVisible: Bool
     }
 
     /// Register a module before launch, or start it immediately if its preference is already enabled.
@@ -143,7 +142,6 @@ final class ModuleRegistry: ObservableObject {
             let detail = id == .bar ? "\(bar.controller?.bars.count ?? 0) screens, \(reason)" : reason
             started.append("module \(id.rawValue): started (\(detail))")
         }
-        tray.reconcileServices()
         if let startupSource {
             log(ModulePlan.startupLine(running: running, source: startupSource))
         } else if changed {

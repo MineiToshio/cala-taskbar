@@ -34,7 +34,7 @@ struct UsageSettingsPane: View {
                 SettingRow(title: "Codex", caption: usage.providers.first { $0.provider == .codex }?.detection) {
                     Toggle("Codex", isOn: $store.config.usageCodexEnabled).labelsHidden().toggleStyle(.switch)
                 }
-                if ModulePlan.effective(store.config.modules).tray {
+                if ModulePlan.effective(store.config.modules).tray && store.config.place(trayUsage) != .hidden {
                     RowDivider()
                     SettingRow(title: tx("Provider detection", "Detección de proveedores")) {
                         Button(tx("Refresh", "Actualizar")) { usage.settingsOpened() }

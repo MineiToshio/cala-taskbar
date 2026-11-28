@@ -4,7 +4,6 @@ import Combine
 import CoreWLAN
 import IOKit.ps
 
-let trayBT = "__t_bt", trayBright = "__t_bright", trayUser = "__t_user", trayKB = "__t_kb", trayClock = "__t_clock"
 
 final class FlyoutModel: ObservableObject {
     @Published var kind = ""

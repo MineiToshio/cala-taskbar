@@ -341,6 +341,8 @@ final class UsageQuotaHistory {
     private var pendingImports: [QuotaImportKey: PendingImport] = [:]
     private var changed = false
     private var scheduled = false
+    /// Bumped by `cancelScheduledFlush`: a delayed flush (or its retry after a failed write) from before is dropped.
+    private var flushGeneration = 0
     private var activeProfiles: [String: QuotaProfileID] = [:]
     private var totalCount = 0
 
@@ -503,6 +505,18 @@ final class UsageQuotaHistory {
 
     @discardableResult
     func flush() -> Bool { queue.sync { load(); return write() } }
+
+    /// The usage service stopped: no delayed flush or write retry keeps running. Unsaved rows stay in memory and are
+    /// written by the next flush (stop's final flush, or the next run).
+    func cancelScheduledFlush() {
+        queue.sync {
+            flushGeneration += 1
+            scheduled = false
+        }
+    }
+
+    /// A delayed flush (or a retry of a failed write) is pending.
+    var hasScheduledFlush: Bool { queue.sync { scheduled } }
 
     private func digest(_ fields: [String]) -> String {
         let framed = fields.map { "\($0.utf8.count):\($0)" }.joined()
@@ -728,8 +742,9 @@ final class UsageQuotaHistory {
         changed = true
         guard !scheduled else { return }
         scheduled = true
+        let generation = flushGeneration
         queue.asyncAfter(deadline: .now() + 60) { [weak self] in
-            guard let self else { return }
+            guard let self, self.flushGeneration == generation else { return }
             self.scheduled = false
             if !self.write() { self.scheduleFlush() }
         }

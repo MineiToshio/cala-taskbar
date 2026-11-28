@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import Combine
 
-let trayDisk = "__t_disk"
 
 /// Free space of the user's data volume. "Available" includes purgeable space (caches macOS frees on demand),
 /// the same number System Settings shows.
@@ -135,7 +134,8 @@ final class DiskService: ObservableObject {
     /// Call on the main thread. Publishes the folder list at once (so the panel has its final height) and
     /// fills in the sizes as each folder finishes.
     func refresh(extra: [String], force: Bool = false) {
-        guard ModuleRegistry.shared.isRunning(.tray) else { return }
+        // Only while the Disk item is shown: the Cleanup window's forced rescan does nothing when it is hidden.
+        guard ModuleRegistry.shared.tray.isServiceRunning(.disk) else { return }
         let fresh = Date().timeIntervalSince(lastScan) < 600 && extra == lastExtra && !folders.isEmpty
         if fresh && !force { return }
         lastScan = Date(); lastExtra = extra
@@ -271,6 +271,8 @@ struct DiskPane: View {
             Row(icon: "arrow.clockwise", title: tx("Measure again", "Volver a medir")) { service.refresh(extra: store.config.diskFolders, force: true) }
             LinkRow(title: tx("Storage settings…", "Ajustes de almacenamiento…"), pane: "com.apple.settings.Storage")
         }
+        // Opened from the bar or from More ⌃ (which sets the kind directly): both measure here. A fresh list is kept.
+        .onAppear { service.refresh(extra: store.config.diskFolders) }
     }
 
     private func legend(_ c: Color, _ title: String, _ bytes: Int64) -> some View {

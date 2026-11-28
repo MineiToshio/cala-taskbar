@@ -3,7 +3,6 @@ import AppKit
 import Darwin
 import Combine
 
-let traySystem = "__t_system"
 
 enum RestProbe {
     case available([ProcessUsage])

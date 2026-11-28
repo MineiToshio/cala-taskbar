@@ -11,7 +11,8 @@ Swift 5 language mode (`swift-tools-version: 5.9`), macOS 14+. SwiftPM executabl
 | `ModuleRegistry.swift` | `ModuleRegistry`: main-thread owner of the modules, applies a `ModuleSet` live, shared thumbnail watcher, shutdown |
 | `StatusItem.swift` | Menu-bar status item (Settings…, Zones editor…, layout per monitor, Quit) shown when the Bar is off or Zones is on |
 | `BarModule.swift` | `BarModule` and `BarController`, plus `BarPanel` and `Bar` (one per screen): panels, tick loop, click/scroll handling, menus, show desktop, space reservation |
-| `TrayModule.swift` | `TrayModule`: starts and stops the tray's services (Wi-Fi, calendar, system monitor, usage, mail, Docker) inside the running bar |
+| `TrayModule.swift` | `TrayModule`: runs inside the running bar and starts or stops each tray service as its item is shown or hidden (see [Hidden tray items](#hidden-tray-items)) |
+| `TrayServicePlan.swift` | Pure tray service logic (Foundation only, checked): all tray item ids, `TrayService` and the items each one serves, which services a placement needs, the stop/start transition |
 | `Zones/*.swift` | The Zones module, see [Zones](#zones) |
 | `BarView.swift` | Bar UI: icons, start button, tray, clock, desk strip, badges; frame reporting |
 | `CalendarEvents.swift` | Lazy EventKit service, permission lifecycle, calendar/event value snapshots and safe navigation |
@@ -75,13 +76,14 @@ Cala is four modules behind one protocol (`CalaModule`: `id`, `isRunning`, `star
 | Module | Owns |
 |---|---|
 | **Bar** (`BarModule` → `BarController`) | One panel per screen, the tick timer, the local event monitors, previews and peek, show desktop, space reservation, Dock and menu-bar hiding, the screen-change observer |
-| **Tray** (`TrayModule`) | Wi-Fi, calendar, system monitor, disk, usage, mail, Docker, menu-bar icon hiding and the flyouts. **Depends on the Bar**: it only runs inside a running bar |
+| **Tray** (`TrayModule`) | The tray services of the shown items (Wi-Fi scan, battery notification, system monitor, disk scan, Docker, usage, mail, calendar), menu-bar icon hiding and the flyouts. **Depends on the Bar**: it only runs inside a running bar |
 | **Switcher** (`WindowSwitcher`) | The Option+Tab (and optional Cmd+Tab / Cmd+M) `CGEventTap`, its 3 s retry timer, its panel |
 | **Zones** (`ZonesModule`) | The drag tap and its thread, the worker queue, the overlay panels, the zones store; see [Zones](#zones) |
 
 **Registry.** `ModuleRegistry` (main thread only) holds the desired `ModuleSet` (keys `barEnabled`, `switcherEnabled`, `trayEnabled`, `zonesEnabled` in `config.json`) and reconciles reality with it. A sink on `ConfigStore` re-applies whenever those keys change, so a Settings switch takes effect live. Applications are serialized: a change that arrives while one is running is coalesced and applied right after, using the latest value. `ModulePlan.effective` turns the tray off when the bar is off. `ModulePlan.startOrder` stops in the order Zones, Tray, Switcher, Bar and starts in the order Bar, Tray, Switcher, Zones, so the tray never outlives its bar.
 
-**A stopped module holds nothing:** no monitors, timers, observers, event taps or windows (each module's `stop()` removes the ones its `start()` created; the debug log shows `module X: stopped`). The only things that outlive modules are the shell: `ConfigStore`, `PermissionCenter`, the Settings and welcome windows, feedback and crash reporting, the watchdog, the login item, the SIGTERM source and the status item controller.
+**A stopped module holds nothing:** no monitors, timers, observers, event taps or windows (each module's `stop()` removes the ones its `start()` created; the debug log shows `module X: stopped`). The only things that outlive modules are the shell: `ConfigStore`, `PermissionCenter`, the Settings and welcome windows, feedback and crash reporting, the watchdog, the login item, the SIGTERM source, the status item controller, the update checker (`UpdateService`, its own `updateChecks` switch), the bundle-replaced monitor (`BundleUpdateMonitor`) and two Darwin debug notifications (`MenuBarDiagnostics`). Inside a running tray the same rule applies per item, see below.
+
 
 **Shared thumbnail watcher.** `MinimizeWatcher` (AX observers and the 3 s sync timer) runs while the Bar **or** the Switcher runs (`ModulePlan.needsThumbnails`), because both need minimized-window thumbnails; it is created and torn down by the registry, not by either module.
 
@@ -94,6 +96,25 @@ Cala is four modules behind one protocol (`CalaModule`: `id`, `isRunning`, `star
 - An existing user (`onboardingCompleted`, or a `config.json` that existed at launch plus Accessibility, unless a first-run welcome was left unanswered) is migrated: Bar and Tray on, Switcher as stored (an old `switcherEnabled = false` is kept), Zones off, welcome not shown. Nothing is renamed: the new keys are added and `modulesChosen` is set.
 - A fresh install runs **nothing** until the welcome's "What do you want to use?" is answered (Bar, Zones or both, at least one). The answer writes the module keys; `onboardingPending` (UserDefaults) marks an unanswered welcome, and `onboardingCompleted` is written only when the answer is saved, so quitting before choosing shows the welcome again. Only the chosen modules' permissions are requested.
 - At launch the registry logs one line to the debug log: `modules: active=bar,switcher,tray off=zones source=migrated` (`source` is `stored`, `migrated` or `provisional (waiting for onboarding)`). Live changes log `modules: apply active=… off=… reason=…` and `module <id>: started` / `stopped`.
+
+### Hidden tray items
+
+**A hidden tray item's service is stopped.** An item in the bar or in More ⌃ is shown and keeps working; an item placed in Hidden (Settings → Tray, or the item's menu) costs nothing. `TrayServicePlan.wanted` (pure, checked by `scripts/check-settings.sh`) maps the shown items to services; `TrayModule.reconcile` applies it when the tray starts, when the welcome finishes and, live, whenever the set of shown items changes (a sink on `ConfigStore` mapped to that set, with `removeDuplicates`, so reordering or any other setting restarts nothing). Only the difference is applied (`TrayServicePlan.transition`), and the debug log shows `tray services: running=… stopped=… started=…`. Turning the tray off stops every service in reverse order.
+
+| Service | Items | Runs | Hidden |
+|---|---|---|---|
+| `wifi` | Wi-Fi | `WifiInfo` nearby-network scan | No scan; the bar stops reading power, SSID state and RSSI |
+| `power` | Battery | `IOPSNotificationCreateRunLoopSource` on the main run loop | Source removed; no battery reads |
+| `system` | CPU and memory | `SystemMonitor` sampling every 3 s, its energy timer, `RestartAdvisor` | `SystemMonitor.stop()` (energy timer, process panel), no advisor refresh, `notifyutil … openSystemPanel` ignored |
+| `disk` | Disk | `DiskService` folder scan (started when the Disk panel appears, from the bar or from More) | A scan in flight is cancelled; `DiskService.refresh` (also the Cleanup window's forced rescan) does nothing |
+| `docker` | Docker | `DockerService` engine discovery, event stream and reconnect watcher (see [Docker](#docker)) | Requests, the event stream and timers are cancelled. Workspace observers are removed. |
+| `usage` | Claude & Codex | `UsageService` (fetches, file watchers, 5 s maintenance timer, wake observers, the history's delayed flush), `UsagePace` (forecasts, quota notifications), the tray's wake refresh and the bar's `$providers` subscription | All stopped, including a pending history write retry (`UsageQuotaHistory.cancelScheduledFlush`): no fetches, no notifications; Settings shows "Detection paused" |
+| `mail` | Mail | `MailService` IMAP sync, network path monitor, wake observer, Keychain notice, the warm message web view | Sync stopped, watched Keychain reads dropped, the warm web view released; **the cached bodies are kept**. Turning the tray off always calls `MailService.stop()` (closing a Settings sign-in socket even while Mail was hidden) and purges the bodies 3 s later (`purgeCache`); a tray start inside those 3 s cancels it (`cancelPendingPurge`) |
+| `calendar` | Clock, Join | `CalendarService` observers and the 60 s Join refresh | The clock cannot be hidden, so it runs while the tray runs |
+
+Usage and mail also wait for the welcome (they may ask for Keychain access). Items without a service of their own (Keyboard, Bluetooth, Brightness, Volume, User, Downloads, Trash) only had per-tick reads: `TaskbarModel.refreshTray` reads only the shown items (`shownTray`), so a hidden Volume, Bluetooth, Brightness, Keyboard or User (photo lookup) item is not read at all. Free space is read while Disk or CPU and memory is shown (the restart advisor uses it). A panel whose item is hidden while it is open closes, and a click that arrives for a hidden item opens nothing (`TrayServicePlan.acceptsClick`). A battery callback queued before Battery was hidden is dropped (one id per power watch).
+
+**To add an item with a service**, declare its ID and add a `TrayService` case that maps to it in `TrayServicePlan.swift`. Add the item to `TrayItems` in `TrayLayout.swift` and implement the service in both exhaustive switches in `TrayModule.start(_:)` and `stop(_:)`.
 
 ## Zones
 Files in `Sources/Cala/Zones/`. The first group is pure (Foundation and CoreGraphics only) and compiled by `scripts/check-zones.sh`; the rest is AppKit.
@@ -183,7 +204,7 @@ This belongs to the Bar module (see [Modules](#modules)). `DockControl` writes `
 Only when auto-hide is off and only on the primary screen: every 0.6 s, if the focused window extends below the bar top, its height is reduced through AX. Skips full-screen windows and does nothing while a mouse button is pressed. Window IDs whose resized height fails a delayed verification are remembered and skipped for the rest of the process lifetime. This is an approximation, not a true reserved area.
 
 ## Tray internals
-- Battery: `IOPSCopyPowerSourcesInfo`, refreshed instantly by `IOPSNotificationCreateRunLoopSource` (macOS calls back on plug/unplug/charge changes; no polling).
+- Battery: `IOPSCopyPowerSourcesInfo`, refreshed instantly by `IOPSNotificationCreateRunLoopSource` (macOS calls back on plug/unplug/charge changes; no polling). The source exists only while the Battery item is shown.
 - Wi-Fi: `CoreWLAN` (`powerOn`, `rssiValue`, `ssid`, `scanForNetworks`, `associate`). SSID access needs Location permission. Signal level maps -90…-50 dBm to 0…1 and drives `Image(systemName: "wifi", variableValue:)`. Scans and network association run in the background; failed association opens Wi-Fi settings on the main queue.
 - Volume: CoreAudio, property `vmvc` (virtual main volume) and `mute` on the default output device.
 - Bluetooth: private `IOBluetoothPreference{Get,Set}ControllerPowerState` plus `IOBluetoothDevice.pairedDevices()`. A device toggle opens connections asynchronously on the main queue (callback on main); the synchronous `closeConnection()` runs on a background queue.
@@ -194,7 +215,7 @@ Only when auto-hide is off and only on the primary screen: every 0.6 s, if the f
 
 ## Docker
 
-The tray starts Docker's service when the Tray module is running and Docker is placed in the bar or More. Detection checks for the Docker CLI, a supported runtime app or a local Docker socket. Cala reads the current context and registry key names from `~/.docker/config.json` on a background queue. Every endpoint is resolved to its canonical Unix socket and rejected if it falls inside another user's home. Switching engines uses `docker context use`, and actions from a list stay tied to the socket and connection that produced it. Podman controls require an identifiable machine name. [Podman machine start](https://docs.podman.io/en/latest/markdown/podman-machine-start.1.html)
+The [tray service plan](#hidden-tray-items) starts Docker's service while the Tray module is running and Docker is placed in the bar or More. Detection checks for the Docker CLI, a supported runtime app or a local Docker socket. Cala reads the current context and registry key names from `~/.docker/config.json` on a background queue. Every endpoint is resolved to its canonical Unix socket and rejected if it falls inside another user's home. Switching engines uses `docker context use`, and actions from a list stay tied to the socket and connection that produced it. Podman controls require an identifiable machine name. [Podman machine start](https://docs.podman.io/en/latest/markdown/podman-machine-start.1.html)
 
 The service talks to the Engine HTTP API directly over the Unix socket. The event stream subscribes before the first container list is requested. Events drive crash marks and refresh the list after 300 ms of quiet or at least once per second during a burst. A down engine is checked every 10 seconds with a socket check and a ping. Runtime app observations are active during this wait and while starting. Starting Docker temporarily shortens the interval to one second. Hiding the item or stopping the Tray cancels requests, the event stream, timers and workspace observers.
 
@@ -223,7 +244,7 @@ The check executables live outside the SwiftPM app target. `scripts/release.sh` 
 | `scripts/check-mail.sh` | Foundation-only MIME parser, IMAP client against scripted servers (wire pins for delete, archive and mark read; `.fast` transcripts), optimistic overlay and `MailService`, body cache, BODYSTRUCTURE, attachments, bulk actions, older pages, account and Keychain migration, calendar text helpers (`Checks/MailParsing`; about 660 checks, see [mail.md](mail.md#checks-limits-and-risks)) |
 | `scripts/check-modules.sh` | Foundation-only module plan, migration, ordering, permissions and welcome choices (`Checks/Modules`) |
 | `scripts/check-docker.sh` | Foundation-only Docker discovery, API models, HTTP and event framing, crash rules and shell quoting. Use `--transport` for a local test socket and `--live` for read-only ping and container-list requests through the app client. |
-| `scripts/check-settings.sh` | 57 serialized keys (42 Settings, 3 elsewhere in the UI, 12 internal), plus tray moves including first slots and empty groups (`Checks/SettingsTray`) |
+| `scripts/check-settings.sh` | 62 serialized keys (45 Settings, 3 elsewhere in the UI, 14 internal), plus tray moves including first slots and empty groups, and which tray services run for a placement (`TrayServicePlan`, Foundation only) (`Checks/SettingsTray`) |
 | `scripts/check-statusline.sh` | Claude settings ownership, backups and concurrent edit handling (`Checks/ClaudeStatusLine`) |
 | `scripts/check-update.sh` | Build comparisons, relaunch blockers and login-item migration (`Checks/Update`) |
 | `scripts/check-zones.sh` | Foundation/CoreGraphics geometry, templates, editor operations, drag and layout-strip state, ID repair and backup recovery (`Checks/Zones`) |

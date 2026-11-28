@@ -367,6 +367,8 @@ final class UsageService: ObservableObject {
         // Order the final flush after this run's service work and before a subsequent start.
         queue.async {
             self.quotaHistory.breakCoverage(at: stoppedAt, allowsQuiet: true, flush: true)
+            // Hidden item or tray off: an unwritable history folder no longer keeps a 60 s retry alive.
+            self.quotaHistory.cancelScheduledFlush()
             guard self.run === run else { return }
             self.run = nil
             self.cancelBackfill()
