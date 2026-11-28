@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import Combine
 
-let trayDisk = "__t_disk"
 
 /// Free space of the user's data volume. "Available" includes purgeable space (caches macOS frees on demand),
 /// the same number System Settings shows.

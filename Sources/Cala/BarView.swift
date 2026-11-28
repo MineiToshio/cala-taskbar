@@ -245,7 +245,6 @@ struct StartButton: View {
     }
 }
 
-let trayJoin = "__t_join"
 
 /// "Join" button for the next meeting with a video link: from 5 minutes before it starts until it ends.
 /// Clicks are routed by the app delegate (the bar is a non-activating panel), see `trayClick`.
@@ -429,7 +428,6 @@ struct TrayView: View {
 }
 
 
-let trayUsage = "__t_usage_combined"
 
 struct UsageTrayView: View {
     @Environment(\.colorScheme) private var scheme

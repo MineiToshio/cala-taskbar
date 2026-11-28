@@ -129,3 +129,64 @@ expect("Disk keeps its saved middle slot when Wi-Fi is dragged to the end and Di
        savingTrayBarOrder(beforeDiskDisappears, configuredOrder: beforeDiskDisappears,
                           currentBarOrder: ["wifi", "volume"], dragOrder: diskDrag.order(at: 180)),
        ["volume", "disk", "wifi"])
+
+// MARK: Tray services follow placement (TrayServicePlan)
+
+func expectServices(_ name: String, _ actual: Set<TrayService>, _ expected: Set<TrayService>) {
+    guard actual == expected else {
+        fatalError("FAIL \(name): \(actual.map(\.rawValue).sorted()) != \(expected.map(\.rawValue).sorted())")
+    }
+    print("PASS \(name)")
+}
+
+let placeable = [trayKB, trayWifi, trayBT, trayBright, trayVol, trayUsage, traySystem, trayDisk, trayMail, trayBatt,
+                 trayUser, trayDownloads, trayTrash]
+func shown(hiding hidden: Set<String>, more: Set<String> = []) -> Set<String> {
+    TrayServicePlan.visibleItems(placeable) { hidden.contains($0) ? .hidden : (more.contains($0) ? .more : .bar) }
+}
+let everything = Set(TrayService.allCases)
+
+expectServices("Every service runs when every item is shown and the welcome is done",
+               TrayServicePlan.wanted(visible: shown(hiding: []), welcomeDone: true), everything)
+expectServices("Usage and mail wait for the welcome",
+               TrayServicePlan.wanted(visible: shown(hiding: []), welcomeDone: false), everything.subtracting([.usage, .mail]))
+expectServices("Hiding Mail stops only mail",
+               TrayServicePlan.wanted(visible: shown(hiding: [trayMail]), welcomeDone: true), everything.subtracting([.mail]))
+expectServices("Hiding Claude & Codex stops usage fetches and pace notifications",
+               TrayServicePlan.wanted(visible: shown(hiding: [trayUsage]), welcomeDone: true), everything.subtracting([.usage]))
+expectServices("Items in More keep their services",
+               TrayServicePlan.wanted(visible: shown(hiding: [], more: [trayMail, trayUsage, traySystem, trayWifi]), welcomeDone: true),
+               everything)
+expectServices("Hiding every placeable item keeps only the clock's calendar",
+               TrayServicePlan.wanted(visible: shown(hiding: Set(placeable)), welcomeDone: true), [.calendar])
+expectServices("Hiding Wi-Fi, Battery, CPU and Disk stops their services",
+               TrayServicePlan.wanted(visible: shown(hiding: [trayWifi, trayBatt, traySystem, trayDisk]), welcomeDone: true),
+               [.usage, .mail, .calendar])
+expectServices("Items without a service change nothing when hidden",
+               TrayServicePlan.wanted(visible: shown(hiding: [trayKB, trayBT, trayBright, trayVol, trayUser, trayDownloads, trayTrash]),
+                                      welcomeDone: true), everything)
+guard TrayServicePlan.visibleItems(placeable, place: { _ in .hidden }) == [trayClock, trayJoin] else {
+    fatalError("FAIL the clock and the Join button are always shown")
+}
+print("PASS The clock and the Join button are always shown")
+guard TrayServicePlan.readsDiskInfo([traySystem]), TrayServicePlan.readsDiskInfo([trayDisk]),
+      !TrayServicePlan.readsDiskInfo([trayClock, trayWifi]) else {
+    fatalError("FAIL free space is read for Disk or the restart advisor only")
+}
+print("PASS Free space is read for Disk or the restart advisor only")
+
+let hideMail = TrayServicePlan.transition(from: everything, to: everything.subtracting([.mail]))
+guard hideMail.stop == [.mail], hideMail.start.isEmpty else { fatalError("FAIL hiding Mail stops mail and nothing else") }
+print("PASS Hiding Mail stops mail and nothing else")
+let unchanged = TrayServicePlan.transition(from: [.wifi, .calendar], to: [.wifi, .calendar])
+guard unchanged.stop.isEmpty, unchanged.start.isEmpty else { fatalError("FAIL an unchanged set restarts nothing") }
+print("PASS An unchanged set restarts nothing")
+let off = TrayServicePlan.transition(from: everything, to: [])
+let on = TrayServicePlan.transition(from: [], to: everything)
+guard off.stop == TrayService.allCases.reversed(), on.start == TrayService.allCases, off.start.isEmpty, on.stop.isEmpty else {
+    fatalError("FAIL services stop in reverse order and start in declaration order")
+}
+print("PASS Services stop in reverse order and start in declaration order")
+guard TrayServicePlan.summary(running: [.calendar, .wifi], stopped: [.mail], started: []) ==
+        "tray services: running=wifi,calendar stopped=mail started=-" else { fatalError("FAIL tray services log line") }
+print("PASS Tray services log line")

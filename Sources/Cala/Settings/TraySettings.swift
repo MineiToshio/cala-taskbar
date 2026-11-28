@@ -178,7 +178,7 @@ struct TrayPane: View {
     private func itemCaption(_ id: String) -> String? {
         if id == trayMail && !mail.accountsLoadFailed && mail.accounts.isEmpty { return tx("No accounts", "Sin cuentas") }
         if id == trayMail && store.config.place(id) == .hidden {
-            return tx("Enabled accounts still sync when the tray is on.", "Las cuentas siguen sincronizándose con la bandeja activa")
+            return tx("Sync is paused while Mail is hidden.", "La sincronización está en pausa mientras Correo está oculto.")
         }
         if id == trayUsage {
             let config = store.config
@@ -186,7 +186,7 @@ struct TrayPane: View {
             let enabled = UsageProvider.allCases.filter { $0 == .claude ? config.usageClaudeEnabled : config.usageCodexEnabled }
             if enabled.isEmpty { return tx("Providers are off", "Claude y Codex están desactivados") }
             let providers = usage.providers.filter { enabled.contains($0.provider) }
-            if !ModulePlan.effective(snapshot?.modules ?? config.modules).tray {
+            if !ModulePlan.effective(snapshot?.modules ?? config.modules).tray || config.place(trayUsage) == .hidden {
                 return tx("Detection paused", "Detección en pausa")
             }
             if providers.count != enabled.count || providers.contains(where: { !$0.didDetectSession }) {

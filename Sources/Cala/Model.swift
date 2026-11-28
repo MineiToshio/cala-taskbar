@@ -56,6 +56,8 @@ final class TaskbarModel: ObservableObject {
     private var trayRunID: UUID?
     private var usageObserver: AnyCancellable?
     private var powerSource: CFRunLoopSource?
+    /// Tray items on screen (bar or More), set by `TrayModule`. `refreshTray` reads only what these show.
+    var shownTray = Set<String>()
 
     init(store: ConfigStore, run: ModuleCancellation) {
         self.store = store
@@ -84,8 +86,6 @@ final class TaskbarModel: ObservableObject {
             guard let self, self.trayRunID == run else { return }
             self.usage = providers
         }
-        watchPower()
-        disk = DiskInfo.read()
         trayVisible = true
     }
 
@@ -95,11 +95,8 @@ final class TaskbarModel: ObservableObject {
         trayHover = nil
         usageObserver?.cancel()
         usageObserver = nil
-        if let powerSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes)
-            CFRunLoopSourceInvalidate(powerSource)
-        }
-        powerSource = nil
+        stopPowerWatch()
+        shownTray = []
         photoLoading = false
         photoTried = .distantPast
     }
@@ -112,7 +109,8 @@ final class TaskbarModel: ObservableObject {
 
     /// Event-driven: macOS calls back the moment the power source (plug / unplug) or charge state changes,
     /// so there is no polling and no CPU cost while nothing happens.
-    private func watchPower() {
+    func startPowerWatch() {
+        guard trayRunID != nil, powerSource == nil else { return }
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         guard let src = IOPSNotificationCreateRunLoopSource({ ctx in
             guard let ctx else { return }
@@ -126,6 +124,14 @@ final class TaskbarModel: ObservableObject {
         powerSource = src
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         batt = SystemTray.battery()
+    }
+
+    func stopPowerWatch() {
+        if let powerSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes)
+            CFRunLoopSourceInvalidate(powerSource)
+        }
+        powerSource = nil
     }
 
     private func key(_ a: NSRunningApplication) -> String {
@@ -185,26 +191,38 @@ final class TaskbarModel: ObservableObject {
                 url: a.bundleURL, pid: a.processIdentifier, pinned: pinned)
     }
 
+    /// Reads the live state of the shown tray items only: a hidden item costs nothing.
     func refreshTray() {
         guard let run = trayRunID else { return }
-        let battery = SystemTray.battery()
-        if batt?.pct != battery?.pct || batt?.charging != battery?.charging || batt?.isCharging != battery?.isCharging { batt = battery }
-        let diskNow = DiskInfo.read()
-        if disk != diskNow { disk = diskNow }
-        let wifi = SystemTray.wifiOn() ?? true
-        if wifiOn != wifi { wifiOn = wifi }
-        let connected = SystemTray.wifiConnected()
-        if wifiConnected != connected { wifiConnected = connected }
-        let vol = SystemTray.volume() ?? volume
-        if volume != vol { volume = vol }
-        let mute = SystemTray.muted()
-        if muted != mute { muted = mute }
-        let bluetooth = Bluetooth.on
-        if btOn != bluetooth { btOn = bluetooth }
-        let signal = SystemTray.signal(SystemTray.rssi())
-        if wifiSignal != signal { wifiSignal = signal }
+        let shown = shownTray
+        if shown.contains(trayBatt) {
+            let battery = SystemTray.battery()
+            if batt?.pct != battery?.pct || batt?.charging != battery?.charging || batt?.isCharging != battery?.isCharging { batt = battery }
+        }
+        if TrayServicePlan.readsDiskInfo(shown) {
+            let diskNow = DiskInfo.read()
+            if disk != diskNow { disk = diskNow }
+        }
+        if shown.contains(trayWifi) {
+            let wifi = SystemTray.wifiOn() ?? true
+            if wifiOn != wifi { wifiOn = wifi }
+            let connected = SystemTray.wifiConnected()
+            if wifiConnected != connected { wifiConnected = connected }
+            let signal = SystemTray.signal(SystemTray.rssi())
+            if wifiSignal != signal { wifiSignal = signal }
+        }
+        if shown.contains(trayVol) {
+            let vol = SystemTray.volume() ?? volume
+            if volume != vol { volume = vol }
+            let mute = SystemTray.muted()
+            if muted != mute { muted = mute }
+        }
+        if shown.contains(trayBT) {
+            let bluetooth = Bluetooth.on
+            if btOn != bluetooth { btOn = bluetooth }
+        }
         // Retried every 30 s until it loads; a transient lookup failure no longer leaves the bar without a photo.
-        if userPhoto == nil, !photoLoading, Date().timeIntervalSince(photoTried) > 30 {
+        if shown.contains(trayUser), userPhoto == nil, !photoLoading, Date().timeIntervalSince(photoTried) > 30 {
             photoLoading = true; photoTried = Date()
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let i = Users.cachedPhoto(NSUserName())
@@ -216,10 +234,14 @@ final class TaskbarModel: ObservableObject {
                 }
             }
         }
-        let bright = Brightness.get() != nil
-        if hasBright != bright { hasBright = bright }
-        let code = Keyboard.current()?.code ?? ""
-        if kbCode != code { kbCode = code }
+        if shown.contains(trayBright) {
+            let bright = Brightness.get() != nil
+            if hasBright != bright { hasBright = bright }
+        }
+        if shown.contains(trayKB) {
+            let code = Keyboard.current()?.code ?? ""
+            if kbCode != code { kbCode = code }
+        }
     }
 
     func badge(for item: AppItem) -> String? {

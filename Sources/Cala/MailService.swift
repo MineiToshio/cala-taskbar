@@ -939,11 +939,17 @@ final class MailService: ObservableObject {
         olderExhausted.removeAll()
         for account in accounts { status[account.id] = .paused }
         publishInbox()
-        if purgingCache, let bodyCache {
-            let purge = DispatchWorkItem { bodyCache.purgeAll() }
-            pendingPurge = purge
-            cacheQueue.asyncAfter(deadline: .now() + 3, execute: purge)
-        }
+        if purgingCache { purgeCache() }
+    }
+
+    /// Deletes the cached bodies 3 s from now; a start in between cancels it. Turning the tray off calls it even when
+    /// sync had already stopped because the Mail item is hidden (hiding it alone keeps the cache).
+    func purgeCache() {
+        guard let bodyCache else { return }
+        pendingPurge?.cancel()
+        let purge = DispatchWorkItem { bodyCache.purgeAll() }
+        pendingPurge = purge
+        cacheQueue.asyncAfter(deadline: .now() + 3, execute: purge)
     }
 
     /// The network came back: accounts waiting out a retry delay reconnect now.

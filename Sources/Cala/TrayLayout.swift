@@ -1,6 +1,5 @@
 import Foundation
 
-let trayMore = "__t_more", trayDownloads = "__t_downloads", trayTrash = "__t_trash"
 
 extension TrayPlace {
     var title: String {

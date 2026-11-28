@@ -27,6 +27,8 @@ struct MailWebBody: View {
     /// the content-rule compile, the data store, the cookie policy or the first WebContent process.
     /// Safe to call repeatedly.
     @MainActor static func prewarm() { MailWebShared.prewarm() }
+    /// Lets the warm-up web view (and with it the WebContent process) go when mail stops.
+    @MainActor static func cool() { MailWebShared.cool() }
 
     var body: some View {
         if loadsRemoteImages || localOnlyRule != nil {
@@ -144,6 +146,11 @@ enum MailWebShared {
         // Spins up the WebContent process. The page is static, JavaScript is off, nothing is fetched.
         view.loadHTMLString("<!doctype html><meta charset=\"utf-8\"><body></body>", baseURL: nil)
         Task { _ = try? await localOnly() }
+    }
+
+    static func cool() {
+        warmView?.stopLoading()
+        warmView = nil
     }
 
     /// Runs `body` once the cookie policy is in place: immediately when it already is.

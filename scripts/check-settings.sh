@@ -81,8 +81,14 @@ for file in settings:
 print("PASS settings audit: 62/62 keys (45 Settings, 3 other UI, 14 internal)")
 PY
 
+plan=Sources/Cala/TrayServicePlan.swift
+if /usr/bin/grep -E '^[[:space:]]*import ' "$plan" | /usr/bin/grep -qv '^import Foundation$'; then
+    print -u2 "FAIL $plan must only import Foundation"
+    exit 1
+fi
+
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 swiftc -O -module-cache-path "${CALA_MODULE_CACHE:-$out/modules}" -o "$out/cala-settings-tray" \
-    Sources/Cala/TrayOrder.swift Checks/SettingsTray/main.swift
+    Sources/Cala/TrayOrder.swift "$plan" Checks/SettingsTray/main.swift
 "$out/cala-settings-tray"

@@ -5,8 +5,6 @@ import CoreWLAN
 import CoreLocation
 import OpenDirectory
 
-let trayBatt = "__t_batt", trayWifi = "__t_wifi", trayVol = "__t_vol"
-let trayMail = "__t_mail"
 
 enum SystemTray {
     /// `charging` = on AC power; `isCharging` = actually taking charge (false when full on AC).
