@@ -32,6 +32,8 @@ Free · Source available · No Cala account required · macOS 14 or later · App
 
 **The tray on the right** has Wi‑Fi, Bluetooth, sound, brightness, battery, disk, keyboard, Downloads, Trash, and a clock with your upcoming events and a button to join the video call. Left-click a tray icon to open its panel. Right-click or Control-click an item in the bar for **Move to More** or **Hide**, or an item in More (⌃) for **Move to bar** or **Hide**. Both menus include **Tray settings…**. Right-click the More or join-call button for the bar menu.
 
+**Docker** appears in the tray when Cala detects a local setup. Click the whale to manage containers, images and volumes.
+
 **Your mail, in the tray.** An envelope with the unread count of your Gmail, iCloud or Yahoo accounts; read, archive or delete without opening a browser. See [Mail](#mail).
 
 **Why is my Mac slow?** The CPU and memory panel tells you which app weighs the most and recommends a restart when it is worth it.

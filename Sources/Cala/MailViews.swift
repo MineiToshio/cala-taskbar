@@ -30,10 +30,17 @@ struct MailOverflowPane: View {
     @ObservedObject var model: TaskbarModel
     @ObservedObject private var store = ConfigStore.shared
     @ObservedObject private var service = MailService.shared
+    @ObservedObject private var docker = DockerService.shared
     @State private var hover: String?
 
     var body: some View {
-        let ids = store.config.moreTrayIDs.filter { $0 == trayMail ? !service.accounts.isEmpty : model.trayAvailable($0) }
+        let ids = store.config.moreTrayIDs.filter {
+            switch $0 {
+            case trayMail: return !service.accounts.isEmpty
+            case trayDocker: return docker.available
+            default: return model.trayAvailable($0)
+            }
+        }
         if store.config.moreTrayIDs.contains(trayMail) {
             VStack(alignment: .leading, spacing: 12) {
                 Header(title: tx("More", "Más"))
@@ -63,7 +70,12 @@ struct MailOverflowPane: View {
 
     private func tile(_ info: TrayItemInfo) -> some View {
         let isMail = info.id == trayMail
-        let title = isMail ? mailTrayTitle(service.unreadCount) : info.title
+        let title: String
+        switch info.id {
+        case trayMail: title = mailTrayTitle(service.unreadCount)
+        case trayDocker: title = dockerTrayTitle(docker.state, count: docker.runningCount)
+        default: title = info.title
+        }
         return Button {
             fm.fromMore = true; fm.kind = info.id; fm.token += 1
         } label: {

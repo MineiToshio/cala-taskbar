@@ -109,6 +109,7 @@ struct FlyoutView: View {
             case trayBatt: BatteryPane(model: model)
             case trayBright: BrightPane()
             case trayDisk: DiskPane(model: model)
+            case trayDocker: DockerPane(availableHeight: fm.availableHeight - (fm.fromMore ? 22 : 0))
             case trayMail:
                 MailPane(availableHeight: fm.availableHeight - (fm.fromMore ? 22 : 0),
                          readerHeight: fm.mailReaderSize.height - 36, reading: $fm.mailMessage)
@@ -142,7 +143,7 @@ struct FlyoutView: View {
 
     private var paneWidth: CGFloat {
         if fm.kind == traySystem { return CGFloat(SystemPanelLayout.width) }
-        return fm.kind.hasPrefix("__t_usage_") || [trayClock, trayDisk, trayMail].contains(fm.kind) ? 380 : 316
+        return fm.kind.hasPrefix("__t_usage_") || [trayClock, trayDisk, trayDocker, trayMail].contains(fm.kind) ? 380 : 316
     }
 }
 

@@ -448,6 +448,7 @@ final class BarController {
 
     private func trayItemAvailable(_ id: String) -> Bool {
         if id == trayMail { return MainActor.assumeIsolated { !MailService.shared.accounts.isEmpty } }
+        if id == trayDocker { return MainActor.assumeIsolated { DockerService.shared.available } }
         return model.trayAvailable(id)
     }
 

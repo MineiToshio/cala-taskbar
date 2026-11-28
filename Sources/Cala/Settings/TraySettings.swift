@@ -152,7 +152,11 @@ struct TrayPane: View {
 
     private func itemLabel(_ info: TrayItemInfo, detail: SettingsDetail?, caption: String?) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: info.symbol).frame(width: 22).foregroundStyle(.secondary).accessibilityHidden(true)
+            Group {
+                if info.id == trayDocker { TrayGlyph(id: trayDocker) }
+                else { Image(systemName: info.symbol) }
+            }
+            .frame(width: 22).foregroundStyle(.secondary).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(info.title).font(.system(size: 13, weight: .medium))
                 if let caption { Text(caption).font(.system(size: 11.5)).foregroundStyle(.secondary) }

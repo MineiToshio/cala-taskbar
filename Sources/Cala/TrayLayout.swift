@@ -1,5 +1,6 @@
 import Foundation
 
+let trayDocker = "__t_docker"
 let trayMore = "__t_more", trayDownloads = "__t_downloads", trayTrash = "__t_trash"
 
 extension TrayPlace {
@@ -35,6 +36,7 @@ enum TrayItems {
         usage,
         TrayItemInfo(id: traySystem, englishTitle: "CPU and memory", spanishTitle: "CPU y memoria", symbol: "cpu", defaultPlace: .bar),
         TrayItemInfo(id: trayDisk, englishTitle: "Disk", spanishTitle: "Disco", symbol: "internaldrive", defaultPlace: .bar),
+        TrayItemInfo(id: trayDocker, englishTitle: "Docker", symbol: "", defaultPlace: .bar),
         TrayItemInfo(id: trayMail, englishTitle: "Mail", spanishTitle: "Correo", symbol: "envelope", defaultPlace: .bar),
         TrayItemInfo(id: trayBatt, englishTitle: "Battery", spanishTitle: "Batería", symbol: "battery.75", defaultPlace: .bar),
         TrayItemInfo(id: trayUser, englishTitle: "User", spanishTitle: "Usuario", symbol: "person.crop.circle", defaultPlace: .more),

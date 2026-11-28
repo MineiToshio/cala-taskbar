@@ -316,6 +316,7 @@ struct TrayView: View {
     @ObservedObject private var monitor = SystemMonitor.shared
     @ObservedObject private var advisor = RestartAdvisor.shared
     @ObservedObject private var mail = MailService.shared
+    @ObservedObject private var docker = DockerService.shared
     @Environment(\.colorScheme) private var scheme
 
     static func systemSymbol(_ metric: SystemMetric) -> String {
@@ -349,7 +350,11 @@ struct TrayView: View {
     }
 
     private func available(_ id: String) -> Bool {
-        id == trayMail ? !mail.accounts.isEmpty : model.trayAvailable(id)
+        switch id {
+        case trayMail: return !mail.accounts.isEmpty
+        case trayDocker: return docker.available
+        default: return model.trayAvailable(id)
+        }
     }
 
     private func isLifted(_ id: String) -> Bool {
@@ -386,6 +391,12 @@ struct TrayView: View {
                     TrayGlyph(id: id, model: model)
                     Text("\(d.freePercent)%").font(.system(size: 9.5, weight: .medium)).monospacedDigit()
                 }.foregroundStyle(diskTint(d))))
+            }
+        case trayDocker:
+            if docker.available {
+                let title = dockerTrayTitle(docker.state, count: docker.runningCount)
+                cell(nil, id: id, text: nil, custom: AnyView(DockerTrayMark(state: docker.glyph, showCount: true)),
+                     accessibilityTitle: title).help(title)
             }
         case trayMail:
             if !mail.accounts.isEmpty {

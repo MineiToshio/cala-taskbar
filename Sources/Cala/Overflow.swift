@@ -13,6 +13,7 @@ extension TaskbarModel {
         case trayKB: return !kbCode.isEmpty
         case trayBright: return hasBright
         case trayDisk: return disk != nil
+        case trayDocker: return MainActor.assumeIsolated { DockerService.shared.available }
         case trayBatt: return batt != nil
         case trayUsage: return usage.contains(where: \.available)
         default: return true
@@ -76,6 +77,9 @@ private func trayGlyphContent(id: String, model: TaskbarModel?) -> some View {
             }
         case traySystem:
             Image(systemName: "cpu").font(.system(size: 14))
+        case trayDocker:
+            if model == nil { DockerWhale().fill().frame(width: 18, height: 14) }
+            else { DockerOverflowGlyph() }
         case trayDisk:
             Image(systemName: "internaldrive").font(.system(size: 14))
         case trayBatt:
@@ -100,10 +104,11 @@ struct MorePane: View {
     @ObservedObject var fm: FlyoutModel
     @ObservedObject var model: TaskbarModel
     @ObservedObject private var store = ConfigStore.shared
+    @ObservedObject private var docker = DockerService.shared
     @State private var hover: String?
 
     var body: some View {
-        let ids = store.config.moreTrayIDs.filter { model.trayAvailable($0) }
+        let ids = store.config.moreTrayIDs.filter { $0 == trayDocker ? docker.available : model.trayAvailable($0) }
         VStack(alignment: .leading, spacing: 12) {
             Header(title: tx("More", "Más"))
             if ids.isEmpty {
@@ -124,6 +129,8 @@ struct MorePane: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .help(id == trayDocker ? dockerTrayTitle(docker.state, count: docker.runningCount) : info.title)
+                            .accessibilityLabel(id == trayDocker ? dockerTrayTitle(docker.state, count: docker.runningCount) : info.title)
                             .onHover { hover = $0 ? id : (hover == id ? nil : hover) }
                             .reportFrame(id, in: "flyout")
                         }

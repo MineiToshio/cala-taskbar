@@ -11,7 +11,7 @@ Swift 5 language mode (`swift-tools-version: 5.9`), macOS 14+. SwiftPM executabl
 | `ModuleRegistry.swift` | `ModuleRegistry`: main-thread owner of the modules, applies a `ModuleSet` live, shared thumbnail watcher, shutdown |
 | `StatusItem.swift` | Menu-bar status item (Settings…, Zones editor…, layout per monitor, Quit) shown when the Bar is off or Zones is on |
 | `BarModule.swift` | `BarModule` and `BarController`, plus `BarPanel` and `Bar` (one per screen): panels, tick loop, click/scroll handling, menus, show desktop, space reservation |
-| `TrayModule.swift` | `TrayModule`: starts and stops the tray's services (Wi-Fi, calendar, system monitor, usage, mail) inside the running bar |
+| `TrayModule.swift` | `TrayModule`: starts and stops the tray's services (Wi-Fi, calendar, system monitor, usage, mail, Docker) inside the running bar |
 | `Zones/*.swift` | The Zones module, see [Zones](#zones) |
 | `BarView.swift` | Bar UI: icons, start button, tray, clock, desk strip, badges; frame reporting |
 | `CalendarEvents.swift` | Lazy EventKit service, permission lifecycle, calendar/event value snapshots and safe navigation |
@@ -46,6 +46,9 @@ Swift 5 language mode (`swift-tools-version: 5.9`), macOS 14+. SwiftPM executabl
 | `RestartAdvisor.swift` | Uptime and pending-update reading, restart advice state and snoozing, reasons page and Finder restart action |
 | `Cleanup.swift` | "Limpiar espacio" window: git worktree discovery and safety checks (`/usr/bin/git`, `lsof`), cache emptying, confirmation and removal |
 | `Disk.swift` | Free-space reading (`DiskInfo`), background folder sizing (`DiskService`), tray storage panel |
+| `DockerCore.swift` | Foundation-only context and runtime rules, Engine API response models, HTTP and event framing, grouping, and crash detection |
+| `DockerService.swift` | Unix-socket HTTP client, tray lifecycle, event stream and reconnect watcher, panel reads, engine controls, Terminal actions |
+| `DockerViews.swift` | Whale glyph and the Containers, Images and Volumes tabs |
 | `Usage.swift` | Claude/Codex usage detection, read-only fetches, local events, refresh policy and cache |
 | `Model.swift` | `TaskbarModel`: items, hover state, badges, tray state, pin toggling |
 | `Preview.swift` | Window preview panel and cards (`PreviewController`) |
@@ -72,7 +75,7 @@ Cala is four modules behind one protocol (`CalaModule`: `id`, `isRunning`, `star
 | Module | Owns |
 |---|---|
 | **Bar** (`BarModule` → `BarController`) | One panel per screen, the tick timer, the local event monitors, previews and peek, show desktop, space reservation, Dock and menu-bar hiding, the screen-change observer |
-| **Tray** (`TrayModule`) | Wi-Fi, calendar, system monitor, disk, usage, mail, menu-bar icon hiding and the flyouts. **Depends on the Bar**: it only runs inside a running bar |
+| **Tray** (`TrayModule`) | Wi-Fi, calendar, system monitor, disk, usage, mail, Docker, menu-bar icon hiding and the flyouts. **Depends on the Bar**: it only runs inside a running bar |
 | **Switcher** (`WindowSwitcher`) | The Option+Tab (and optional Cmd+Tab / Cmd+M) `CGEventTap`, its 3 s retry timer, its panel |
 | **Zones** (`ZonesModule`) | The drag tap and its thread, the worker queue, the overlay panels, the zones store; see [Zones](#zones) |
 
@@ -189,6 +192,14 @@ Only when auto-hide is off and only on the primary screen: every 0.6 s, if the f
 - Users: the profiles panel loads names and photos on a background queue (`dscl` for names, `JPEGPhoto` or `Picture` for photos). `Users.switchTo` loads the PRIVATE `login.framework` symbol `SACSwitchToUser` with checked `dlopen`/`dlsym`. On a background queue it reads the local user's OpenDirectory record (RecordName, UniqueID, GeneratedUID, RealName, NFSHomeDirectory, PrimaryGroupID, UserShell, RecordType, AppleMetaNodeLocation, JPEGPhoto and masked Password). The dictionary uses `dsAttrTypeStandard:*` keys and array values; RecordName[0] must match the non-empty target short name and binary plist serialization must succeed before calling the API. loginwindow uses this record to preselect the target, including users without an open session. Return 0 means only that loginwindow received the request; the switch is asynchronous. The same background queue polls the PRIVATE SkyLight `SLSCopySessionList` every 0.25 s for up to about 3 s, checking the original session's `kCGSSessionOnConsoleKey`. Lookup, validation, API or verification failure triggers one Ctrl+Cmd+Q lock fallback on the main queue. A main-queue guard ignores further switch requests until completion. Success is sticky for each attempt; the main-queue fallback rechecks the attempt and success state. A continuous monotonic clock measures the timeout, including suspension: verification delayed beyond 6 s is logged as unknown, probably switched, and does not lock the screen. `SLSSessionSwitch*` calls are blocked for non-Apple callers and are not used. Both login.framework and SkyLight are PRIVATE APIs that may break in any macOS update.
 - Low Power Mode: a background `Process` runs `/usr/bin/osascript -e` with `do shell script "pmset -a lowpowermode …" with administrator privileges` (password prompt each time). The toggle refreshes the actual system state on completion and every 2 s; no AppleScript executes on the main thread.
 
+## Docker
+
+The tray starts Docker's service when the Tray module is running and Docker is placed in the bar or More. Detection checks for the Docker CLI, a supported runtime app or a local Docker socket. Cala reads the current context from `~/.docker/config.json`, resolves Unix socket aliases, and skips the default socket if it points inside another user's home. Switching engines uses `docker context use` with the selected context.
+
+The service talks to the Engine HTTP API directly over the Unix socket. A separate container event stream drives debounced list updates and crash marks. A down engine is checked every 10 seconds with a socket check and a ping. Starting Docker temporarily shortens the interval to one second. Hiding the item or stopping the Tray cancels requests, the event stream, timers and workspace observers.
+
+The pane measures running container memory while open and requests disk usage once per opening. It reads both layouts of the Engine disk usage response. Reclaimable image space is an estimate for engines that report legacy totals. Logs, shells and Docker Hub sign-in open in Terminal through private executable scripts. Cala reads only the registry keys from the Docker config to report sign-in status. [Engine disk usage response](https://docs.docker.com/reference/api/engine/version/v1.57/operations/SystemDataUsage/)
+
 ## System panel
 `SystemMonitor` samples process CPU and total CPU over the same window. It publishes a `ProcessReading` only when total CPU is within 0–100%, process values are finite and nonnegative, and their sum is at most five percentage points above the total. When validation fails, the sampling counters advance and the last valid reading stays available until it expires, four seconds after capture. The CPU meter, breakdown and attributed action use that same reading. Without a fresh valid reading, the meters and list show loading skeletons, as does the guidance card when it is waiting for attribution. `SystemLoadingPulse` uses a static placeholder when Reduce Motion is enabled.
 
@@ -211,6 +222,7 @@ The check executables live outside the SwiftPM app target. `scripts/release.sh` 
 | `scripts/check-rules.sh` | System and restart rules, formatting and panel policy (`Checks/SystemRules`, `Checks/PanelDismiss`) |
 | `scripts/check-mail.sh` | Foundation-only MIME parser, IMAP client against scripted servers (wire pins for delete, archive and mark read; `.fast` transcripts), optimistic overlay and `MailService`, body cache, BODYSTRUCTURE, attachments, bulk actions, older pages, account and Keychain migration, calendar text helpers (`Checks/MailParsing`; about 660 checks, see [mail.md](mail.md#checks-limits-and-risks)) |
 | `scripts/check-modules.sh` | Foundation-only module plan, migration, ordering, permissions and welcome choices (`Checks/Modules`) |
+| `scripts/check-docker.sh` | Foundation-only Docker discovery, API models, HTTP and event framing, crash rules and shell quoting. Use `--live` for read-only ping and container-list requests through the app client. |
 | `scripts/check-settings.sh` | 57 serialized keys (42 Settings, 3 elsewhere in the UI, 12 internal), plus tray moves including first slots and empty groups (`Checks/SettingsTray`) |
 | `scripts/check-statusline.sh` | Claude settings ownership, backups and concurrent edit handling (`Checks/ClaudeStatusLine`) |
 | `scripts/check-update.sh` | Build comparisons, relaunch blockers and login-item migration (`Checks/Update`) |

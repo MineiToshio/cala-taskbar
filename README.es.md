@@ -32,6 +32,8 @@ Gratis · Código visible · No requiere una cuenta de Cala · macOS 14 o más n
 
 **La bandeja de la derecha** tiene Wi‑Fi, Bluetooth, sonido, brillo, batería, disco, teclado, descargas, papelera y un reloj con tus próximos eventos y un botón para unirte a la videollamada. Haz clic izquierdo en un icono de la bandeja para abrir su panel. Haz clic derecho o Control-clic en un elemento de la barra para **Mover a Más** u **Ocultar**, o en un elemento de Más (⌃) para **Mover a la barra** u **Ocultar**. Ambos menús incluyen **Configurar bandeja…**. Haz clic derecho en el botón Más o en el de unirte a la llamada para abrir el menú de la barra.
 
+**Docker** aparece en la bandeja cuando Cala detecta una instalación local. Haz clic en la ballena para gestionar contenedores, imágenes y volúmenes.
+
 **Tu correo, en la bandeja.** Un sobre con el conteo de no leídos de tus cuentas de Gmail, iCloud o Yahoo; lee, archiva o elimina sin abrir el navegador. Mira [Correo](#correo).
 
 **¿Por qué mi Mac va lento?** El panel de CPU y memoria te dice qué app pesa más y te recomienda reiniciar cuando hace falta.
