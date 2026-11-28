@@ -56,6 +56,8 @@ final class TaskbarModel: ObservableObject {
     private var trayRunID: UUID?
     private var usageObserver: AnyCancellable?
     private var powerSource: CFRunLoopSource?
+    /// One per power watch: a callback queued before the watch stopped (Battery hidden) is dropped.
+    private var powerRunID: UUID?
     /// Tray items on screen (bar or More), set by `TrayModule`. `refreshTray` reads only what these show.
     var shownTray = Set<String>()
 
@@ -82,19 +84,28 @@ final class TaskbarModel: ObservableObject {
         guard isRunning, trayRunID == nil else { return }
         let run = UUID()
         trayRunID = run
+        trayVisible = true
+    }
+
+    /// Follows the usage readings while the usage service runs (its tray item is shown).
+    func startUsageFeed() {
+        guard let run = trayRunID, usageObserver == nil else { return }
         usageObserver = UsageService.shared.$providers.receive(on: DispatchQueue.main).sink { [weak self] providers in
-            guard let self, self.trayRunID == run else { return }
+            guard let self, self.trayRunID == run, self.usageObserver != nil else { return }
             self.usage = providers
         }
-        trayVisible = true
+    }
+
+    func stopUsageFeed() {
+        usageObserver?.cancel()
+        usageObserver = nil
     }
 
     func stopTray() {
         trayRunID = nil
         trayVisible = false
         trayHover = nil
-        usageObserver?.cancel()
-        usageObserver = nil
+        stopUsageFeed()
         stopPowerWatch()
         shownTray = []
         photoLoading = false
@@ -111,13 +122,14 @@ final class TaskbarModel: ObservableObject {
     /// so there is no polling and no CPU cost while nothing happens.
     func startPowerWatch() {
         guard trayRunID != nil, powerSource == nil else { return }
+        powerRunID = UUID()
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         guard let src = IOPSNotificationCreateRunLoopSource({ ctx in
             guard let ctx else { return }
             let m = Unmanaged<TaskbarModel>.fromOpaque(ctx).takeUnretainedValue()
-            let run = m.trayRunID
+            let run = m.powerRunID
             DispatchQueue.main.async { [weak m] in
-                guard let m, let run, m.trayRunID == run else { return }
+                guard let m, let run, m.powerRunID == run else { return }
                 m.batt = SystemTray.battery()
             }
         }, ctx)?.takeRetainedValue() else { return }
@@ -127,6 +139,7 @@ final class TaskbarModel: ObservableObject {
     }
 
     func stopPowerWatch() {
+        powerRunID = nil
         if let powerSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes)
             CFRunLoopSourceInvalidate(powerSource)

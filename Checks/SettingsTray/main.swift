@@ -190,3 +190,13 @@ print("PASS Services stop in reverse order and start in declaration order")
 guard TrayServicePlan.summary(running: [.calendar, .wifi], stopped: [.mail], started: []) ==
         "tray services: running=wifi,calendar stopped=mail started=-" else { fatalError("FAIL tray services log line") }
 print("PASS Tray services log line")
+let mailHidden = shown(hiding: [trayMail, trayBT])
+guard !TrayServicePlan.acceptsClick(trayMail, shown: mailHidden, placeable: placeable),
+      !TrayServicePlan.acceptsClick(trayBT, shown: mailHidden, placeable: placeable),
+      TrayServicePlan.acceptsClick(trayWifi, shown: mailHidden, placeable: placeable),
+      TrayServicePlan.acceptsClick(trayWifi, shown: shown(hiding: [], more: [trayWifi]), placeable: placeable),
+      TrayServicePlan.acceptsClick(trayMore, shown: mailHidden, placeable: placeable),
+      TrayServicePlan.acceptsClick(trayClock, shown: mailHidden, placeable: placeable) else {
+    fatalError("FAIL a late click on a hidden item opens nothing; More, the clock and items in More still open")
+}
+print("PASS A late click on a hidden item opens nothing; More, the clock and items in More still open")

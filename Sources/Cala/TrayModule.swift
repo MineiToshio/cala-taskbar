@@ -30,12 +30,8 @@ final class TrayModule: CalaModule {
         lastTray = .distantPast; lastCalendar = .distantPast; lastMonitor = .distantPast
         MenuBarIcons.apply(store)
         controller.model.startTray()
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self, self.runID == run, self.services.contains(.usage), self.usageVisible else { return }
-            UsageService.shared.refresh()
-        }
+        // Back within the 3 s grace after turning the tray off: keep mail's cached bodies even if Mail stays hidden.
+        MainActor.assumeIsolated { MailService.shared.cancelPendingPurge() }
         // Hiding or showing an item starts or stops only its own services; other layout changes do nothing.
         placeObserver = store.$config.map(Self.shownItems).removeDuplicates().dropFirst()
             .receive(on: DispatchQueue.main).sink { [weak self] shown in
@@ -52,20 +48,19 @@ final class TrayModule: CalaModule {
         placeObserver?.cancel()
         placeObserver = nil
         Users.cancelSwitch()
-        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
-        wakeObserver = nil
         flyout?.stop()
         flyout = nil
         bar.controller?.closeFlyout()
         for service in TrayServicePlan.transition(from: services, to: []).stop { stop(service) }
         services.removeAll()
-        if shellReady {
-            MainActor.assumeIsolated {
-                // Turning the tray off deletes mail's cached bodies, also when a hidden Mail item had already stopped
-                // sync; quitting (or an update relaunch) keeps them.
-                if !ModuleRegistry.shared.isShuttingDown { MailService.shared.purgeCache() }
-                MailKeychainNoticeController.shared.dismiss()
-            }
+        MainActor.assumeIsolated {
+            // Also when Mail was hidden (its service already stopped): a sign-in started from Settings still holds an
+            // IMAP socket, and stop() closes it. It is idempotent.
+            MailService.shared.stop()
+            MailKeychainNoticeController.shared.dismiss()
+            // Turning the tray off deletes mail's cached bodies, also when a hidden Mail item had already stopped
+            // sync; quitting (or an update relaunch) keeps them.
+            if shellReady, !ModuleRegistry.shared.isShuttingDown { MailService.shared.purgeCache() }
         }
         bar.controller?.model.stopTray()
         if ModuleRegistry.shared.isShuttingDown { MenuBarIcons.onQuit(store) }
@@ -117,6 +112,14 @@ final class TrayModule: CalaModule {
             let visible = usageVisible
             UsageService.shared.start(store: store, visible: visible)
             UsagePace.shared.start(store: store)
+            bar.controller?.model.startUsageFeed()
+            let run = runID
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                guard let self, self.runID == run, self.services.contains(.usage), self.usageVisible else { return }
+                UsageService.shared.refresh()
+            }
             if visible { UsageService.shared.refresh() }
         case .mail:
             MainActor.assumeIsolated {
@@ -136,6 +139,9 @@ final class TrayModule: CalaModule {
         case .system: SystemMonitor.shared.stop()
         case .disk: DiskService.shared.stop()
         case .usage:
+            if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+            wakeObserver = nil
+            bar.controller?.model.stopUsageFeed()
             UsagePace.shared.stop()
             UsageService.shared.stop()
         case .mail:
@@ -180,8 +186,13 @@ final class TrayModule: CalaModule {
         click(traySystem, bar: first, controller: controller)
     }
 
+    /// Whether a service runs now (callers outside the tray, e.g. the Cleanup window's disk rescan).
+    func isServiceRunning(_ service: TrayService) -> Bool { isRunning && services.contains(service) }
+
     func click(_ id: String, bar: Bar, controller: BarController) {
-        guard isRunning else { return }
+        // A click that arrives after its item was hidden (late event, accessibility action) opens nothing.
+        guard isRunning, TrayServicePlan.acceptsClick(id, shown: controller.model.shownTray,
+                                                      placeable: TrayItems.all.map(\.id)) else { return }
         if id == trayJoin {
             controller.closeFlyout()
             if let url = CalendarLogic.joinCandidate(CalendarService.shared.events, now: Date())?.joinURL { NSWorkspace.shared.open(url) }

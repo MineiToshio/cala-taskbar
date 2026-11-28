@@ -68,6 +68,11 @@ enum TrayServicePlan {
          TrayService.allCases.filter { wanted.contains($0) && !running.contains($0) })
     }
 
+    /// A click opens a panel only for a shown item. Ids that cannot be placed (More, the clock, Join) always can.
+    static func acceptsClick(_ id: String, shown: Set<String>, placeable: [String]) -> Bool {
+        !placeable.contains(id) || shown.contains(id)
+    }
+
     /// The free-space reading feeds the Disk item and the restart advisor of the CPU item.
     static func readsDiskInfo(_ visible: Set<String>) -> Bool {
         visible.contains(trayDisk) || visible.contains(traySystem)
